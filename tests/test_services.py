@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -338,6 +339,87 @@ class _FailingGmailService:
         return _FailingGmailUsers()
 
 
+class _FakeGmailMetadataRequest:
+    def __init__(self, service: _FakeBatchGmailService, message: dict[str, Any]):
+        self._service = service
+        self.message = message
+
+    def execute(self) -> dict[str, Any]:
+        self._service.http_call_count += 1
+        self._service.standalone_metadata_calls += 1
+        return self.message
+
+
+class _FakeGmailListRequest:
+    def __init__(self, service: _FakeBatchGmailService, messages: list[dict[str, str]]):
+        self._service = service
+        self._messages = messages
+
+    def execute(self) -> dict[str, list[dict[str, str]]]:
+        self._service.http_call_count += 1
+        return {"messages": self._messages}
+
+
+class _FakeGmailBatchRequest:
+    def __init__(
+        self,
+        service: _FakeBatchGmailService,
+        callback: Callable[[str, dict[str, Any] | None, Exception | None], None],
+    ):
+        self._service = service
+        self._callback = callback
+        self._requests: list[tuple[str, _FakeGmailMetadataRequest]] = []
+
+    def add(self, request: _FakeGmailMetadataRequest, request_id: str) -> None:
+        self._requests.append((request_id, request))
+
+    def execute(self) -> None:
+        self._service.http_call_count += 1
+        for request_id, request in self._requests:
+            self._callback(request_id, request.message, None)
+
+
+class _FakeBatchGmailMessages:
+    def __init__(self, service: _FakeBatchGmailService):
+        self._service = service
+
+    def list(self, **kwargs: Any) -> _FakeGmailListRequest:
+        return _FakeGmailListRequest(self._service, self._service.listed_messages)
+
+    def get(self, **kwargs: Any) -> _FakeGmailMetadataRequest:
+        message_id = kwargs["id"]
+        return _FakeGmailMetadataRequest(self._service, self._service.metadata_by_id[message_id])
+
+
+class _FakeBatchGmailUsers:
+    def __init__(self, service: _FakeBatchGmailService):
+        self._service = service
+
+    def messages(self) -> _FakeBatchGmailMessages:
+        return _FakeBatchGmailMessages(self._service)
+
+
+class _FakeBatchGmailService:
+    def __init__(
+        self, listed_messages: list[dict[str, str]], metadata_by_id: dict[str, dict[str, Any]]
+    ):
+        self.listed_messages = listed_messages
+        self.metadata_by_id = metadata_by_id
+        self.http_call_count = 0
+        self.batch_request_count = 0
+        self.standalone_metadata_calls = 0
+
+    def users(self) -> _FakeBatchGmailUsers:
+        return _FakeBatchGmailUsers(self)
+
+    def new_batch_http_request(
+        self,
+        callback: Callable[[str, dict[str, Any] | None, Exception | None], None],
+    ) -> _FakeGmailBatchRequest:
+        self.batch_request_count += 1
+        return _FakeGmailBatchRequest(self, callback)
+
+
 class TestStructuredLogging:
     def test_imsg_contacts_logs_exception(self, monkeypatch, tmp_path):
         db_path = tmp_path / "chat.db"
@@ -387,6 +469,62 @@ class TestStructuredLogging:
         assert re.search(r"except.*pass", services_text) is None
         assert re.search(r"except.*return\s+\[\]", services_text) is None
         assert re.search(r"except.*return\s+False", services_text) is None
+
+
+class TestGmailContactsBatching:
+    def test_gmail_contacts_batches_metadata_fetches(self):
+        listed_messages = [
+            {"id": "msg-1", "threadId": "thread-1"},
+            {"id": "msg-2", "threadId": "thread-2"},
+            {"id": "msg-3", "threadId": "thread-2"},
+            {"id": "msg-4", "threadId": "thread-3"},
+        ]
+        metadata_by_id = {
+            "msg-1": {
+                "payload": {
+                    "headers": [
+                        {"name": "From", "value": "Alice <alice@example.com>"},
+                        {"name": "Subject", "value": "Alpha"},
+                        {"name": "Message-ID", "value": "<m1@example.com>"},
+                    ]
+                },
+                "labelIds": ["UNREAD", "INBOX"],
+                "internalDate": "1715000000000",
+            },
+            "msg-2": {
+                "payload": {
+                    "headers": [
+                        {"name": "From", "value": "Bob <bob@example.com>"},
+                        {"name": "Subject", "value": "Bravo"},
+                        {"name": "Message-ID", "value": "<m2@example.com>"},
+                    ]
+                },
+                "labelIds": ["INBOX"],
+                "internalDate": "1715000001000",
+            },
+            "msg-4": {
+                "payload": {
+                    "headers": [
+                        {"name": "From", "value": "Carol <carol@example.com>"},
+                        {"name": "Subject", "value": "Charlie"},
+                        {"name": "Message-ID", "value": "<m4@example.com>"},
+                    ]
+                },
+                "labelIds": ["UNREAD", "INBOX"],
+                "internalDate": "1715000002000",
+            },
+        }
+        service = _FakeBatchGmailService(listed_messages, metadata_by_id)
+
+        contacts = services.gmail_contacts(service, "acct@example.com", limit=4)
+
+        assert [contact.id for contact in contacts] == ["msg-1", "msg-2", "msg-4"]
+        assert [contact.name for contact in contacts] == ["Alice", "Bob", "Carol"]
+        assert [contact.unread for contact in contacts] == [1, 0, 1]
+        assert service.batch_request_count == 1
+        assert service.standalone_metadata_calls == 0
+        assert service.http_call_count == 2
+        assert service.http_call_count < len(contacts)
 
 
 class TestSqliteConnectionManagement:

@@ -58,6 +58,7 @@ ATTACHMENT_PLACEHOLDER = "\ufffc"
 SQLITE_LOCK_RETRIES = 2
 SQLITE_LOCK_RETRY_DELAY = 0.05
 SQLITE_CONNECT_TIMEOUT = 0.2
+GMAIL_METADATA_BATCH_SIZE = 50
 
 # Global contact book
 _contacts = ContactBook()
@@ -659,6 +660,78 @@ def _clean_email_body(body: str) -> str:
     return result
 
 
+def _gmail_metadata_headers() -> list[str]:
+    return ["From", "Subject", "Date", "Message-ID"]
+
+
+def _chunked(values: list[str], chunk_size: int) -> list[list[str]]:
+    return [values[i : i + chunk_size] for i in range(0, len(values), chunk_size)]
+
+
+def _fetch_gmail_metadata_batch(service, message_ids: list[str]) -> dict[str, dict]:
+    if not message_ids:
+        return {}
+
+    responses: dict[str, dict] = {}
+
+    def _make_batch_callback(
+        errors: dict[str, Exception],
+    ) -> Callable[[str, dict | None, Exception | None], None]:
+        def _collect_batch_result(
+            request_id: str,
+            response: dict | None,
+            exception: Exception | None,
+        ) -> None:
+            if exception is not None:
+                errors[request_id] = exception
+                return
+            if response is not None:
+                responses[request_id] = response
+
+        return _collect_batch_result
+
+    if not hasattr(service, "new_batch_http_request"):
+        for message_id in message_ids:
+            responses[message_id] = (
+                service.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=message_id,
+                    format="metadata",
+                    metadataHeaders=_gmail_metadata_headers(),
+                )
+                .execute()
+            )
+        return responses
+
+    for batch_ids in _chunked(message_ids, GMAIL_METADATA_BATCH_SIZE):
+        batch_errors: dict[str, Exception] = {}
+        batch = service.new_batch_http_request(callback=_make_batch_callback(batch_errors))
+        for message_id in batch_ids:
+            request = (
+                service.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=message_id,
+                    format="metadata",
+                    metadataHeaders=_gmail_metadata_headers(),
+                )
+            )
+            batch.add(request, request_id=message_id)
+
+        batch.execute()
+
+        for message_id, exception in batch_errors.items():
+            logger.error(
+                "gmail_contacts metadata fetch failed "
+                f"(message_id={message_id!r}, error={exception!r})"
+            )
+
+    return responses
+
+
 def gmail_contacts(service, account_email: str, limit: int = 20) -> list[Contact]:
     try:
         result = (
@@ -670,27 +743,31 @@ def gmail_contacts(service, account_email: str, limit: int = 20) -> list[Contact
         messages = result.get("messages", [])
         contacts = []
         seen_threads: set[str] = set()
+        thread_messages: list[dict[str, str]] = []
         for m in messages:
             thread_id = m.get("threadId", m["id"])
             if thread_id in seen_threads:
                 continue
-            msg = (
-                service.users()
-                .messages()
-                .get(
-                    userId="me",
-                    id=m["id"],
-                    format="metadata",
-                    metadataHeaders=["From", "Subject", "Date", "Message-ID"],
-                )
-                .execute()
-            )
-            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+            thread_messages.append(m)
+            seen_threads.add(thread_id)
+
+        metadata_by_id = _fetch_gmail_metadata_batch(
+            service, [message["id"] for message in thread_messages]
+        )
+
+        for m in thread_messages:
+            msg = metadata_by_id.get(m["id"])
+            if not msg:
+                continue
+
+            thread_id = m.get("threadId", m["id"])
+            payload = msg.get("payload", {})
+            raw_headers = payload.get("headers", [])
+            headers = {h["name"]: h["value"] for h in raw_headers}
             raw_from = headers.get("From", "Unknown")
             display_name, email_addr = _parse_email_address(raw_from)
             subject = headers.get("Subject", "(no subject)")
             msg_id_header = headers.get("Message-ID", "")
-            seen_threads.add(thread_id)
             unread = "UNREAD" in msg.get("labelIds", [])
             ts_ms = int(msg.get("internalDate", 0))
             msg_ts = datetime.fromtimestamp(ts_ms / 1000) if ts_ms else datetime.now()
