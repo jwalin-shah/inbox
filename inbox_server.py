@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 import ambient_notes
 from services import (
+    MLX_LARGE_MODEL,
     AmbientService,
     CalendarEvent,
     Contact,
@@ -27,6 +28,10 @@ from services import (
     Note,
     Reminder,
     add_google_account,
+    ai_briefing,
+    ai_extract_actions,
+    ai_summarize,
+    ai_triage,
     calendar_create_event,
     calendar_delete_event,
     calendar_events,
@@ -60,6 +65,8 @@ from services import (
     imsg_send,
     imsg_thread,
     init_contacts,
+    llm_large_is_loaded,
+    llm_large_is_loading,
     note_body,
     notes_list,
     parse_quick_event,
@@ -228,6 +235,19 @@ class ComposeRequest(BaseModel):
     subject: str
     body: str
     account: str = ""
+
+
+class TriageRequest(BaseModel):
+    conversations: list[dict] = []  # type: ignore[type-arg]
+
+
+class SummarizeRequest(BaseModel):
+    thread_id: str = ""
+    messages: list[dict] = []  # type: ignore[type-arg]
+
+
+class ExtractActionsRequest(BaseModel):
+    text: str
 
 
 # ── Server state ─────────────────────────────────────────────────────────────
@@ -1027,7 +1047,18 @@ async def autocomplete_endpoint(req: AutocompleteRequest):
 async def llm_status():
     from services import llm_is_loaded
 
-    return {"loaded": llm_is_loaded()}
+    return {
+        "loaded": llm_is_loaded(),
+        "small": {
+            "loaded": llm_is_loaded(),
+            "model_id": "mlx-community/Qwen3.5-0.8B-MLX-4bit",
+        },
+        "large": {
+            "loaded": llm_large_is_loaded(),
+            "model_id": MLX_LARGE_MODEL,
+            "loading": llm_large_is_loading(),
+        },
+    }
 
 
 @app.post("/llm/warmup")
@@ -1036,6 +1067,85 @@ async def llm_warmup_endpoint():
 
     await asyncio.to_thread(llm_warmup)
     return {"status": "ready"}
+
+
+# ── AI endpoints ─────────────────────────────────────────────────────────────
+
+
+@app.post("/ai/briefing")
+async def ai_briefing_endpoint():
+    """Compile a morning briefing from today's data."""
+    try:
+        today_dt = datetime.now()
+        events_raw = await asyncio.to_thread(calendar_events, state.cal_services, today_dt)
+        events = [
+            {
+                "summary": e.summary,
+                "start": e.start.isoformat(),
+                "end": e.end.isoformat(),
+                "all_day": e.all_day,
+            }
+            for e in events_raw
+        ]
+    except Exception:
+        events = []
+
+    try:
+        reminders_raw = await asyncio.to_thread(reminders_list)
+        reminders = [
+            {"title": r.title, "completed": r.completed, "list_name": r.list_name}
+            for r in reminders_raw
+        ]
+    except Exception:
+        reminders = []
+
+    try:
+        all_convos: list[dict] = []  # type: ignore[type-arg]
+        for acct_email, svc in state.gmail_services.items():
+            try:
+                gmail_raw = await asyncio.to_thread(gmail_contacts, svc, acct_email, 20)
+                all_convos.extend({"source": "gmail", "unread": c.unread} for c in gmail_raw)
+            except Exception:
+                pass
+        imsg_raw = await asyncio.to_thread(lambda: imsg_contacts(limit=50))
+        all_convos.extend({"source": "imessage", "unread": c.unread} for c in imsg_raw)
+    except Exception:
+        all_convos = []
+
+    try:
+        gh_notifications = await asyncio.to_thread(github_notifications)
+        gh_notifs = [{"unread": n.unread} for n in gh_notifications]
+    except Exception:
+        gh_notifs = []
+
+    try:
+        gh_prs = await asyncio.to_thread(github_pulls)
+    except Exception:
+        gh_prs = []
+
+    result = await asyncio.to_thread(ai_briefing, events, reminders, all_convos, gh_notifs, gh_prs)
+    return result
+
+
+@app.post("/ai/triage")
+async def ai_triage_endpoint(req: TriageRequest):
+    """Return priority mapping for a list of conversations."""
+    result = await asyncio.to_thread(ai_triage, req.conversations)
+    return result
+
+
+@app.post("/ai/summarize")
+async def ai_summarize_endpoint(req: SummarizeRequest):
+    """Summarize an email thread."""
+    result = await asyncio.to_thread(ai_summarize, req.thread_id, req.messages)
+    return result
+
+
+@app.post("/ai/extract-actions")
+async def ai_extract_actions_endpoint(req: ExtractActionsRequest):
+    """Extract action items from message text."""
+    result = await asyncio.to_thread(ai_extract_actions, req.text)
+    return result
 
 
 # ── Accounts ─────────────────────────────────────────────────────────────────

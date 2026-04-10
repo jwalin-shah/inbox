@@ -2521,13 +2521,24 @@ class DictationService:
 
 MLX_MODEL = "mlx-community/Qwen3.5-0.8B-MLX-4bit"
 
+# Large model: configurable via env var, defaults to a compact 3B MLX model
+MLX_LARGE_MODEL = os.environ.get(
+    "INBOX_LLM_LARGE",
+    "mlx-community/Qwen2.5-3B-Instruct-4bit",
+)
+
 _llm_lock = threading.Lock()
 _llm_model: object | None = None
 _llm_tokenizer: object | None = None
 
+_llm_large_lock = threading.Lock()
+_llm_large_model: object | None = None
+_llm_large_tokenizer: object | None = None
+_llm_large_loading: bool = False
+
 
 def _ensure_llm_loaded() -> None:
-    """Load model + tokenizer once. Thread-safe."""
+    """Load small model + tokenizer once. Thread-safe."""
     global _llm_model, _llm_tokenizer
     if _llm_model is not None:
         return
@@ -2539,6 +2550,26 @@ def _ensure_llm_loaded() -> None:
         _llm_model, _llm_tokenizer = mlx_lm.load(MLX_MODEL)[:2]  # type: ignore[assignment]
 
 
+def _ensure_large_llm_loaded() -> bool:
+    """Load large model lazily. Returns True if loaded, False if unavailable."""
+    global _llm_large_model, _llm_large_tokenizer, _llm_large_loading
+    if _llm_large_model is not None:
+        return True
+    with _llm_large_lock:
+        if _llm_large_model is not None:
+            return True
+        _llm_large_loading = True
+        try:
+            import mlx_lm
+
+            _llm_large_model, _llm_large_tokenizer = mlx_lm.load(MLX_LARGE_MODEL)[:2]  # type: ignore[assignment]
+            return True
+        except Exception:
+            return False
+        finally:
+            _llm_large_loading = False
+
+
 def get_outlines_model() -> object:
     """Return an Outlines-wrapped model for constrained generation."""
     _ensure_llm_loaded()
@@ -2547,8 +2578,20 @@ def get_outlines_model() -> object:
     return outlines.models.mlxlm(MLX_MODEL)  # type: ignore[attr-defined]
 
 
+def get_large_outlines_model() -> object | None:
+    """Return an Outlines-wrapped large model, or None if unavailable."""
+    if not _ensure_large_llm_loaded():
+        return None
+    import outlines
+
+    try:
+        return outlines.models.mlxlm(MLX_LARGE_MODEL)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+
 def llm_complete(prompt: str, max_tokens: int = 64, temperature: float = 0.7) -> str:
-    """Free-form text completion. Used for autocomplete suggestions."""
+    """Free-form text completion using the small model."""
     _ensure_llm_loaded()
     import mlx_lm
     from mlx_lm.sample_utils import make_sampler
@@ -2562,8 +2605,24 @@ def llm_complete(prompt: str, max_tokens: int = 64, temperature: float = 0.7) ->
     )
 
 
+def llm_large_complete(prompt: str, max_tokens: int = 256, temperature: float = 0.3) -> str | None:
+    """Free-form text completion using the large model. Returns None if unavailable."""
+    if not _ensure_large_llm_loaded():
+        return None
+    import mlx_lm
+    from mlx_lm.sample_utils import make_sampler
+
+    return mlx_lm.generate(
+        _llm_large_model,  # type: ignore[arg-type]
+        _llm_large_tokenizer,  # type: ignore[arg-type]
+        prompt=prompt,
+        max_tokens=max_tokens,
+        sampler=make_sampler(temp=temperature),
+    )
+
+
 def generate_json(prompt: str, schema: type[PydanticBaseModel]) -> PydanticBaseModel:
-    """Generate constrained JSON matching a Pydantic schema. Used for extraction."""
+    """Generate constrained JSON matching a Pydantic schema using small model."""
     import outlines
 
     model = get_outlines_model()
@@ -2571,13 +2630,34 @@ def generate_json(prompt: str, schema: type[PydanticBaseModel]) -> PydanticBaseM
     return generator(prompt)
 
 
+def generate_json_large(prompt: str, schema: type[PydanticBaseModel]) -> PydanticBaseModel | None:
+    """Generate constrained JSON using large model. Returns None if unavailable."""
+    model = get_large_outlines_model()
+    if model is None:
+        return None
+    import outlines
+
+    generator = outlines.generate.json(model, schema)  # type: ignore[attr-defined]
+    return generator(prompt)
+
+
 def llm_is_loaded() -> bool:
-    """Check if the LLM model is loaded."""
+    """Check if the small LLM model is loaded."""
     return _llm_model is not None
 
 
+def llm_large_is_loaded() -> bool:
+    """Check if the large LLM model is loaded."""
+    return _llm_large_model is not None
+
+
+def llm_large_is_loading() -> bool:
+    """Check if the large model is currently being loaded."""
+    return _llm_large_loading
+
+
 def llm_warmup() -> None:
-    """Pre-load the model."""
+    """Pre-load the small model."""
     _ensure_llm_loaded()
 
 
@@ -2683,3 +2763,255 @@ def autocomplete(
     result = llm_complete(prompt, max_tokens=max_tokens, temperature=temperature)
     result = result.strip()
     return result if result else None
+
+
+# ── AI Briefing ─────────────────────────────────────────────────────────────
+
+BRIEFING_PROMPT = """\
+You are a helpful assistant. Summarize the user's day in 2-3 sentences based on this data:
+
+Calendar events today: {events}
+Pending reminders: {reminders}
+Unread messages: {unread_imsg} iMessage, {unread_gmail} Gmail
+GitHub notifications: {gh_unread} unread, {gh_prs} PRs awaiting review
+
+Write a concise, friendly morning briefing paragraph."""
+
+
+def ai_briefing(
+    events: list[dict],  # type: ignore[type-arg]
+    reminders: list[dict],  # type: ignore[type-arg]
+    conversations: list[dict],  # type: ignore[type-arg]
+    github_notifications: list[dict],  # type: ignore[type-arg]
+    github_prs: list[dict],  # type: ignore[type-arg]
+) -> dict:  # type: ignore[type-arg]
+    """Compile a morning briefing. Includes LLM summary if large model is loaded."""
+    unread_imsg = sum(c.get("unread", 0) for c in conversations if c.get("source") == "imessage")
+    unread_gmail = sum(c.get("unread", 0) for c in conversations if c.get("source") == "gmail")
+    gh_unread = sum(1 for n in github_notifications if n.get("unread"))
+    gh_prs = len(github_prs)
+    pending_reminders = [r for r in reminders if not r.get("completed")]
+
+    result: dict = {  # type: ignore[type-arg]
+        "events": events,
+        "pending_reminders": pending_reminders,
+        "unread_counts": {
+            "imessage": unread_imsg,
+            "gmail": unread_gmail,
+            "github_notifications": gh_unread,
+            "github_prs": gh_prs,
+        },
+        "summary": None,
+    }
+
+    # Attempt large-model summary
+    event_titles = ", ".join(e.get("summary", "?") for e in events[:5]) or "none"
+    reminder_titles = ", ".join(r.get("title", "?") for r in pending_reminders[:5]) or "none"
+    prompt = BRIEFING_PROMPT.format(
+        events=event_titles,
+        reminders=reminder_titles,
+        unread_imsg=unread_imsg,
+        unread_gmail=unread_gmail,
+        gh_unread=gh_unread,
+        gh_prs=gh_prs,
+    )
+    summary = llm_large_complete(prompt, max_tokens=150, temperature=0.4)
+    if summary:
+        result["summary"] = summary.strip()
+
+    return result
+
+
+# ── AI Triage ────────────────────────────────────────────────────────────────
+
+PRIORITY_VALUES = ("urgent", "normal", "low")
+
+TRIAGE_PROMPT = """\
+Classify the priority of this conversation as one of: urgent, normal, low.
+Source: {source}
+Name: {name}
+Snippet: {snippet}
+Unread: {unread}
+
+Respond with exactly one word: urgent, normal, or low."""
+
+
+def ai_triage(conversations: list[dict]) -> dict[str, str]:  # type: ignore[type-arg]
+    """Return priority mapping {conv_id: priority} for a list of conversations.
+
+    Uses large model with constrained gen if available, otherwise defaults to "normal".
+    """
+    if not conversations:
+        return {}
+
+    model = get_large_outlines_model()
+    if model is None:
+        return {c.get("id", ""): "normal" for c in conversations}
+
+    try:
+        import outlines
+
+        choices_gen = outlines.generate.choice(model, list(PRIORITY_VALUES))  # type: ignore[attr-defined]
+        result: dict[str, str] = {}
+        for conv in conversations:
+            conv_id = conv.get("id", "")
+            if not conv_id:
+                continue
+            snippet = conv.get("snippet", "")[:120]
+            prompt = TRIAGE_PROMPT.format(
+                source=conv.get("source", "?"),
+                name=conv.get("name", "?"),
+                snippet=snippet,
+                unread=conv.get("unread", 0),
+            )
+            try:
+                priority = choices_gen(prompt)
+                result[conv_id] = priority if priority in PRIORITY_VALUES else "normal"
+            except Exception:
+                result[conv_id] = "normal"
+        return result
+    except Exception:
+        return {c.get("id", ""): "normal" for c in conversations}
+
+
+# ── AI Summarization ─────────────────────────────────────────────────────────
+
+SUMMARIZE_PROMPT = """\
+Summarize this email thread. Extract:
+1. A brief summary (1-2 sentences)
+2. Key points (bullet list)
+3. Action items for the reader
+4. Decisions made
+
+Thread:
+{thread_text}"""
+
+
+def ai_summarize(thread_id: str, messages: list[dict]) -> dict:  # type: ignore[type-arg]
+    """Summarize an email thread. Only meaningful for 5+ message threads."""
+    if len(messages) < 5:
+        return {
+            "summary": None,
+            "key_points": [],
+            "action_items": [],
+            "decisions": [],
+            "skipped": True,
+        }
+
+    # Build thread text
+    parts = []
+    for msg in messages[-20:]:  # cap at 20 messages to fit context
+        sender = msg.get("sender", "?")
+        body = msg.get("body", "").strip()[:500]
+        parts.append(f"{sender}: {body}")
+    thread_text = "\n\n".join(parts)
+
+    prompt = SUMMARIZE_PROMPT.format(thread_text=thread_text)
+    raw = llm_large_complete(prompt, max_tokens=400, temperature=0.3)
+
+    if not raw:
+        return {
+            "summary": None,
+            "key_points": [],
+            "action_items": [],
+            "decisions": [],
+            "skipped": False,
+        }
+
+    # Parse the free-form output into structured fields
+    summary_text = raw.strip()
+    lines = summary_text.split("\n")
+    summary = lines[0].strip() if lines else summary_text
+
+    key_points: list[str] = []
+    action_items: list[str] = []
+    decisions: list[str] = []
+    current_section: list[str] = []
+    section_name = ""
+
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if "key point" in lower or "summary" in lower:
+            section_name = "key_points"
+            current_section = key_points
+        elif "action" in lower:
+            section_name = "action_items"
+            current_section = action_items
+        elif "decision" in lower:
+            section_name = "decisions"
+            current_section = decisions
+        elif stripped.startswith(("- ", "* ", "• ")) and current_section is not None:
+            # Remove leading list markers individually
+            bullet_stripped = stripped
+            for marker in ("- ", "* ", "• "):
+                if bullet_stripped.startswith(marker):
+                    bullet_stripped = bullet_stripped[len(marker) :]
+                    break
+            current_section.append(bullet_stripped.strip())
+        elif section_name and stripped:
+            current_section.append(stripped)
+
+    return {
+        "summary": summary,
+        "key_points": key_points[:8],
+        "action_items": action_items[:8],
+        "decisions": decisions[:5],
+        "skipped": False,
+    }
+
+
+# ── AI Action Extraction ──────────────────────────────────────────────────────
+
+ACTION_EXTRACT_PROMPT = """\
+Extract action items from this message. For each action item identify:
+- text: the action to take
+- deadline: date/time if mentioned (or null)
+- type: "task", "meeting", "follow-up", or "reminder"
+
+Message:
+{text}
+
+List action items as JSON. If none, return empty list."""
+
+
+def ai_extract_actions(text: str) -> dict:  # type: ignore[type-arg]
+    """Extract action items from message text. Returns {actions: [...]}."""
+    if len(text.strip()) < 20:
+        return {"actions": []}
+
+    try:
+        from pydantic import BaseModel as _PM
+
+        class ActionItem(_PM):
+            text: str
+            deadline: str | None = None
+            type: str = "task"
+
+        class ActionList(_PM):
+            actions: list[ActionItem]
+
+        prompt = ACTION_EXTRACT_PROMPT.format(text=text[:1000])
+
+        # Try large model first for better quality
+        result = generate_json_large(prompt, ActionList)  # type: ignore[arg-type]
+        if result is None:
+            result = generate_json(prompt, ActionList)  # type: ignore[arg-type]
+
+        actions = []
+        for item in result.actions:  # type: ignore[union-attr]
+            action_type = (
+                item.type if item.type in ("task", "meeting", "follow-up", "reminder") else "task"
+            )
+            actions.append(
+                {
+                    "text": item.text,
+                    "deadline": item.deadline,
+                    "type": action_type,
+                }
+            )
+        return {"actions": actions}
+    except Exception:
+        return {"actions": []}

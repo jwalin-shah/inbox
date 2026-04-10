@@ -20,6 +20,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.widgets import (
     Footer,
     Header,
@@ -58,6 +59,13 @@ def _format_request_error(action: str, exc: Exception) -> str:
 # ── UI Widgets ───────────────────────────────────────────────────────────────
 
 
+_PRIORITY_ICONS = {
+    "urgent": ("🔴", "bold red"),
+    "normal": ("⚪", "dim"),
+    "low": ("🔵", "dim blue"),
+}
+
+
 class ConversationItem(ListItem):
     def __init__(self, data: dict) -> None:
         super().__init__()
@@ -68,6 +76,13 @@ class ConversationItem(ListItem):
         source = d.get("source", "")
         source_icon = "󰍦" if source == "imessage" else "󰊫"
         t = Text()
+
+        # Priority indicator (only when non-normal or explicitly set)
+        priority = d.get("_priority", "")
+        if priority and priority != "normal":
+            icon, style = _PRIORITY_ICONS.get(priority, ("⚪", "dim"))
+            t.append(f"{icon} ", style=style)
+
         t.append(f"{source_icon} ", style="dim")
 
         if source == "gmail":
@@ -323,11 +338,27 @@ class MessageView(Static):
     }
     """
     messages: reactive[list[dict]] = reactive([], recompose=True)
+    ai_summary: reactive[dict | None] = reactive(None, recompose=True)
 
     def compose(self) -> ComposeResult:
         if not self.messages:
             yield Label("[dim]Select a conversation[/]")
             return
+
+        # Show AI summary banner if available
+        if self.ai_summary:
+            s = self.ai_summary
+            t = Text()
+            t.append("✨ AI Summary\n", style="bold cyan")
+            if s.get("summary"):
+                t.append(f"{s['summary']}\n", style="white")
+            if s.get("action_items"):
+                t.append("Actions: ", style="bold yellow")
+                t.append(", ".join(s["action_items"][:3]) + "\n", style="yellow")
+            yield Static(
+                Panel(t, border_style="cyan dim", padding=(0, 1)),
+            )
+
         for msg in self.messages:
             body = msg.get("body", "").strip()
             if not body:
@@ -511,6 +542,85 @@ class DetailView(Static):
         yield Static(t)
 
 
+# ── AI Widgets ───────────────────────────────────────────────────────────────
+
+
+class BriefingModal(ModalScreen):
+    """Modal overlay showing the morning briefing (Ctrl+B)."""
+
+    DEFAULT_CSS = """
+    BriefingModal {
+        align: center middle;
+    }
+    BriefingModal > Vertical {
+        width: 70;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    """
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, briefing: dict) -> None:
+        super().__init__()
+        self._briefing = briefing
+
+    def compose(self) -> ComposeResult:
+        d = self._briefing
+        t = Text()
+        t.append("Morning Briefing\n", style="bold cyan")
+        t.append("─" * 40 + "\n", style="dim")
+
+        summary = d.get("summary")
+        if summary:
+            t.append(f"{summary}\n\n", style="white")
+
+        counts = d.get("unread_counts", {})
+        imsg = counts.get("imessage", 0)
+        gmail = counts.get("gmail", 0)
+        gh_notifs = counts.get("github_notifications", 0)
+        gh_prs = counts.get("github_prs", 0)
+        t.append("📬 Unread\n", style="bold")
+        t.append(f"  iMessage: {imsg}  Gmail: {gmail}  GitHub: {gh_notifs}", style="white")
+        if gh_prs:
+            t.append(f"  ({gh_prs} PRs for review)", style="yellow")
+        t.append("\n\n")
+
+        events = d.get("events", [])
+        if events:
+            t.append(f"📅 Today — {len(events)} event(s)\n", style="bold")
+            for e in events[:5]:
+                summary_txt = e.get("summary", "?")
+                if e.get("all_day"):
+                    t.append(f"  • {summary_txt} (all day)\n", style="white")
+                else:
+                    try:
+                        start = datetime.fromisoformat(e["start"]).strftime("%H:%M")
+                        end = datetime.fromisoformat(e["end"]).strftime("%H:%M")
+                        t.append(f"  • {start}–{end} {summary_txt}\n", style="white")
+                    except (ValueError, KeyError):
+                        t.append(f"  • {summary_txt}\n", style="white")
+        else:
+            t.append("📅 No events today\n", style="dim")
+
+        t.append("\n")
+        pending = d.get("pending_reminders", [])
+        if pending:
+            t.append(f"☐ {len(pending)} pending reminder(s)\n", style="bold yellow")
+            for r in pending[:3]:
+                t.append(f"  • {r.get('title', '?')}\n", style="white")
+        else:
+            t.append("☐ All reminders done!\n", style="dim green")
+
+        t.append("\n[dim]Press Escape to close[/]\n", style="dim")
+
+        with Vertical():
+            yield Static(t)
+
+
 # ── Main App ─────────────────────────────────────────────────────────────────
 
 
@@ -562,6 +672,7 @@ class InboxApp(App):
         Binding("ctrl+n", "new_event", "New Event"),
         Binding("ctrl+d", "delete_event", "Delete Event"),
         Binding("ctrl+g", "jump_to_date", "Go to Date"),
+        Binding("ctrl+b", "morning_briefing", "Briefing"),
         Binding("escape", "clear_compose", "Clear"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
@@ -616,6 +727,12 @@ class InboxApp(App):
         self._gmail_labels: list[dict] = []
         # Gmail starred conversations (local cache for ★ display)
         self._gmail_starred: set[str] = set()
+        # AI triage priorities: {conv_id: "urgent"|"normal"|"low"}
+        self._triage_priorities: dict[str, str] = {}
+        # AI thread summary cache: {thread_id: summary_dict}
+        self._thread_summaries: dict[str, dict] = {}
+        # AI action items cache
+        self._message_actions: dict[str, list] = {}  # type: ignore[type-arg]
 
     def _update_github_badge(self) -> None:
         """Update the GitHub tab label with the unread count badge.
@@ -1239,6 +1356,15 @@ class InboxApp(App):
         self._render_sidebar()
         if status_override:
             self.query_one("#status", Static).update(status_override)
+        # Fire-and-forget triage for conversations with messages (non-blocking)
+        if self.conversations:
+            triage_convos = [
+                c
+                for c in self.conversations
+                if c.get("source") in ("imessage", "gmail") and c.get("id")
+            ][:20]  # cap to avoid overwhelming the model
+            if triage_convos:
+                self._do_triage_conversations(triage_convos)
 
     def _merge_status_errors(self, errors: list[str]) -> str | None:
         unique_errors = list(dict.fromkeys(errors))
@@ -1554,6 +1680,7 @@ class InboxApp(App):
     def _show_thread(self, msgs: list[dict], conv: dict) -> None:
         mv = self.query_one("#messages", MessageView)
         mv.messages = msgs
+        mv.ai_summary = None  # Clear previous summary
         mv.call_later(mv._scroll_to_bottom)
         name = conv.get("name", "?")
         source = conv.get("source", "")
@@ -1568,6 +1695,20 @@ class InboxApp(App):
             status = f"[bold]{name}[/]  [dim]{source}{acct_tag}[/]"
         self.query_one("#status", Static).update(status)
         self.query_one("#compose", Input).focus()
+        # Auto-summarize long Gmail threads
+        if source == "gmail" and len(msgs) >= 5:
+            thread_id = conv.get("thread_id") or conv.get("id", "")
+            if thread_id in self._thread_summaries:
+                mv.ai_summary = self._thread_summaries[thread_id]
+            else:
+                self._do_summarize_thread(conv, msgs)
+        # Fire-and-forget action extraction on the latest message body
+        if msgs:
+            last_msg = msgs[-1]
+            body = last_msg.get("body", "")
+            if len(body) > 100:
+                key = conv.get("id", "") or str(hash(body))
+                self._do_extract_actions(body, key)
 
     @work(thread=True, exit_on_error=False)
     def _load_note(self, note_data: dict) -> None:
@@ -2839,6 +2980,109 @@ class InboxApp(App):
                 compose = self.query_one("#compose", Input)
                 compose.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
                 self.query_one("#status", Static).update("[dim]Edit cancelled[/]")
+
+    # ── AI actions ───────────────────────────────────────────────────────
+
+    def action_morning_briefing(self) -> None:
+        """Fetch and show the morning briefing modal."""
+        self.query_one("#status", Static).update("[yellow]Loading briefing...[/]")
+        self._do_fetch_briefing()
+
+    @work(thread=True, exit_on_error=False)
+    def _do_fetch_briefing(self) -> None:
+        try:
+            briefing = self.client.ai_briefing()
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Briefing', exc)}[/]",
+            )
+            return
+        self.call_from_thread(self._show_briefing_modal, briefing)
+
+    def _show_briefing_modal(self, briefing: dict) -> None:
+        self.query_one("#status", Static).update("[dim]Press Escape to close briefing[/]")
+        self.push_screen(BriefingModal(briefing))
+
+    @work(thread=True, exit_on_error=False)
+    def _do_triage_conversations(self, conversations: list) -> None:  # type: ignore[type-arg]
+        """Fire-and-forget triage — updates priorities without blocking UI."""
+        try:
+            priorities = self.client.ai_triage(conversations)
+        except Exception:
+            return
+        if not priorities:
+            return
+        # Merge into local triage state
+        self._triage_priorities.update(priorities)
+        # Annotate current conversations with priority for display
+        changed = False
+        for conv in self.conversations:
+            conv_id = conv.get("id", "")
+            new_p = priorities.get(conv_id)
+            if new_p and conv.get("_priority") != new_p:
+                conv["_priority"] = new_p
+                changed = True
+        if changed:
+            self.call_from_thread(self._render_sidebar)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_summarize_thread(self, conv: dict, messages: list) -> None:  # type: ignore[type-arg]
+        """Summarize a Gmail thread and store in cache."""
+        thread_id = conv.get("thread_id") or conv.get("id", "")
+        if not thread_id:
+            return
+        if thread_id in self._thread_summaries:
+            return
+        try:
+            result = self.client.ai_summarize(thread_id=thread_id, messages=messages)
+        except Exception:
+            return
+        if result.get("skipped"):
+            return
+        self._thread_summaries[thread_id] = result
+        # If still viewing the same conversation, update the message view
+        if self.active_conv and (
+            self.active_conv.get("thread_id") == thread_id
+            or self.active_conv.get("id") == thread_id
+        ):
+            self.call_from_thread(self._show_thread_summary, result)
+
+    def _show_thread_summary(self, summary_data: dict) -> None:
+        """Prepend summary panel to the messages view."""
+        mv = self.query_one("#messages", MessageView)
+        if summary_data.get("summary"):
+            mv.ai_summary = summary_data
+        else:
+            mv.ai_summary = None
+
+    @work(thread=True, exit_on_error=False)
+    def _do_extract_actions(self, text: str, key: str) -> None:
+        """Extract actions from a message body and store in cache."""
+        if key in self._message_actions:
+            return
+        try:
+            result = self.client.ai_extract_actions(text=text)
+            actions = result.get("actions", [])
+            if actions:
+                self._message_actions[key] = actions
+        except Exception:
+            pass
+
+    def action_view_message_actions(self) -> None:
+        """View extracted action items for the current message."""
+        if not self.active_conv:
+            return
+        conv_id = self.active_conv.get("id", "")
+        actions = self._message_actions.get(conv_id, [])
+        if not actions:
+            self.query_one("#status", Static).update("[dim]No action items detected[/]")
+            return
+        # Show actions in status bar (brief) and detail view if visible
+        action_texts = "; ".join(a.get("text", "?") for a in actions[:3])
+        self.query_one("#status", Static).update(f"[cyan]Actions: {action_texts}[/]")
+
+    # ── Cleanup ──────────────────────────────────────────────────────────
 
     def _cleanup_resources(self) -> None:
         if self._poll_timer is not None:
