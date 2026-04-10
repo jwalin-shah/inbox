@@ -439,6 +439,84 @@ def test_sustained_outage_threshold_message() -> None:
     assert InboxApp._SUSTAINED_OUTAGE_THRESHOLD == 3
 
 
+def test_status_bar_clears_unreachable_message_after_recovery() -> None:
+    """After sustained outage recovery, the status bar should drop the
+    'Server unreachable' red text and restore the normal tab status."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = [{"id": "c1", "source": "imessage", "unread": 0}]
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
+
+        app = _make_app(client)
+        app.conversations = [{"id": "c1", "source": "imessage", "unread": 0}]
+
+        async with app.run_test() as pilot:
+            # Simulate sustained outage state
+            app._consecutive_errors = InboxApp._SUSTAINED_OUTAGE_THRESHOLD
+            app._poll_had_error = True
+            app.query_one("#status", Static).update(
+                "[red]Server unreachable — press Ctrl+R to retry[/]"
+            )
+            await pilot.pause()
+            assert "unreachable" in _status_text(app)
+
+            # Recovery poll (unchanged data path)
+            app._bg_poll()
+            await pilot.pause(0.1)
+
+            status = _status_text(app)
+            assert "unreachable" not in status, (
+                f"Status bar still shows outage after recovery: {status!r}"
+            )
+            assert "conversations" in status or "conversation" in status
+
+    asyncio.run(runner())
+
+
+def test_status_bar_clears_after_recovery_with_changed_data() -> None:
+    """Same recovery guarantee but via the _populate (changed-data) path."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = [
+            {"id": "c1", "source": "imessage", "unread": 0},
+            {"id": "c2", "source": "gmail", "unread": 2},
+        ]
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
+
+        app = _make_app(client)
+        # Different from return_value → changed=True path
+        app.conversations = [{"id": "c1", "source": "imessage", "unread": 0}]
+
+        async with app.run_test() as pilot:
+            app._consecutive_errors = InboxApp._SUSTAINED_OUTAGE_THRESHOLD
+            app._poll_had_error = True
+            app.query_one("#status", Static).update(
+                "[red]Server unreachable — press Ctrl+R to retry[/]"
+            )
+            await pilot.pause()
+            assert "unreachable" in _status_text(app)
+
+            app._bg_poll()
+            await pilot.pause(0.1)
+
+            status = _status_text(app)
+            assert "unreachable" not in status
+            assert app._poll_had_error is False
+            assert app._consecutive_errors == 0
+
+    asyncio.run(runner())
+
+
 def test_action_refresh_resets_consecutive_errors() -> None:
     """Ctrl+R (action_refresh) resets the outage counter so retry works."""
 
