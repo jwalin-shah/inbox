@@ -80,3 +80,6 @@ For assertions that use curl against the server:
 - LLM model loading takes 5-30 seconds; tests with real models need longer timeouts
 - In some automation sessions, `curl http://localhost:9849/...` may fail while `http://127.0.0.1:9849/...` succeeds; prefer `127.0.0.1` fallback when health checks are unexpectedly flaky
 - tuistory may occasionally miss `Ctrl+<number>` tab shortcuts; use click-based tab switching as a fallback and record the workaround in evidence
+- tuistory may not reliably distinguish `Ctrl+Shift+<key>` from `Ctrl+<key>` in some terminal sessions (notably account re-auth shortcuts); retry with compose unfocused and capture status-bar evidence if still ambiguous
+- For reminder mutation corroboration (`complete`, `edit`, `delete`), create unique test titles and fetch fresh IDs immediately before API checks to avoid ambiguity from duplicate-title records
+- For Reminders TUI mutation keys (`c`, `e`, `d`), blur/unfocus the compose input before sending action keys, otherwise keypresses may be consumed by compose and produce flaky outcomes
