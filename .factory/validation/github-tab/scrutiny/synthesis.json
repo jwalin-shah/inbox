@@ -1,7 +1,7 @@
 {
   "milestone": "github-tab",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -21,26 +21,13 @@
   },
   "reviewsSummary": {
     "total": 1,
-    "passed": 0,
-    "failed": 1,
-    "failedFeatures": [
-      "github-tui-tab"
-    ]
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "github-tui-tab",
-      "severity": "blocking",
-      "description": "GitHub action handlers can operate on a stale `active_notification` after the sidebar becomes empty because the empty-state render path does not clear selection state."
-    }
-  ],
+  "blockingIssues": [],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [],
-  "rejectedObservations": [
-    {
-      "observation": "The feature worker did not use tuistory despite fullstack-worker guidance suggesting visual TUI validation.",
-      "reason": "ambiguous"
-    }
-  ],
-  "previousRound": null
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/github-tab/scrutiny/synthesis.round1.json"
 }
