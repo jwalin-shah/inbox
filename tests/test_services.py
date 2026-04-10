@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import re
+import sqlite3
 from datetime import datetime, timedelta
+from io import StringIO
+from pathlib import Path
+from typing import Any
 
+from loguru import logger
+
+import services
 from services import (
     _build_event_body,
     _clean_body,
@@ -307,3 +315,75 @@ class TestBuildEventBody:
         end = datetime(2025, 6, 16)
         body = _build_event_body("Event", start, end, all_day=True)
         assert "location" not in body
+
+
+# ── structured logging ─────────────────────────────────────────────────────
+
+
+class _FailingGmailMessages:
+    def send(self, *args: Any, **kwargs: Any) -> _FailingGmailMessages:
+        return self
+
+    def execute(self) -> None:
+        raise RuntimeError("gmail send exploded")
+
+
+class _FailingGmailUsers:
+    def messages(self) -> _FailingGmailMessages:
+        return _FailingGmailMessages()
+
+
+class _FailingGmailService:
+    def users(self) -> _FailingGmailUsers:
+        return _FailingGmailUsers()
+
+
+class TestStructuredLogging:
+    def test_imsg_contacts_logs_exception(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "chat.db"
+        db_path.write_text("")
+        monkeypatch.setattr(services, "IMSG_DB", db_path)
+
+        def boom(*args: Any, **kwargs: Any) -> None:
+            raise sqlite3.OperationalError("chat db exploded")
+
+        monkeypatch.setattr(services.sqlite3, "connect", boom)
+        sink = StringIO()
+        sink_id = logger.add(sink, format="{message}")
+        try:
+            assert services.imsg_contacts() == []
+        finally:
+            logger.remove(sink_id)
+
+        log_output = sink.getvalue()
+        assert "imsg_contacts" in log_output
+        assert "limit=30" in log_output
+        assert "chat db exploded" in log_output
+
+    def test_gmail_send_logs_exception(self):
+        contact = services.Contact(
+            id="msg-1",
+            name="Alice",
+            source="gmail",
+            reply_to="alice@example.com",
+            snippet="Hello",
+            thread_id="thread-1",
+        )
+        sink = StringIO()
+        sink_id = logger.add(sink, format="{message}")
+        try:
+            assert services.gmail_send(_FailingGmailService(), contact, "hello there") is False
+        finally:
+            logger.remove(sink_id)
+
+        log_output = sink.getvalue()
+        assert "gmail_send" in log_output
+        assert "reply_to='alice@example.com'" in log_output
+        assert "gmail send exploded" in log_output
+
+    def test_services_has_no_silent_exception_swallowing(self):
+        services_text = Path(services.__file__).read_text()
+
+        assert re.search(r"except.*pass", services_text) is None
+        assert re.search(r"except.*return\s+\[\]", services_text) is None
+        assert re.search(r"except.*return\s+False", services_text) is None

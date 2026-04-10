@@ -28,6 +28,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from loguru import logger
 
 from contacts import ContactBook
 
@@ -170,6 +171,25 @@ def _parse_email_address(raw: str) -> tuple[str, str]:
     return raw.strip(), raw.strip()
 
 
+def _format_log_context(**context: object) -> str:
+    formatted: list[str] = []
+    for key, value in context.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and len(value) > 120:
+            value = f"{value[:117]}..."
+        formatted.append(f"{key}={value!r}")
+    return ", ".join(formatted)
+
+
+def _log_service_failure(function_name: str, **context: object) -> None:
+    context_str = _format_log_context(**context)
+    message = f"{function_name} failed"
+    if context_str:
+        message = f"{message} ({context_str})"
+    logger.exception(message)
+
+
 # ── Credential helpers ───────────────────────────────────────────────────────
 
 
@@ -183,7 +203,8 @@ def _load_creds(token_path: Path) -> Credentials | None:
             else:
                 return None
         return creds
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("_load_creds", token_path=str(token_path))
         return None
 
 
@@ -228,21 +249,22 @@ def google_auth_all() -> tuple[dict[str, object], dict[str, object], dict[str, o
             expected = TOKENS_DIR / f"{email}.json"
             if token_path != expected and not expected.exists():
                 token_path.rename(expected)
-        except Exception:
+        except Exception:  # logged below
+            _log_service_failure("google_auth_all.gmail_service", token_path=str(token_path))
             continue
 
         try:
             cal_svc = build("calendar", "v3", credentials=creds)
             cal_svc.calendarList().list(maxResults=1).execute()
             cal_svcs[email] = cal_svc
-        except Exception:
-            pass
+        except Exception:  # logged below
+            _log_service_failure("google_auth_all.calendar_service", email=email)
 
         try:
             drive_svc = build("drive", "v3", credentials=creds)
             drive_svcs[email] = drive_svc
-        except Exception:
-            pass
+        except Exception:  # logged below
+            _log_service_failure("google_auth_all.drive_service", email=email)
 
     return gmail_svcs, cal_svcs, drive_svcs
 
@@ -345,7 +367,8 @@ def imsg_contacts(limit: int = 30) -> list[Contact]:
 
         conn.close()
         return contacts
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("imsg_contacts", limit=limit, db_path=str(IMSG_DB))
         return []
 
 
@@ -387,7 +410,8 @@ def imsg_thread(chat_id: str, limit: int = 50) -> list[Msg]:
                 )
             )
         return msgs
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("imsg_thread", chat_id=chat_id, limit=limit, db_path=str(IMSG_DB))
         return []
 
 
@@ -416,7 +440,13 @@ def imsg_send(contact: Contact, text: str) -> bool:
             row = cur.fetchone()
             conn.close()
             recipient = row[0] if row else contact.guid.split(";")[-1]
-        except Exception:
+        except Exception:  # logged below
+            _log_service_failure(
+                "imsg_send.lookup_recipient",
+                contact_id=contact.id,
+                guid=contact.guid,
+                is_group=contact.is_group,
+            )
             recipient = contact.guid.split(";")[-1]
 
         script = f'''
@@ -568,7 +598,8 @@ def gmail_contacts(service, account_email: str, limit: int = 20) -> list[Contact
                 )
             )
         return contacts
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("gmail_contacts", account_email=account_email, limit=limit)
         return []
 
 
@@ -602,7 +633,8 @@ def gmail_thread(service, msg_id: str, thread_id: str = "") -> list[Msg]:
                     )
                 )
         return msgs
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("gmail_thread", msg_id=msg_id, thread_id=thread_id or msg_id)
         return []
 
 
@@ -620,7 +652,13 @@ def gmail_send(service, contact: Contact, body: str) -> bool:
     try:
         service.users().messages().send(userId="me", body=send_body).execute()
         return True
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure(
+            "gmail_send",
+            reply_to=contact.reply_to,
+            thread_id=contact.thread_id,
+            body_length=len(body),
+        )
         return False
 
 
@@ -678,7 +716,12 @@ def calendar_events(
                             calendar_id=cal_id,
                         )
                     )
-        except Exception:
+        except Exception:  # logged below
+            _log_service_failure(
+                "calendar_events.account",
+                account=email,
+                date=start_of_day.date().isoformat(),
+            )
             continue
 
     events.sort(key=lambda e: (not e.all_day, e.start))
@@ -729,7 +772,13 @@ def calendar_create_event(
         body = _build_event_body(summary, start, end, location, description, all_day)
         result = cal_service.events().insert(calendarId=calendar_id, body=body).execute()
         return result.get("id")
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure(
+            "calendar_create_event",
+            summary=summary,
+            calendar_id=calendar_id,
+            all_day=all_day,
+        )
         return None
 
 
@@ -767,7 +816,13 @@ def calendar_update_event(
             calendarId=calendar_id, eventId=event_id, body=existing
         ).execute()
         return True
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure(
+            "calendar_update_event",
+            event_id=event_id,
+            calendar_id=calendar_id,
+            summary=summary,
+        )
         return False
 
 
@@ -775,7 +830,12 @@ def calendar_delete_event(cal_service, event_id: str, calendar_id: str = "primar
     try:
         cal_service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
         return True
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure(
+            "calendar_delete_event",
+            event_id=event_id,
+            calendar_id=calendar_id,
+        )
         return False
 
 
@@ -823,7 +883,8 @@ def notes_list(limit: int = 50) -> list[Note]:
                 )
             )
         return notes
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("notes_list", limit=limit, db_path=str(NOTES_DB))
         return []
 
 
@@ -848,7 +909,8 @@ def note_body(title: str) -> str:
             text=True,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("note_body", title=title)
         return ""
 
 
@@ -940,7 +1002,8 @@ def _reminders_dbs() -> list[Path]:
             conn.close()
             if count > 0:
                 dbs.append(p)
-        except Exception:
+        except Exception:  # logged below
+            _log_service_failure("_reminders_dbs", db_path=str(p))
             continue
     return dbs
 
@@ -971,7 +1034,8 @@ def reminders_lists() -> list[dict[str, str | int]]:
                     seen_names.add(name)
                     lists.append({"name": name, "incomplete_count": count})
             conn.close()
-        except Exception:
+        except Exception:  # logged below
+            _log_service_failure("reminders_lists", db_path=str(db_path))
             continue
     return lists
 
@@ -1033,7 +1097,14 @@ def reminders_list(
                     )
                 )
             conn.close()
-        except Exception:
+        except Exception:  # logged below
+            _log_service_failure(
+                "reminders_list",
+                db_path=str(db_path),
+                list_name=list_name,
+                show_completed=show_completed,
+                limit=limit,
+            )
             continue
     return reminders
 
@@ -1057,7 +1128,8 @@ def reminder_complete(title: str) -> bool:
             ["osascript", "-e", script], capture_output=True, timeout=10, text=True
         )
         return result.returncode == 0 and "ok" in result.stdout
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("reminder_complete", title=title)
         return False
 
 
@@ -1101,7 +1173,14 @@ def reminder_create(
             ["osascript", "-e", script], capture_output=True, timeout=10, text=True
         )
         return result.returncode == 0 and "ok" in result.stdout
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure(
+            "reminder_create",
+            title=title,
+            list_name=list_name,
+            due_date=due_date,
+            notes_present=bool(notes),
+        )
         return False
 
 
@@ -1116,8 +1195,8 @@ def _github_token() -> str | None:
         result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
-        pass
+    except Exception:  # logged below
+        _log_service_failure("_github_token", token_file=str(GITHUB_TOKEN_FILE))
     if GITHUB_TOKEN_FILE.exists():
         return GITHUB_TOKEN_FILE.read_text().strip()
     return None
@@ -1173,7 +1252,8 @@ def github_notifications(all_notifs: bool = False) -> list[GitHubNotification]:
                 )
             )
         return notifs
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("github_notifications", all_notifs=all_notifs)
         return []
 
 
@@ -1189,7 +1269,8 @@ def github_mark_read(notification_id: str) -> bool:
             timeout=10,
         )
         return resp.status_code in (200, 205)
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("github_mark_read", notification_id=notification_id)
         return False
 
 
@@ -1206,7 +1287,8 @@ def github_mark_all_read() -> bool:
             timeout=10,
         )
         return resp.status_code in (200, 202, 205)
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("github_mark_all_read")
         return False
 
 
@@ -1241,7 +1323,8 @@ def github_pulls(repo: str | None = None) -> list[dict]:
             }
             for item in items
         ]
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("github_pulls", repo=repo)
         return []
 
 
@@ -1291,7 +1374,13 @@ def drive_files(
                 )
             )
         return files
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure(
+            "drive_files",
+            query=query,
+            limit=limit,
+            shared_with_me=shared_with_me,
+        )
         return []
 
 
@@ -1333,7 +1422,13 @@ def drive_upload(
             size=int(result.get("size", 0)),
             web_link=result.get("webViewLink", ""),
         )
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure(
+            "drive_upload",
+            file_path=file_path,
+            folder_id=folder_id,
+            name=name or p.name,
+        )
         return None
 
 
@@ -1360,7 +1455,8 @@ def drive_create_folder(drive_service, name: str, parent_id: str = "") -> DriveF
             modified=ts,
             web_link=result.get("webViewLink", ""),
         )
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("drive_create_folder", name=name, parent_id=parent_id)
         return None
 
 
@@ -1369,7 +1465,8 @@ def drive_delete(drive_service, file_id: str) -> bool:
     try:
         drive_service.files().update(fileId=file_id, body={"trashed": True}).execute()
         return True
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("drive_delete", file_id=file_id)
         return False
 
 
@@ -1396,7 +1493,8 @@ def drive_get(drive_service, file_id: str) -> DriveFile | None:
             web_link=f.get("webViewLink", ""),
             parents=f.get("parents", []),
         )
-    except Exception:
+    except Exception:  # logged below
+        _log_service_failure("drive_get", file_id=file_id)
         return None
 
 
@@ -1499,7 +1597,12 @@ class AmbientService:
                     with self._buffer_lock:
                         self._buffer.append(text)
 
-            except Exception:
+            except Exception:  # logged below
+                _log_service_failure(
+                    "AmbientService._capture_loop",
+                    chunk_secs=CHUNK_SECS,
+                    sample_rate=SAMPLE_RATE,
+                )
                 time.sleep(1)
 
     def _flush_loop(self) -> None:
@@ -1518,11 +1621,14 @@ class AmbientService:
         if len(chunk.split()) < MIN_CHUNK_WORDS:
             return
 
-        import contextlib
-
         summary = None
-        with contextlib.suppress(Exception):
+        try:
             summary = extract_summary(chunk)
+        except Exception:  # logged below
+            _log_service_failure(
+                "AmbientService._process_buffer",
+                chunk_words=len(chunk.split()),
+            )
 
         self._on_note(chunk, summary)
 
@@ -1642,8 +1748,12 @@ class DictationService:
 
                 self._last_text = text
 
-        except Exception:
-            pass
+        except Exception:  # logged below
+            _log_service_failure(
+                "DictationService._stream_loop",
+                binary_path=WHISPER_STREAM_BIN,
+                model_path=WHISPER_STREAM_MODEL,
+            )
         finally:
             if self._proc:
                 self._proc.terminate()
@@ -1719,7 +1829,7 @@ def llm_warmup() -> None:
 
 try:
     from pydantic import BaseModel as _PydanticBase
-except ImportError:
+except ImportError:  # fallback for test environments without pydantic
     _PydanticBase = object  # type: ignore[assignment, misc]
 
 EXTRACT_PROMPT = (
