@@ -155,6 +155,42 @@ class NoteItem(ListItem):
         yield Static(t)
 
 
+class ReminderItem(ListItem):
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+
+    def compose(self) -> ComposeResult:
+        d = self.data
+        t = Text()
+        t.append("☐ ", style="yellow")
+        t.append(d.get("title", "Untitled"), style="bold white")
+        due = d.get("due_date", "")
+        list_name = d.get("list_name", "")
+        line2_parts: list[str] = []
+        if due:
+            try:
+                dt = datetime.fromisoformat(due)
+                line2_parts.append(dt.strftime("%b %d"))
+            except (ValueError, TypeError):
+                line2_parts.append(due)
+        else:
+            line2_parts.append("No date")
+        if list_name:
+            line2_parts.append(list_name)
+        line2 = " · ".join(line2_parts)
+        if d.get("flagged"):
+            t.append(" 🏴", style="red")
+        if d.get("priority", 0) > 0:
+            t.append(" ❗", style="yellow")
+        if line2:
+            t.append(f"\n  {line2}", style="dim")
+        if d.get("notes"):
+            snippet = d["notes"][:40]
+            t.append(f"\n  {snippet}", style="dim italic")
+        yield Static(t)
+
+
 class MessageView(Static):
     DEFAULT_CSS = """
     MessageView {
@@ -241,6 +277,31 @@ class DetailView(Static):
             if d.get("account"):
                 t.append(f"\n[{d['account']}]", style="dim italic")
 
+        elif d.get("completed") is not None and "list_name" in d:
+            # Reminder — identified by completed field + list_name
+            t.append(f"{d['title']}\n", style="bold white")
+            t.append("─" * 40 + "\n", style="dim")
+            if d.get("completed"):
+                t.append("✅ Completed\n", style="green")
+            else:
+                t.append("☐ Incomplete\n", style="yellow")
+            if d.get("due_date"):
+                try:
+                    dt = datetime.fromisoformat(d["due_date"])
+                    t.append(f"📅 Due: {dt.strftime('%b %d, %Y %H:%M')}\n", style="cyan")
+                except (ValueError, KeyError):
+                    t.append(f"📅 Due: {d['due_date']}\n", style="cyan")
+            else:
+                t.append("📅 No due date\n", style="dim")
+            if d.get("list_name"):
+                t.append(f"📋 List: {d['list_name']}\n", style="dim")
+            if d.get("priority", 0) > 0:
+                t.append(f"❗ Priority: {d['priority']}\n", style="yellow")
+            if d.get("flagged"):
+                t.append("🏴 Flagged\n", style="red")
+            if d.get("notes"):
+                t.append(f"\n{d['notes']}\n", style="white")
+
         elif "title" in d:
             # Note
             t.append(f"{d['title']}\n", style="bold white")
@@ -326,9 +387,14 @@ class InboxApp(App):
         self.conversations: list[dict] = []
         self.events: list[dict] = []
         self.notes_data: list[dict] = []
+        self.reminders_data: list[dict] = []
+        self.reminder_lists: list[dict] = []
         self.active_conv: dict | None = None
         self.active_event: dict | None = None
+        self.active_reminder: dict | None = None
         self._active_filter: str = "all"
+        self._rem_list_filter: str = ""  # "" = all lists
+        self._editing_reminder: dict | None = None
         self._poll_timer = None
         self._client_closed = False
         self._poll_had_error = False
@@ -398,6 +464,8 @@ class InboxApp(App):
                 compose_input.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
             elif self._active_filter == "reminders":
                 compose_input.placeholder = "New reminder (Enter to create)"
+            elif self._active_filter == "notes":
+                compose_input.placeholder = ""
             else:
                 compose_input.placeholder = ""
         else:
@@ -429,7 +497,22 @@ class InboxApp(App):
             return
 
         if self._active_filter == "reminders":
-            self.query_one("#status", Static).update("[dim]Reminders[/]")
+            filtered = self.reminders_data
+            if self._rem_list_filter:
+                filtered = [r for r in filtered if r.get("list_name") == self._rem_list_filter]
+            if not filtered:
+                lv.append(ListItem(Static(Text("  All caught up! 🎉", style="dim green"))))
+            else:
+                for r in filtered:
+                    lv.append(ReminderItem(r))
+            list_tag = f" · {self._rem_list_filter}" if self._rem_list_filter else ""
+            status = f"[yellow]{len(filtered)} reminders{list_tag}[/]"
+            if self.reminder_lists:
+                list_names = ", ".join(
+                    rl.get("name", "") for rl in self.reminder_lists if rl.get("name")
+                )
+                status += f"  [dim]f: filter ({list_names})[/]"
+            self.query_one("#status", Static).update(status)
             return
 
         if self._active_filter == "github":
@@ -567,7 +650,9 @@ class InboxApp(App):
     def _bg_poll(self) -> None:
         """Lightweight poll — updates data without disrupting UI if unchanged."""
         try:
-            convos, events, notes, status_override, changed = self._collect_poll_data()
+            convos, events, notes, reminders, reminder_lists, status_override, changed = (
+                self._collect_poll_data()
+            )
         except Exception as exc:
             # Unhandled exception in poll data collection — keep the TUI alive
             self._consecutive_errors += 1
@@ -584,7 +669,15 @@ class InboxApp(App):
                 # Show persistent outage message that reminds user about retry
                 status_override = "[red]Server unreachable — press Ctrl+R to retry[/]"
             if changed:
-                self.call_from_thread(self._populate, convos, events, notes, status_override)
+                self.call_from_thread(
+                    self._populate,
+                    convos,
+                    events,
+                    notes,
+                    reminders,
+                    reminder_lists,
+                    status_override,
+                )
                 return
             self.conversations = convos
             self.call_from_thread(self.query_one("#status", Static).update, status_override)
@@ -594,7 +687,9 @@ class InboxApp(App):
         self._consecutive_errors = 0
         if changed:
             self._poll_had_error = False
-            self.call_from_thread(self._populate, convos, events, notes, status_override)
+            self.call_from_thread(
+                self._populate, convos, events, notes, reminders, reminder_lists, status_override
+            )
             return
 
         self.conversations = convos
@@ -604,19 +699,29 @@ class InboxApp(App):
 
     def _do_refresh(self) -> None:
         """Fetch all data from the server (runs in worker thread)."""
-        convos, events, notes, status_override = self._collect_refresh_data()
-        self.call_from_thread(self._populate, convos, events, notes, status_override)
+        convos, events, notes, reminders, reminder_lists, status_override = (
+            self._collect_refresh_data()
+        )
+        self.call_from_thread(
+            self._populate, convos, events, notes, reminders, reminder_lists, status_override
+        )
 
     def _populate(
         self,
         convos: list[dict],
         events: list[dict],
         notes: list[dict],
+        reminders: list[dict] | None = None,
+        reminder_lists: list[dict] | None = None,
         status_override: str | None = None,
     ) -> None:
         self.conversations = convos
         self.events = events
         self.notes_data = notes
+        if reminders is not None:
+            self.reminders_data = reminders
+        if reminder_lists is not None:
+            self.reminder_lists = reminder_lists
         self._render_sidebar()
         if status_override:
             self.query_one("#status", Static).update(status_override)
@@ -627,9 +732,13 @@ class InboxApp(App):
             return None
         return f"[red]{' · '.join(unique_errors)}[/]"
 
-    def _collect_auxiliary_data(self) -> tuple[list[dict], list[dict], list[str]]:
+    def _collect_auxiliary_data(
+        self,
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[str]]:
         events = self.events
         notes = self.notes_data
+        reminders = self.reminders_data
+        reminder_lists = self.reminder_lists
         errors: list[str] = []
 
         try:
@@ -642,9 +751,21 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("Notes refresh", exc))
 
-        return events, notes, errors
+        try:
+            reminders = self.client.reminders(limit=100)
+        except Exception as exc:
+            errors.append(_format_request_error("Reminders refresh", exc))
 
-    def _collect_refresh_data(self) -> tuple[list[dict], list[dict], list[dict], str | None]:
+        try:
+            reminder_lists = self.client.reminder_lists()
+        except Exception as exc:
+            errors.append(_format_request_error("Reminder lists refresh", exc))
+
+        return events, notes, reminders, reminder_lists, errors
+
+    def _collect_refresh_data(
+        self,
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], str | None]:
         convos = self.conversations
         errors: list[str] = []
 
@@ -653,11 +774,13 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("Conversation refresh", exc))
 
-        events, notes, aux_errors = self._collect_auxiliary_data()
+        events, notes, reminders, reminder_lists, aux_errors = self._collect_auxiliary_data()
         errors.extend(aux_errors)
-        return convos, events, notes, self._merge_status_errors(errors)
+        return convos, events, notes, reminders, reminder_lists, self._merge_status_errors(errors)
 
-    def _collect_poll_data(self) -> tuple[list[dict], list[dict], list[dict], str | None, bool]:
+    def _collect_poll_data(
+        self,
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], str | None, bool]:
         try:
             convos = self.client.conversations(limit=100)
         except Exception as exc:
@@ -665,6 +788,8 @@ class InboxApp(App):
                 self.conversations,
                 self.events,
                 self.notes_data,
+                self.reminders_data,
+                self.reminder_lists,
                 self._merge_status_errors([_format_request_error("Auto-refresh", exc)]),
                 False,
             )
@@ -680,16 +805,70 @@ class InboxApp(App):
         )
 
         if not changed:
-            return convos, self.events, self.notes_data, None, False
+            return (
+                convos,
+                self.events,
+                self.notes_data,
+                self.reminders_data,
+                self.reminder_lists,
+                None,
+                False,
+            )
 
-        events, notes, errors = self._collect_auxiliary_data()
-        return convos, events, notes, self._merge_status_errors(errors), True
+        events, notes, reminders, reminder_lists, errors = self._collect_auxiliary_data()
+        return (
+            convos,
+            events,
+            notes,
+            reminders,
+            reminder_lists,
+            self._merge_status_errors(errors),
+            True,
+        )
+
+    # ── Reminder key handling ─────────────────────────────────────────────
+
+    def on_key(self, event) -> None:
+        """Handle single-key shortcuts for the reminders tab.
+
+        Only active when the compose input is NOT focused, so typing
+        in compose still works normally.
+        """
+        if self._active_filter != "reminders":
+            return
+        compose = self.query_one("#compose", Input)
+        if compose.has_focus:
+            return
+
+        key = event.key
+        if key == "c":
+            event.prevent_default()
+            self.action_complete_reminder()
+        elif key == "e":
+            event.prevent_default()
+            self.action_edit_reminder()
+        elif key == "d":
+            event.prevent_default()
+            self.action_delete_reminder()
+        elif key == "f":
+            event.prevent_default()
+            self.action_filter_reminder_list()
 
     # ── Selection ────────────────────────────────────────────────────────
 
     @on(ListView.Selected, "#contact-list")
     def on_item_selected(self, event: ListView.Selected) -> None:
         item = event.item
+
+        if isinstance(item, ReminderItem):
+            self.active_reminder = item.data
+            self.active_event = None
+            self.query_one("#detail-view", DetailView).detail = item.data
+            title = item.data.get("title", "?")
+            list_name = item.data.get("list_name", "")
+            tag = f" · {list_name}" if list_name else ""
+            self.query_one("#status", Static).update(f"[bold]{title}[/]  [dim]reminder{tag}[/]")
+            return
 
         if isinstance(item, EventItem):
             self.active_event = item.data
@@ -769,6 +948,15 @@ class InboxApp(App):
 
         if self._active_filter == "calendar":
             self._create_quick_event(text)
+            return
+
+        if self._active_filter == "reminders":
+            # If we're in edit mode, save the edit instead of creating new
+            if hasattr(self, "_editing_reminder") and self._editing_reminder is not None:
+                self._do_edit_reminder(self._editing_reminder, new_title=text)
+                self._editing_reminder = None
+                return
+            self._create_reminder(text)
             return
 
         if not self.active_conv:
@@ -895,6 +1083,159 @@ class InboxApp(App):
                 status_override or "[red]Failed to delete[/]",
             )
 
+    # ── Reminder actions ────────────────────────────────────────────────
+
+    @work(thread=True, exit_on_error=False)
+    def _create_reminder(self, text: str) -> None:
+        status_override = None
+        try:
+            list_name = self._rem_list_filter or "Reminders"
+            ok = self.client.reminder_create(title=text, list_name=list_name)
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Reminder creation', exc)}[/]"
+            ok = False
+
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[green]Reminder created[/]",
+            )
+            self._do_refresh()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                status_override or "[red]Failed to create reminder[/]",
+            )
+
+    def action_complete_reminder(self) -> None:
+        if self._active_filter != "reminders":
+            return
+        if not self.active_reminder or not self.active_reminder.get("id"):
+            self.query_one("#status", Static).update("[yellow]No reminder selected[/]")
+            return
+        title = self.active_reminder.get("title", "?")
+        self.query_one("#status", Static).update(f"[yellow]Completing '{title}'...[/]")
+        self._do_complete_reminder(self.active_reminder)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_complete_reminder(self, reminder: dict) -> None:
+        status_override = None
+        try:
+            ok = self.client.reminder_complete(reminder_id=reminder["id"])
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Complete reminder', exc)}[/]"
+            ok = False
+
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Completed '{reminder.get('title')}'[/]",
+            )
+            self.active_reminder = None
+            self.query_one("#detail-view", DetailView).detail = None
+            self._do_refresh()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                status_override or "[red]Failed to complete reminder[/]",
+            )
+
+    def action_edit_reminder(self) -> None:
+        if self._active_filter != "reminders":
+            return
+        if not self.active_reminder or not self.active_reminder.get("id"):
+            self.query_one("#status", Static).update("[yellow]No reminder selected[/]")
+            return
+        # Focus the compose input with current title as value for editing
+        compose = self.query_one("#compose", Input)
+        compose.value = self.active_reminder.get("title", "")
+        compose.focus()
+        self.query_one("#status", Static).update(
+            "[yellow]Edit title in compose — Enter to save, Escape to cancel[/]"
+        )
+        self._editing_reminder = self.active_reminder
+
+    def action_delete_reminder(self) -> None:
+        if self._active_filter != "reminders":
+            return
+        if not self.active_reminder or not self.active_reminder.get("id"):
+            self.query_one("#status", Static).update("[yellow]No reminder selected[/]")
+            return
+        title = self.active_reminder.get("title", "?")
+        self.query_one("#status", Static).update(f"[yellow]Deleting '{title}'...[/]")
+        self._do_delete_reminder(self.active_reminder)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_delete_reminder(self, reminder: dict) -> None:
+        status_override = None
+        try:
+            ok = self.client.reminder_delete(reminder_id=reminder["id"])
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Delete reminder', exc)}[/]"
+            ok = False
+
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Deleted '{reminder.get('title')}'[/]",
+            )
+            self.active_reminder = None
+            self.query_one("#detail-view", DetailView).detail = None
+            self._do_refresh()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                status_override or "[red]Failed to delete reminder[/]",
+            )
+
+    @work(thread=True, exit_on_error=False)
+    def _do_edit_reminder(self, reminder: dict, new_title: str) -> None:
+        status_override = None
+        try:
+            ok = self.client.reminder_edit(reminder_id=reminder["id"], title=new_title)
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Edit reminder', exc)}[/]"
+            ok = False
+
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Updated '{new_title}'[/]",
+            )
+            self.active_reminder = None
+            self.query_one("#detail-view", DetailView).detail = None
+            self._do_refresh()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                status_override or "[red]Failed to edit reminder[/]",
+            )
+
+    def action_filter_reminder_list(self) -> None:
+        """Cycle through reminder lists as a filter, or show all."""
+        if self._active_filter != "reminders":
+            return
+        if not self.reminder_lists:
+            return
+        list_names = [rl.get("name", "") for rl in self.reminder_lists if rl.get("name")]
+        if not list_names:
+            return
+        if self._rem_list_filter == "":
+            # No filter → first list
+            self._rem_list_filter = list_names[0]
+        else:
+            # Find current index and advance
+            try:
+                idx = list_names.index(self._rem_list_filter)
+                if idx + 1 < len(list_names):
+                    self._rem_list_filter = list_names[idx + 1]
+                else:
+                    # Wrap around: back to all
+                    self._rem_list_filter = ""
+            except ValueError:
+                self._rem_list_filter = list_names[0]
+        self._render_sidebar()
+
     # ── Account actions ──────────────────────────────────────────────────
 
     def action_add_account(self) -> None:
@@ -961,6 +1302,11 @@ class InboxApp(App):
 
     def action_clear_compose(self) -> None:
         self.query_one("#compose", Input).clear()
+        # Cancel any in-progress reminder edit
+        if hasattr(self, "_editing_reminder") and self._editing_reminder is not None:
+            self._editing_reminder = None
+            if self._active_filter == "reminders":
+                self.query_one("#status", Static).update("[dim]Edit cancelled[/]")
 
     def _cleanup_resources(self) -> None:
         if self._poll_timer is not None:
