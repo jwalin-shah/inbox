@@ -6,7 +6,7 @@ import asyncio
 from unittest.mock import MagicMock
 
 import httpx
-from textual.widgets import Input, Static
+from textual.widgets import Input, ListView, Static
 
 import inbox
 from inbox import DetailView, InboxApp, MessageView, ReminderItem
@@ -1073,3 +1073,347 @@ def test_detail_view_reminder_no_due_date() -> None:
     detail.detail = _make_reminder_data(due_date=None)
     children = list(detail.compose())
     assert len(children) == 1
+
+
+# ── Tab state preservation ─────────────────────────────────────────────────
+
+
+def test_tab_state_saved_on_switch() -> None:
+    """Switching tabs saves the current tab's state (active_conv, messages)."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = [
+            {"id": "c1", "source": "imessage", "name": "Alice", "unread": 0, "snippet": ""},
+            {"id": "c2", "source": "gmail", "name": "Bob", "unread": 0, "snippet": "Hey"},
+        ]
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            # Set up conversation state on All tab
+            conv = {"id": "c1", "source": "imessage", "name": "Alice"}
+            app.active_conv = conv
+            app.query_one("#messages", MessageView).messages = [
+                {
+                    "sender": "Alice",
+                    "body": "Hi!",
+                    "ts": "2026-04-10T10:00:00",
+                    "is_me": False,
+                    "source": "imessage",
+                }
+            ]
+
+            # Switch to Calendar tab — should save All tab state
+            await pilot.press("ctrl+4")
+            await pilot.pause(0.5)
+            assert app._active_filter == "calendar"
+
+            # All tab state should be saved
+            all_state = app._tab_state.get("all", {})
+            assert all_state.get("active_conv") == conv
+            assert len(all_state.get("messages", [])) == 1
+            assert all_state["messages"][0]["body"] == "Hi!"
+
+    asyncio.run(runner())
+
+
+def test_tab_state_restored_on_switch_back() -> None:
+    """Switching back to a tab restores its previously saved state."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = [
+            {"id": "c1", "source": "imessage", "name": "Alice", "unread": 0, "snippet": ""},
+        ]
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            # Set up conversation state on All tab
+            conv = {"id": "c1", "source": "imessage", "name": "Alice"}
+            app.active_conv = conv
+            app.query_one("#messages", MessageView).messages = [
+                {
+                    "sender": "Alice",
+                    "body": "Hello",
+                    "ts": "2026-04-10T10:00:00",
+                    "is_me": False,
+                    "source": "imessage",
+                }
+            ]
+
+            # Switch to Calendar tab
+            await pilot.press("ctrl+4")
+            await pilot.pause(0.5)
+            assert app._active_filter == "calendar"
+
+            # Switch back to All tab
+            await pilot.press("ctrl+1")
+            await pilot.pause(0.5)
+            assert app._active_filter == "all"
+
+            # All tab state should be restored
+            assert app.active_conv == conv
+            msgs = app.query_one("#messages", MessageView).messages
+            assert len(msgs) == 1
+            assert msgs[0]["body"] == "Hello"
+
+    asyncio.run(runner())
+
+
+def test_tab_state_preserves_reminder_filter() -> None:
+    """Switching away from Reminders tab and back preserves the list filter."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = []
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = [_make_reminder_data()]
+        client.reminder_lists.return_value = [
+            {"name": "Shopping", "incomplete_count": 1},
+            {"name": "Work", "incomplete_count": 0},
+        ]
+        app = _make_app(client)
+        app.reminders_data = [_make_reminder_data()]
+        app.reminder_lists = client.reminder_lists.return_value
+
+        async with app.run_test() as pilot:
+            # Go to reminders tab
+            await pilot.press("ctrl+6")
+            await pilot.pause(0.5)
+            assert app._active_filter == "reminders"
+
+            # Set a filter
+            app._rem_list_filter = "Shopping"
+            app.active_reminder = _make_reminder_data()
+
+            # Switch to Notes
+            await pilot.press("ctrl+5")
+            await pilot.pause(0.5)
+            assert app._active_filter == "notes"
+
+            # Switch back to Reminders
+            await pilot.press("ctrl+6")
+            await pilot.pause(0.5)
+            assert app._active_filter == "reminders"
+
+            # Filter and reminder should be restored
+            assert app._rem_list_filter == "Shopping"
+            assert app.active_reminder is not None
+            assert app.active_reminder["title"] == "Buy groceries"
+
+    asyncio.run(runner())
+
+
+def test_tab_state_preserves_calendar_event_selection() -> None:
+    """Switching away from Calendar tab and back preserves the selected event."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = []
+        client.calendar_events.return_value = [
+            {
+                "summary": "Standup",
+                "event_id": "e1",
+                "start": "2026-04-10T09:00:00",
+                "end": "2026-04-10T09:30:00",
+            }
+        ]
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        app = _make_app(client)
+        app.events = client.calendar_events.return_value
+
+        async with app.run_test() as pilot:
+            # Go to calendar tab
+            await pilot.press("ctrl+4")
+            await pilot.pause(0.5)
+            assert app._active_filter == "calendar"
+
+            # Select an event
+            event = {
+                "summary": "Standup",
+                "event_id": "e1",
+                "start": "2026-04-10T09:00:00",
+                "end": "2026-04-10T09:30:00",
+            }
+            app.active_event = event
+            app.query_one("#detail-view", DetailView).detail = event
+
+            # Switch to Notes
+            await pilot.press("ctrl+5")
+            await pilot.pause(0.5)
+
+            # Switch back to Calendar
+            await pilot.press("ctrl+4")
+            await pilot.pause(0.5)
+
+            # Event should be restored
+            assert app.active_event is not None
+            assert app.active_event["event_id"] == "e1"
+            detail = app.query_one("#detail-view", DetailView).detail
+            assert detail is not None
+            assert detail.get("summary") == "Standup"
+
+    asyncio.run(runner())
+
+
+def test_tab_state_messages_retained_across_switches() -> None:
+    """MessageView.messages are retained when switching between messaging tabs."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = [
+            {"id": "c1", "source": "imessage", "name": "Alice", "unread": 0, "snippet": ""},
+            {"id": "c2", "source": "gmail", "name": "Bob", "unread": 0, "snippet": "Hey"},
+        ]
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            # Set up messages on the All tab
+            conv_imsg = {"id": "c1", "source": "imessage", "name": "Alice"}
+            app.active_conv = conv_imsg
+            app.query_one("#messages", MessageView).messages = [
+                {
+                    "sender": "Alice",
+                    "body": "Hello from iMessage",
+                    "ts": "2026-04-10T10:00:00",
+                    "is_me": False,
+                    "source": "imessage",
+                }
+            ]
+
+            # Switch to iMessage tab (also a messaging tab)
+            await pilot.press("ctrl+2")
+            await pilot.pause(0.5)
+
+            # Switch back to All tab
+            await pilot.press("ctrl+1")
+            await pilot.pause(0.5)
+
+            # Messages should be restored
+            msgs = app.query_one("#messages", MessageView).messages
+            assert len(msgs) == 1
+            assert msgs[0]["body"] == "Hello from iMessage"
+
+    asyncio.run(runner())
+
+
+def test_save_tab_state_stores_conv_and_messages() -> None:
+    """_save_tab_state correctly stores active_conv and messages for messaging tabs."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+
+        async with app.run_test():
+            conv = {"id": "c1", "source": "gmail", "name": "Bob", "gmail_account": "bob@test.com"}
+            app.active_conv = conv
+            app.query_one("#messages", MessageView).messages = [
+                {
+                    "sender": "Bob",
+                    "body": "Hey",
+                    "ts": "2026-04-10T10:00:00",
+                    "is_me": False,
+                    "source": "gmail",
+                },
+                {
+                    "sender": "Me",
+                    "body": "Hi back",
+                    "ts": "2026-04-10T10:01:00",
+                    "is_me": True,
+                    "source": "gmail",
+                },
+            ]
+
+            app._save_tab_state("all")
+
+            state = app._tab_state["all"]
+            assert state["active_conv"] == conv
+            assert len(state["messages"]) == 2
+            assert state["messages"][0]["body"] == "Hey"
+            assert state["messages"][1]["body"] == "Hi back"
+
+    asyncio.run(runner())
+
+
+def test_restore_tab_state_no_saved_state_is_noop() -> None:
+    """_restore_tab_state with no saved state does not clear existing messages."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+
+        async with app.run_test():
+            # Set up some messages without saving state
+            app.active_conv = {"id": "c1", "source": "imessage", "name": "Alice"}
+            app.query_one("#messages", MessageView).messages = [
+                {
+                    "sender": "Alice",
+                    "body": "Hello",
+                    "ts": "2026-04-10T10:00:00",
+                    "is_me": False,
+                    "source": "imessage",
+                }
+            ]
+
+            # Restore with no saved state — should be a no-op
+            app._restore_tab_state("all")
+
+            # Messages should still be there
+            msgs = app.query_one("#messages", MessageView).messages
+            assert len(msgs) == 1
+            assert msgs[0]["body"] == "Hello"
+
+    asyncio.run(runner())
+
+
+def test_sidebar_selection_restored_after_tab_switch() -> None:
+    """After switching tabs and back, the sidebar highlights the previously selected item."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = [
+            {"id": "c1", "source": "imessage", "name": "Alice", "unread": 0, "snippet": "Hi"},
+            {"id": "c2", "source": "imessage", "name": "Bob", "unread": 0, "snippet": "Hey"},
+        ]
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        app = _make_app(client)
+        app.conversations = client.conversations.return_value
+
+        async with app.run_test() as pilot:
+            # Select Alice in the sidebar
+            app.active_conv = {"id": "c1", "source": "imessage", "name": "Alice"}
+
+            # Switch to calendar and back
+            await pilot.press("ctrl+4")
+            await pilot.pause(0.5)
+            await pilot.press("ctrl+1")
+            await pilot.pause(0.5)
+
+            # Check that the sidebar selection is restored (index matches Alice)
+            lv = app.query_one("#contact-list", ListView)
+            assert lv.index is not None
+            # The sidebar should have 2 items, and Alice should be at index 0
+            if lv.index >= 0:
+                child = lv.children[lv.index]
+                assert isinstance(child, inbox.ConversationItem)
+                assert child.data.get("id") == "c1"
+
+    asyncio.run(runner())

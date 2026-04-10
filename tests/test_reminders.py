@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import services
@@ -333,3 +334,108 @@ class TestReminderDeleteWithListName:
         assert result is True
         script = mock_run.call_args[0][0][2]
         assert "container" not in script
+
+
+class TestApplescriptRetryLogic:
+    """Test retry logic for AppleScript reminder mutations."""
+
+    def test_reminder_complete_succeeds_first_try(self):
+        """reminder_complete returns True on first successful attempt."""
+        with patch("services.subprocess.run") as mock_run, patch("services.time.sleep"):
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_complete("Buy groceries")
+        assert result is True
+        assert mock_run.call_count == 1
+
+    def test_reminder_complete_retries_on_failure(self):
+        """reminder_complete retries up to APPLESCRIPT_RETRIES times on failure."""
+        with patch("services.subprocess.run") as mock_run, patch("services.time.sleep"):
+            # First attempt fails, second succeeds
+            mock_run.side_effect = [
+                MagicMock(returncode=1, stdout="fail"),
+                MagicMock(returncode=0, stdout="ok"),
+            ]
+            result = reminder_complete("Buy groceries")
+        assert result is True
+        assert mock_run.call_count == 2
+
+    def test_reminder_complete_returns_false_after_all_retries(self):
+        """reminder_complete returns False after all retries exhausted."""
+        with patch("services.subprocess.run") as mock_run, patch("services.time.sleep"):
+            mock_run.return_value = MagicMock(returncode=1, stdout="fail")
+            result = reminder_complete("Nonexistent")
+        assert result is False
+        # Should be called APPLESCRIPT_RETRIES + 1 times
+        assert mock_run.call_count == services.APPLESCRIPT_RETRIES + 1
+
+    def test_reminder_create_retries_on_failure(self):
+        """reminder_create retries on first failure."""
+        from services import reminder_create
+
+        with patch("services.subprocess.run") as mock_run, patch("services.time.sleep"):
+            mock_run.side_effect = [
+                MagicMock(returncode=1, stdout="fail"),
+                MagicMock(returncode=0, stdout="ok"),
+            ]
+            result = reminder_create("New task")
+        assert result is True
+        assert mock_run.call_count == 2
+
+    def test_reminder_edit_retries_on_failure(self):
+        """reminder_edit retries on first failure."""
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run, patch("services.time.sleep"):
+            mock_run.side_effect = [
+                MagicMock(returncode=1, stdout="fail"),
+                MagicMock(returncode=0, stdout="ok"),
+            ]
+            result = reminder_edit("Buy groceries", title="Buy organic")
+        assert result is True
+        assert mock_run.call_count == 2
+
+    def test_reminder_delete_retries_on_failure(self):
+        """reminder_delete retries on first failure."""
+        from services import reminder_delete
+
+        with patch("services.subprocess.run") as mock_run, patch("services.time.sleep"):
+            mock_run.side_effect = [
+                MagicMock(returncode=1, stdout="fail"),
+                MagicMock(returncode=0, stdout="ok"),
+            ]
+            result = reminder_delete("Buy groceries")
+        assert result is True
+        assert mock_run.call_count == 2
+
+    def test_applescript_retry_delays_between_attempts(self):
+        """Retry logic sleeps between attempts."""
+        with (
+            patch("services.subprocess.run") as mock_run,
+            patch("services.time.sleep") as mock_sleep,
+        ):
+            mock_run.side_effect = [
+                MagicMock(returncode=1, stdout="fail"),
+                MagicMock(returncode=0, stdout="ok"),
+            ]
+            result = reminder_complete("Buy groceries")
+        assert result is True
+        mock_sleep.assert_called_once_with(services.APPLESCRIPT_RETRY_DELAY)
+
+    def test_applescript_retry_on_exception(self):
+        """Retry logic handles exceptions (e.g., timeout) and retries."""
+        with patch("services.subprocess.run") as mock_run, patch("services.time.sleep"):
+            mock_run.side_effect = [
+                subprocess.TimeoutExpired("osascript", 10),
+                MagicMock(returncode=0, stdout="ok"),
+            ]
+            result = reminder_complete("Buy groceries")
+        assert result is True
+        assert mock_run.call_count == 2
+
+    def test_applescript_retry_exhausted_on_exceptions(self):
+        """Retry logic returns False after all retries on repeated exceptions."""
+        with patch("services.subprocess.run") as mock_run, patch("services.time.sleep"):
+            mock_run.side_effect = subprocess.TimeoutExpired("osascript", 10)
+            result = reminder_complete("Buy groceries")
+        assert result is False
+        assert mock_run.call_count == services.APPLESCRIPT_RETRIES + 1

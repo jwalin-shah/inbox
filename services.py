@@ -1422,6 +1422,54 @@ def reminder_by_id(reminder_id: str) -> Reminder | None:
     return None
 
 
+APPLESCRIPT_RETRIES = 2
+APPLESCRIPT_RETRY_DELAY = 1.0  # seconds
+
+
+def _run_applescript_with_retry(script: str, function_name: str, **log_context: object) -> bool:
+    """Run an AppleScript command with retry logic for timing resilience.
+
+    AppleScript operations on Reminders can fail due to timing issues
+    (e.g., the Reminders database hasn't synced yet, or the app is busy).
+    This helper retries up to APPLESCRIPT_RETRIES times with a short delay.
+
+    Args:
+        script: The AppleScript to execute.
+        function_name: Name of the calling function (for logging).
+        **log_context: Additional context for error logging.
+
+    Returns:
+        True if the script succeeded, False after all retries exhausted.
+    """
+    for attempt in range(APPLESCRIPT_RETRIES + 1):
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script], capture_output=True, timeout=10, text=True
+            )
+            if result.returncode == 0 and "ok" in result.stdout:
+                return True
+            # AppleScript returned "fail" — retry if attempts remain
+            if attempt < APPLESCRIPT_RETRIES:
+                logger.debug(
+                    f"{function_name} attempt {attempt + 1} failed, "
+                    f"retrying in {APPLESCRIPT_RETRY_DELAY}s"
+                )
+                time.sleep(APPLESCRIPT_RETRY_DELAY)
+                continue
+        except Exception:
+            if attempt < APPLESCRIPT_RETRIES:
+                logger.debug(
+                    f"{function_name} attempt {attempt + 1} raised exception, "
+                    f"retrying in {APPLESCRIPT_RETRY_DELAY}s"
+                )
+                time.sleep(APPLESCRIPT_RETRY_DELAY)
+                continue
+            _log_service_failure(function_name, **log_context)
+            return False
+    _log_service_failure(function_name, **log_context)
+    return False
+
+
 def _applescript_find_reminder(title: str, list_name: str = "") -> str:
     """Build the AppleScript 'set theReminder to ...' clause with list_name disambiguation.
 
@@ -1463,14 +1511,9 @@ def reminder_complete(title: str, list_name: str = "") -> bool:
         end try
     end tell
     """
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, timeout=10, text=True
-        )
-        return result.returncode == 0 and "ok" in result.stdout
-    except Exception:  # logged below
-        _log_service_failure("reminder_complete", title=title, list_name=list_name)
-        return False
+    return _run_applescript_with_retry(
+        script, "reminder_complete", title=title, list_name=list_name
+    )
 
 
 def reminder_create(
@@ -1509,20 +1552,14 @@ def reminder_create(
         return "ok"
     end tell
     """
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, timeout=10, text=True
-        )
-        return result.returncode == 0 and "ok" in result.stdout
-    except Exception:  # logged below
-        _log_service_failure(
-            "reminder_create",
-            title=title,
-            list_name=list_name,
-            due_date=due_date,
-            notes_present=bool(notes),
-        )
-        return False
+    return _run_applescript_with_retry(
+        script,
+        "reminder_create",
+        title=title,
+        list_name=list_name,
+        due_date=due_date,
+        notes_present=bool(notes),
+    )
 
 
 def reminder_edit(
@@ -1574,21 +1611,15 @@ def reminder_edit(
         end try
     end tell
     """
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, timeout=10, text=True
-        )
-        return result.returncode == 0 and "ok" in result.stdout
-    except Exception:  # logged below
-        _log_service_failure(
-            "reminder_edit",
-            current_title=current_title,
-            new_title=title,
-            due_date=due_date,
-            notes_present=notes is not None,
-            list_name=list_name,
-        )
-        return False
+    return _run_applescript_with_retry(
+        script,
+        "reminder_edit",
+        current_title=current_title,
+        new_title=title,
+        due_date=due_date,
+        notes_present=notes is not None,
+        list_name=list_name,
+    )
 
 
 def reminder_delete(title: str, list_name: str = "") -> bool:
@@ -1613,14 +1644,7 @@ def reminder_delete(title: str, list_name: str = "") -> bool:
         end try
     end tell
     """
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, timeout=10, text=True
-        )
-        return result.returncode == 0 and "ok" in result.stdout
-    except Exception:  # logged below
-        _log_service_failure("reminder_delete", title=title, list_name=list_name)
-        return False
+    return _run_applescript_with_retry(script, "reminder_delete", title=title, list_name=list_name)
 
 
 # ── GitHub ──────────────────────────────────────────────────────────────────

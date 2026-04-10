@@ -399,6 +399,9 @@ class InboxApp(App):
         self._client_closed = False
         self._poll_had_error = False
         self._consecutive_errors = 0
+        # Per-tab state: stores selected conversation, messages, detail, etc.
+        # keyed by filter name ("all", "imessage", "gmail", "calendar", etc.)
+        self._tab_state: dict[str, dict] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -429,6 +432,66 @@ class InboxApp(App):
 
     # ── Tab switching ────────────────────────────────────────────────────
 
+    def _save_tab_state(self, tab_name: str) -> None:
+        """Save the current tab's state so it can be restored later."""
+        state: dict = {}
+        if tab_name in ("all", "imessage", "gmail"):
+            state["active_conv"] = self.active_conv
+            msg_view = self.query_one("#messages", MessageView)
+            state["messages"] = list(msg_view.messages) if msg_view.messages else []
+        elif tab_name == "calendar":
+            state["active_event"] = self.active_event
+            state["active_conv"] = None
+        elif tab_name == "notes":
+            # Note detail is in DetailView, already handled via detail reactive
+            pass
+        elif tab_name == "reminders":
+            state["active_reminder"] = self.active_reminder
+            state["rem_list_filter"] = self._rem_list_filter
+            state["active_conv"] = None
+        self._tab_state[tab_name] = state
+
+    def _restore_tab_state(self, tab_name: str) -> None:
+        """Restore a tab's previously saved state."""
+        state = self._tab_state.get(tab_name, {})
+        if not state:
+            # No previously saved state for this tab — don't clear anything
+            return
+
+        if tab_name in ("all", "imessage", "gmail"):
+            # Restore conversation selection and messages
+            saved_conv = state.get("active_conv")
+            saved_msgs = state.get("messages", [])
+            self.active_conv = saved_conv
+            self.active_event = None
+            self.active_reminder = None
+            msg_view = self.query_one("#messages", MessageView)
+            if saved_msgs:
+                msg_view.messages = saved_msgs
+            elif saved_conv:
+                # Re-load the thread if we have a conv but no cached messages
+                self._load_thread(saved_conv)
+            else:
+                msg_view.messages = []
+        elif tab_name == "calendar":
+            self.active_event = state.get("active_event")
+            self.active_conv = None
+            self.active_reminder = None
+            if self.active_event:
+                self.query_one("#detail-view", DetailView).detail = self.active_event
+        elif tab_name == "reminders":
+            self.active_reminder = state.get("active_reminder")
+            self._rem_list_filter = state.get("rem_list_filter", "")
+            self.active_conv = None
+            self.active_event = None
+            if self.active_reminder:
+                self.query_one("#detail-view", DetailView).detail = self.active_reminder
+        else:
+            # For tabs without saved state, just clear active selections
+            self.active_conv = None
+            self.active_event = None
+            self.active_reminder = None
+
     @on(Tabs.TabActivated, "#tabs")
     def on_tab_activated(self, event: Tabs.TabActivated) -> None:
         tab_map = {
@@ -441,9 +504,17 @@ class InboxApp(App):
             "tab-gh": "github",
             "tab-drv": "drive",
         }
-        self._active_filter = tab_map.get(event.tab.id or "", "all")
+        new_filter = tab_map.get(event.tab.id or "", "all")
+        # Save state of the tab we're leaving
+        if self._active_filter != new_filter:
+            self._save_tab_state(self._active_filter)
+        self._active_filter = new_filter
         self._render_sidebar()
         self._toggle_views()
+        # Restore state of the tab we're entering
+        self._restore_tab_state(new_filter)
+        # Re-highlight the selected item in the sidebar
+        self._restore_sidebar_selection()
 
     def _toggle_views(self) -> None:
         is_detail = self._active_filter in (
@@ -542,6 +613,42 @@ class InboxApp(App):
             status += f"  [yellow]{unread} unread[/]"
         status += f"  [dim]{tab_label}[/]"
         self.query_one("#status", Static).update(status)
+
+    def _restore_sidebar_selection(self) -> None:
+        """After _render_sidebar populates the ListView, restore the
+        previously selected item (if any) for the active tab."""
+        lv = self.query_one("#contact-list", ListView)
+        target_index = -1
+
+        if self._active_filter in ("all", "imessage", "gmail") and self.active_conv:
+            conv_id = self.active_conv.get("id")
+            source = self.active_conv.get("source")
+            for i, child in enumerate(lv.children):
+                if (
+                    isinstance(child, ConversationItem)
+                    and child.data.get("id") == conv_id
+                    and child.data.get("source") == source
+                ):
+                    target_index = i
+                    break
+        elif self._active_filter == "calendar" and self.active_event:
+            event_id = self.active_event.get("event_id")
+            for i, child in enumerate(lv.children):
+                if isinstance(child, EventItem) and child.data.get("event_id") == event_id:
+                    target_index = i
+                    break
+        elif self._active_filter == "reminders" and self.active_reminder:
+            rem_id = self.active_reminder.get("id")
+            for i, child in enumerate(lv.children):
+                if isinstance(child, ReminderItem) and child.data.get("id") == rem_id:
+                    target_index = i
+                    break
+        elif self._active_filter == "notes":
+            # Notes restore is handled by _load_note in _restore_tab_state
+            pass
+
+        if target_index >= 0:
+            lv.index = target_index
 
     # ── Tab shortcuts ────────────────────────────────────────────────────
 
