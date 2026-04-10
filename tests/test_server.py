@@ -84,6 +84,21 @@ class TestHealth:
         assert data["github_configured"] is True
 
 
+class TestLifespanCleanup:
+    def test_shutdown_closes_sqlite_connections(self):
+        import inbox_server
+
+        with (
+            patch("inbox_server.init_contacts", return_value=0),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
+            patch("inbox_server.close_sqlite_connections") as mock_close,
+            TestClient(inbox_server.app, raise_server_exceptions=False),
+        ):
+            pass
+
+        mock_close.assert_called_once_with()
+
+
 # ── Conversations ───────────────────────────────────────────────────────────
 
 

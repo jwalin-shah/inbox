@@ -28,6 +28,7 @@ from services import (
     calendar_delete_event,
     calendar_events,
     calendar_update_event,
+    close_sqlite_connections,
     drive_create_folder,
     drive_delete,
     drive_files,
@@ -333,8 +334,10 @@ async def lifespan(app: FastAPI):
         f"Calendar accounts: {list(cal.keys())}, "
         f"Drive accounts: {list(drive.keys())}"
     )
-
-    yield
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(close_sqlite_connections)
 
 
 app = FastAPI(title="Inbox API", lifespan=lifespan)

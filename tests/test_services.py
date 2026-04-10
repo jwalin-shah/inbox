@@ -387,3 +387,112 @@ class TestStructuredLogging:
         assert re.search(r"except.*pass", services_text) is None
         assert re.search(r"except.*return\s+\[\]", services_text) is None
         assert re.search(r"except.*return\s+False", services_text) is None
+
+
+class TestSqliteConnectionManagement:
+    def test_notes_list_reuses_cached_connection(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "NoteStore.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE ZICCLOUDSYNCINGOBJECT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZTITLE1 TEXT,
+                ZSNIPPET TEXT,
+                ZMODIFICATIONDATE1 REAL,
+                ZFOLDER INTEGER,
+                ZTITLE2 TEXT,
+                ZMARKEDFORDELETION INTEGER
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO ZICCLOUDSYNCINGOBJECT
+                (Z_PK, ZTITLE1, ZSNIPPET, ZMODIFICATIONDATE1, ZFOLDER, ZTITLE2, ZMARKEDFORDELETION)
+            VALUES
+                (1, 'Test note', 'Snippet', 60, NULL, NULL, 0)
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        services.close_sqlite_connections()
+        monkeypatch.setattr(services, "NOTES_DB", db_path)
+
+        connect_calls = 0
+        real_connect = services.sqlite3.connect
+
+        def counting_connect(*args: Any, **kwargs: Any):
+            nonlocal connect_calls
+            connect_calls += 1
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(services.sqlite3, "connect", counting_connect)
+        try:
+            first = services.notes_list()
+            second = services.notes_list()
+        finally:
+            services.close_sqlite_connections()
+
+        assert [note.title for note in first] == ["Test note"]
+        assert [note.title for note in second] == ["Test note"]
+        assert connect_calls == 1
+
+    def test_locked_sqlite_returns_empty_and_logs_warning(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "NoteStore.sqlite"
+        db_path.write_text("")
+        monkeypatch.setattr(services, "NOTES_DB", db_path)
+
+        class _LockedCursor:
+            def execute(self, *args: Any, **kwargs: Any) -> None:
+                raise sqlite3.OperationalError("database is locked")
+
+        class _LockedConnection:
+            def cursor(self) -> _LockedCursor:
+                return _LockedCursor()
+
+        monkeypatch.setattr(
+            services._sqlite_connections, "get_connection", lambda path: _LockedConnection()
+        )
+        sink = StringIO()
+        sink_id = logger.add(sink, format="{message}")
+        try:
+            assert services.notes_list() == []
+        finally:
+            logger.remove(sink_id)
+
+        log_output = sink.getvalue()
+        assert "notes_list" in log_output
+        assert "database is locked" in log_output
+
+    def test_close_sqlite_connections_clears_cache(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "NoteStore.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE ZICCLOUDSYNCINGOBJECT (
+                Z_PK INTEGER PRIMARY KEY,
+                ZTITLE1 TEXT,
+                ZSNIPPET TEXT,
+                ZMODIFICATIONDATE1 REAL,
+                ZFOLDER INTEGER,
+                ZTITLE2 TEXT,
+                ZMARKEDFORDELETION INTEGER
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        services.close_sqlite_connections()
+        monkeypatch.setattr(services, "NOTES_DB", db_path)
+
+        services.notes_list()
+        assert services._sqlite_connections.cached_connection_count() == 1
+
+        services.close_sqlite_connections()
+
+        assert services._sqlite_connections.cached_connection_count() == 0

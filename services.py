@@ -55,6 +55,9 @@ GOOGLE_SCOPES = [
 ]
 
 ATTACHMENT_PLACEHOLDER = "\ufffc"
+SQLITE_LOCK_RETRIES = 2
+SQLITE_LOCK_RETRY_DELAY = 0.05
+SQLITE_CONNECT_TIMEOUT = 0.2
 
 # Global contact book
 _contacts = ContactBook()
@@ -190,6 +193,103 @@ def _log_service_failure(function_name: str, **context: object) -> None:
     logger.exception(message)
 
 
+class SQLiteConnectionManager:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._connections: dict[tuple[str, int], sqlite3.Connection] = {}
+
+    def get_connection(self, db_path: Path) -> sqlite3.Connection:
+        key = (str(db_path), threading.get_ident())
+        with self._lock:
+            conn = self._connections.get(key)
+            if conn is None:
+                conn = sqlite3.connect(
+                    f"file:{db_path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False,
+                    timeout=SQLITE_CONNECT_TIMEOUT,
+                )
+                self._connections[key] = conn
+            return conn
+
+    def close_all(self) -> None:
+        with self._lock:
+            connections = list(self._connections.values())
+            self._connections.clear()
+        for conn in connections:
+            try:
+                conn.close()
+            except Exception:
+                _log_service_failure("SQLiteConnectionManager.close_all")
+
+    def cached_connection_count(self) -> int:
+        with self._lock:
+            return len(self._connections)
+
+
+_sqlite_connections = SQLiteConnectionManager()
+
+
+def close_sqlite_connections() -> None:
+    _sqlite_connections.close_all()
+
+
+def _is_sqlite_locked_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _log_sqlite_locked_warning(
+    function_name: str,
+    db_path: Path,
+    attempt: int,
+    retries: int,
+    exc: sqlite3.OperationalError,
+    **context: object,
+) -> None:
+    context_str = _format_log_context(db_path=str(db_path), **context)
+    message = f"{function_name} encountered locked SQLite database: {exc}"
+    if context_str:
+        message = f"{message} ({context_str})"
+    logger.warning(f"{message} [attempt {attempt}/{retries + 1}]")
+
+
+def _run_sqlite_read[T](
+    db_path: Path,
+    function_name: str,
+    operation: Callable[[sqlite3.Connection], T],
+    *,
+    empty_result: T,
+    retries: int = SQLITE_LOCK_RETRIES,
+    retry_delay: float = SQLITE_LOCK_RETRY_DELAY,
+    **context: object,
+) -> T:
+    for attempt in range(retries + 1):
+        try:
+            conn = _sqlite_connections.get_connection(db_path)
+            return operation(conn)
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_locked_error(exc):
+                _log_sqlite_locked_warning(
+                    function_name,
+                    db_path,
+                    attempt + 1,
+                    retries,
+                    exc,
+                    **context,
+                )
+                if attempt < retries:
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                return empty_result
+            _log_service_failure(function_name, db_path=str(db_path), **context)
+            return empty_result
+        except Exception:
+            _log_service_failure(function_name, db_path=str(db_path), **context)
+            return empty_result
+    return empty_result
+
+
 # ── Credential helpers ───────────────────────────────────────────────────────
 
 
@@ -295,8 +395,8 @@ def reauth_google_account(email: str) -> str | None:
 def imsg_contacts(limit: int = 30) -> list[Contact]:
     if not IMSG_DB.exists():
         return []
-    try:
-        conn = sqlite3.connect(f"file:{IMSG_DB}?mode=ro", uri=True)
+
+    def _load_contacts(conn: sqlite3.Connection) -> list[Contact]:
         cur = conn.cursor()
         cur.execute(
             """
@@ -365,18 +465,22 @@ def imsg_contacts(limit: int = 30) -> list[Contact]:
                 )
             )
 
-        conn.close()
         return contacts
-    except Exception:  # logged below
-        _log_service_failure("imsg_contacts", limit=limit, db_path=str(IMSG_DB))
-        return []
+
+    return _run_sqlite_read(
+        IMSG_DB,
+        "imsg_contacts",
+        _load_contacts,
+        empty_result=[],
+        limit=limit,
+    )
 
 
 def imsg_thread(chat_id: str, limit: int = 50) -> list[Msg]:
     if not IMSG_DB.exists():
         return []
-    try:
-        conn = sqlite3.connect(f"file:{IMSG_DB}?mode=ro", uri=True)
+
+    def _load_thread(conn: sqlite3.Connection) -> list[Msg]:
         cur = conn.cursor()
         cur.execute(
             """
@@ -392,7 +496,6 @@ def imsg_thread(chat_id: str, limit: int = 50) -> list[Msg]:
             (int(chat_id), limit),
         )
         rows = cur.fetchall()
-        conn.close()
 
         msgs = []
         for text, is_me, ts, sender_id in reversed(rows):
@@ -410,9 +513,15 @@ def imsg_thread(chat_id: str, limit: int = 50) -> list[Msg]:
                 )
             )
         return msgs
-    except Exception:  # logged below
-        _log_service_failure("imsg_thread", chat_id=chat_id, limit=limit, db_path=str(IMSG_DB))
-        return []
+
+    return _run_sqlite_read(
+        IMSG_DB,
+        "imsg_thread",
+        _load_thread,
+        empty_result=[],
+        chat_id=chat_id,
+        limit=limit,
+    )
 
 
 def imsg_send(contact: Contact, text: str) -> bool:
@@ -426,8 +535,8 @@ def imsg_send(contact: Contact, text: str) -> bool:
         end tell
         '''
     else:
-        try:
-            conn = sqlite3.connect(f"file:{IMSG_DB}?mode=ro", uri=True)
+
+        def _lookup_recipient(conn: sqlite3.Connection) -> str | None:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -438,16 +547,18 @@ def imsg_send(contact: Contact, text: str) -> bool:
                 (int(contact.id),),
             )
             row = cur.fetchone()
-            conn.close()
-            recipient = row[0] if row else contact.guid.split(";")[-1]
-        except Exception:  # logged below
-            _log_service_failure(
-                "imsg_send.lookup_recipient",
-                contact_id=contact.id,
-                guid=contact.guid,
-                is_group=contact.is_group,
-            )
-            recipient = contact.guid.split(";")[-1]
+            return row[0] if row else None
+
+        recipient = _run_sqlite_read(
+            IMSG_DB,
+            "imsg_send.lookup_recipient",
+            _lookup_recipient,
+            empty_result=None,
+            contact_id=contact.id,
+            guid=contact.guid,
+            is_group=contact.is_group,
+        )
+        recipient = recipient or contact.guid.split(";")[-1]
 
         script = f'''
         tell application "Messages"
@@ -846,8 +957,8 @@ def notes_list(limit: int = 50) -> list[Note]:
     """List recent Apple Notes from SQLite."""
     if not NOTES_DB.exists():
         return []
-    try:
-        conn = sqlite3.connect(f"file:{NOTES_DB}?mode=ro", uri=True)
+
+    def _load_notes(conn: sqlite3.Connection) -> list[Note]:
         cur = conn.cursor()
         cur.execute(
             """
@@ -868,7 +979,6 @@ def notes_list(limit: int = 50) -> list[Note]:
             (limit,),
         )
         rows = cur.fetchall()
-        conn.close()
 
         notes = []
         for pk, title, snippet, mod_date, folder in rows:
@@ -883,9 +993,14 @@ def notes_list(limit: int = 50) -> list[Note]:
                 )
             )
         return notes
-    except Exception:  # logged below
-        _log_service_failure("notes_list", limit=limit, db_path=str(NOTES_DB))
-        return []
+
+    return _run_sqlite_read(
+        NOTES_DB,
+        "notes_list",
+        _load_notes,
+        empty_result=[],
+        limit=limit,
+    )
 
 
 def note_body(title: str) -> str:
@@ -996,15 +1111,14 @@ def _reminders_dbs() -> list[Path]:
         return []
     dbs = []
     for p in sorted(REMINDERS_DIR.glob("Data-*.sqlite")):
-        try:
-            conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-            count = conn.execute("SELECT COUNT(*) FROM ZREMCDREMINDER").fetchone()[0]
-            conn.close()
-            if count > 0:
-                dbs.append(p)
-        except Exception:  # logged below
-            _log_service_failure("_reminders_dbs", db_path=str(p))
-            continue
+        count = _run_sqlite_read(
+            p,
+            "_reminders_dbs",
+            lambda conn: conn.execute("SELECT COUNT(*) FROM ZREMCDREMINDER").fetchone()[0],
+            empty_result=0,
+        )
+        if count > 0:
+            dbs.append(p)
     return dbs
 
 
@@ -1013,8 +1127,8 @@ def reminders_lists() -> list[dict[str, str | int]]:
     lists: list[dict[str, str | int]] = []
     seen_names: set[str] = set()
     for db_path in _reminders_dbs():
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+        def _load_lists(conn: sqlite3.Connection) -> list[tuple[str, int]]:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -1029,14 +1143,18 @@ def reminders_lists() -> list[dict[str, str | int]]:
                 ORDER BY l.ZNAME
             """
             )
-            for name, count in cur.fetchall():
-                if name and name not in seen_names:
-                    seen_names.add(name)
-                    lists.append({"name": name, "incomplete_count": count})
-            conn.close()
-        except Exception:  # logged below
-            _log_service_failure("reminders_lists", db_path=str(db_path))
-            continue
+            return cur.fetchall()
+
+        rows = _run_sqlite_read(
+            db_path,
+            "reminders_lists",
+            _load_lists,
+            empty_result=[],
+        )
+        for name, count in rows:
+            if name and name not in seen_names:
+                seen_names.add(name)
+                lists.append({"name": name, "incomplete_count": count})
     return lists
 
 
@@ -1048,8 +1166,8 @@ def reminders_list(
     """List reminders, optionally filtered by list name."""
     reminders: list[Reminder] = []
     for db_path in _reminders_dbs():
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+        def _load_reminders(conn: sqlite3.Connection) -> list[Reminder]:
             cur = conn.cursor()
             query = """
                 SELECT
@@ -1070,6 +1188,8 @@ def reminders_list(
             params.append(limit)
 
             cur.execute(query, params)
+            rows = cur.fetchall()
+            db_reminders = []
             for (
                 pk,
                 title,
@@ -1080,10 +1200,10 @@ def reminders_list(
                 notes,
                 created,
                 lname,
-            ) in cur.fetchall():
+            ) in rows:
                 due_dt = (APPLE_EPOCH + timedelta(seconds=due)) if due else None
                 created_dt = (APPLE_EPOCH + timedelta(seconds=created)) if created else None
-                reminders.append(
+                db_reminders.append(
                     Reminder(
                         id=str(pk),
                         title=title or "(Untitled)",
@@ -1096,16 +1216,19 @@ def reminders_list(
                         creation_date=created_dt,
                     )
                 )
-            conn.close()
-        except Exception:  # logged below
-            _log_service_failure(
+            return db_reminders
+
+        reminders.extend(
+            _run_sqlite_read(
+                db_path,
                 "reminders_list",
-                db_path=str(db_path),
+                _load_reminders,
+                empty_result=[],
                 list_name=list_name,
                 show_completed=show_completed,
                 limit=limit,
             )
-            continue
+        )
     return reminders
 
 
