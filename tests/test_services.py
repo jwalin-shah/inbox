@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
+import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from io import StringIO
@@ -17,6 +19,7 @@ from services import (
     _build_event_body,
     _clean_body,
     _clean_email_body,
+    _escape_applescript,
     _html_to_text,
     _parse_email_address,
     _parse_time,
@@ -316,6 +319,95 @@ class TestBuildEventBody:
         end = datetime(2025, 6, 16)
         body = _build_event_body("Event", start, end, all_day=True)
         assert "location" not in body
+
+
+class TestAppleScriptEscaping:
+    def test_escape_applescript_handles_special_characters(self):
+        escaped = _escape_applescript('Hello "Inbox"\\{team}\nTab\t🙂')
+
+        assert escaped.startswith('"Hello ')
+        assert "quote" in escaped
+        assert "ASCII character 92" in escaped
+        assert "ASCII character 123" in escaped
+        assert "ASCII character 125" in escaped
+        assert "ASCII character 10" in escaped
+        assert "ASCII character 9" in escaped
+        assert "🙂" in escaped
+        assert "\n" not in escaped
+
+    def test_imessage_group_send_uses_escaped_expressions(self, monkeypatch):
+        captured: dict[str, str] = {}
+
+        def fake_run(args: list[str], **kwargs: Any):
+            captured["script"] = args[2]
+
+            class _Result:
+                returncode = 0
+
+            return _Result()
+
+        monkeypatch.setattr(services.subprocess, "run", fake_run)
+
+        contact = services.Contact(
+            id="1",
+            name="Group chat",
+            source="imessage",
+            guid='chat-{team}"primary"',
+            is_group=True,
+        )
+        text = 'Check "quoted" \\ path {today}\nnow'
+
+        assert services.imsg_send(contact, text) is True
+
+        escaped_guid = services._escape_applescript(contact.guid)
+        escaped_text = services._escape_applescript(text)
+        script = captured["script"]
+        assert escaped_guid in script
+        assert escaped_text in script
+        assert 'send "Check "quoted"' not in script
+
+    def test_note_and_reminder_scripts_use_escaped_expressions(self, monkeypatch):
+        captured: list[str] = []
+
+        def fake_run(args: list[str], **kwargs: Any):
+            captured.append(args[2])
+
+            class _Result:
+                returncode = 0
+                stdout = "ok"
+
+            return _Result()
+
+        monkeypatch.setattr(services.subprocess, "run", fake_run)
+
+        title = 'Title "quoted" \\ {set}\nnext'
+        list_name = "Errands {today}"
+        notes = 'Remember "milk" \\ bread'
+        due_date = "April 10, 2026 5:00 PM"
+
+        assert services.note_body(title) == "ok"
+        assert services.reminder_complete(title) is True
+        assert (
+            services.reminder_create(
+                title=title,
+                list_name=list_name,
+                due_date=due_date,
+                notes=notes,
+            )
+            is True
+        )
+
+        escaped_title = services._escape_applescript(title)
+        escaped_list = services._escape_applescript(list_name)
+        escaped_notes = services._escape_applescript(notes)
+        escaped_due_date = services._escape_applescript(due_date)
+
+        assert escaped_title in captured[0]
+        assert escaped_title in captured[1]
+        assert escaped_title in captured[2]
+        assert escaped_list in captured[2]
+        assert escaped_notes in captured[2]
+        assert escaped_due_date in captured[2]
 
 
 # ── structured logging ─────────────────────────────────────────────────────
@@ -634,3 +726,70 @@ class TestSqliteConnectionManagement:
         services.close_sqlite_connections()
 
         assert services._sqlite_connections.cached_connection_count() == 0
+
+
+class _FakeRefreshedCredentials:
+    def __init__(self) -> None:
+        self.valid = False
+        self.expired = True
+        self.refresh_token = "refresh-token"
+        self.scopes = list(services.GOOGLE_SCOPES)
+
+    def refresh(self, request: Any) -> None:
+        self.valid = True
+
+    def to_json(self) -> str:
+        return '{"token": "updated"}'
+
+
+class TestTokenFileLocking:
+    def test_load_creds_refresh_uses_locked_write(self, monkeypatch, tmp_path):
+        token_path = tmp_path / "acct.json"
+        token_path.write_text("{}")
+        fake_creds = _FakeRefreshedCredentials()
+        writes: list[tuple[Path, str]] = []
+
+        monkeypatch.setattr(
+            services.Credentials,
+            "from_authorized_user_file",
+            lambda path: fake_creds,
+        )
+
+        def fake_write_text_with_lock(path: Path, payload: str) -> None:
+            writes.append((path, payload))
+            path.write_text(payload)
+
+        monkeypatch.setattr(services, "_write_text_with_lock", fake_write_text_with_lock)
+
+        creds = services._load_creds(token_path)
+
+        assert creds is fake_creds
+        assert writes == [(token_path, '{"token": "updated"}')]
+        assert token_path.read_text() == '{"token": "updated"}'
+
+    def test_write_text_with_lock_preserves_valid_json_under_concurrent_writes(self, tmp_path):
+        token_path = tmp_path / "acct.json"
+        payloads = [
+            json.dumps({"token": "first", "count": 1}),
+            json.dumps({"token": "second", "count": 2}),
+        ]
+        start = threading.Barrier(3)
+
+        def writer(payload: str) -> None:
+            start.wait()
+            for _ in range(25):
+                services._write_text_with_lock(token_path, payload)
+
+        threads = [threading.Thread(target=writer, args=(payload,)) for payload in payloads]
+        for thread in threads:
+            thread.start()
+
+        start.wait()
+
+        for thread in threads:
+            thread.join()
+
+        assert json.loads(token_path.read_text()) in [
+            {"token": "first", "count": 1},
+            {"token": "second", "count": 2},
+        ]

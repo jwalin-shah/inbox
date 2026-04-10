@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import services
 from services import reminder_complete, reminder_create, reminders_list, reminders_lists
 
 
@@ -87,7 +88,7 @@ class TestReminderComplete:
             mock_run.return_value = MagicMock(returncode=0, stdout="ok")
             reminder_complete('Buy "fancy" cheese')
         script = mock_run.call_args[0][0][2]
-        assert '\\"fancy\\"' in script
+        assert services._escape_applescript('Buy "fancy" cheese') in script
 
 
 class TestReminderCreate:

@@ -6,9 +6,10 @@ All data fetching, auth, mutation, audio, and LLM logic lives here.
 from __future__ import annotations
 
 import base64
+import fcntl
 import mimetypes
+import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import threading
@@ -194,6 +195,63 @@ def _log_service_failure(function_name: str, **context: object) -> None:
     logger.exception(message)
 
 
+def _escape_applescript(text: str) -> str:
+    if not text:
+        return '""'
+
+    replacements = {
+        '"': "quote",
+        "\\": "ASCII character 92",
+        "{": "ASCII character 123",
+        "}": "ASCII character 125",
+        "\n": "ASCII character 10",
+        "\r": "ASCII character 13",
+        "\t": "ASCII character 9",
+    }
+    parts: list[str] = []
+    literal: list[str] = []
+
+    def flush_literal() -> None:
+        if literal:
+            parts.append(f'"{"".join(literal)}"')
+            literal.clear()
+
+    for char in text:
+        replacement = replacements.get(char)
+        if replacement is not None:
+            flush_literal()
+            parts.append(replacement)
+        elif ord(char) < 32:
+            flush_literal()
+            parts.append(f"ASCII character {ord(char)}")
+        else:
+            literal.append(char)
+
+    flush_literal()
+    return " & ".join(parts) if parts else '""'
+
+
+def _token_lock_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.lock")
+
+
+def _write_text_with_lock(path: Path, payload: str) -> None:
+    path.parent.mkdir(exist_ok=True)
+    lock_path = _token_lock_path(path)
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            with temp_path.open("w", encoding="utf-8") as temp_file:
+                temp_file.write(payload)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class SQLiteConnectionManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -300,7 +358,7 @@ def _load_creds(token_path: Path) -> Credentials | None:
         if not creds.valid:
             if creds.expired and creds.refresh_token:
                 creds.refresh(Request())
-                token_path.write_text(creds.to_json())
+                _write_text_with_lock(token_path, creds.to_json())
             else:
                 return None
         return creds
@@ -321,7 +379,7 @@ def google_auth_all() -> tuple[dict[str, object], dict[str, object], dict[str, o
             needed = set(GOOGLE_SCOPES)
             if needed.issubset(token_scopes):
                 # Has all scopes, just migrate
-                shutil.copy2(TOKEN_FILE, TOKENS_DIR / "migrated.json")
+                _write_text_with_lock(TOKENS_DIR / "migrated.json", TOKEN_FILE.read_text())
             else:
                 # Missing scopes — re-auth automatically
                 if CREDS_FILE.exists():
@@ -330,7 +388,7 @@ def google_auth_all() -> tuple[dict[str, object], dict[str, object], dict[str, o
                     svc = build("gmail", "v1", credentials=new_creds)
                     email = svc.users().getProfile(userId="me").execute().get("emailAddress", "")
                     dest = TOKENS_DIR / f"{email}.json"
-                    dest.write_text(new_creds.to_json())
+                    _write_text_with_lock(dest, new_creds.to_json())
 
     gmail_svcs: dict[str, object] = {}
     cal_svcs: dict[str, object] = {}
@@ -379,7 +437,7 @@ def add_google_account() -> str | None:
     svc = build("gmail", "v1", credentials=creds)
     email = svc.users().getProfile(userId="me").execute().get("emailAddress", "")
     token_path = TOKENS_DIR / f"{email}.json"
-    token_path.write_text(creds.to_json())
+    _write_text_with_lock(token_path, creds.to_json())
     return email
 
 
@@ -526,15 +584,16 @@ def imsg_thread(chat_id: str, limit: int = 50) -> list[Msg]:
 
 
 def imsg_send(contact: Contact, text: str) -> bool:
-    safe_text = text.replace("\\", "\\\\").replace('"', '\\"')
+    safe_text = _escape_applescript(text)
 
     if contact.is_group:
-        script = f'''
+        safe_guid = _escape_applescript(contact.guid)
+        script = f"""
         tell application "Messages"
-            set targetChat to (first chat whose id is "{contact.guid}")
-            send "{safe_text}" to targetChat
+            set targetChat to (first chat whose id is ({safe_guid}))
+            send ({safe_text}) to targetChat
         end tell
-        '''
+        """
     else:
 
         def _lookup_recipient(conn: sqlite3.Connection) -> str | None:
@@ -560,13 +619,14 @@ def imsg_send(contact: Contact, text: str) -> bool:
             is_group=contact.is_group,
         )
         recipient = recipient or contact.guid.split(";")[-1]
+        safe_recipient = _escape_applescript(recipient)
 
-        script = f'''
+        script = f"""
         tell application "Messages"
             set targetService to (1st service whose service type = iMessage)
-            send "{safe_text}" to buddy "{recipient}" of targetService
+            send ({safe_text}) to buddy ({safe_recipient}) of targetService
         end tell
-        '''
+        """
 
     result = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
     return result.returncode == 0
@@ -1082,17 +1142,17 @@ def notes_list(limit: int = 50) -> list[Note]:
 
 def note_body(title: str) -> str:
     """Get full note body via AppleScript."""
-    safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
-    script = f'''
+    safe_title = _escape_applescript(title)
+    script = f"""
     tell application "Notes"
         try
-            set theNote to first note whose name is "{safe_title}"
+            set theNote to first note whose name is ({safe_title})
             return plaintext of theNote
         on error
             return ""
         end try
     end tell
-    '''
+    """
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
@@ -1311,18 +1371,18 @@ def reminders_list(
 
 def reminder_complete(title: str) -> bool:
     """Mark a reminder as complete via AppleScript."""
-    safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
-    script = f'''
+    safe_title = _escape_applescript(title)
+    script = f"""
     tell application "Reminders"
         try
-            set theReminder to (first reminder whose name is "{safe_title}" and completed is false)
+            set theReminder to (first reminder whose name is ({safe_title}) and completed is false)
             set completed of theReminder to true
             return "ok"
         on error
             return "fail"
         end try
     end tell
-    '''
+    """
     try:
         result = subprocess.run(
             ["osascript", "-e", script], capture_output=True, timeout=10, text=True
@@ -1340,26 +1400,27 @@ def reminder_create(
     notes: str = "",
 ) -> bool:
     """Create a new reminder via AppleScript."""
-    safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
-    safe_notes = notes.replace("\\", "\\\\").replace('"', '\\"')
-    safe_list = list_name.replace("\\", "\\\\").replace('"', '\\"')
+    safe_title = _escape_applescript(title)
+    safe_notes = _escape_applescript(notes)
+    safe_list = _escape_applescript(list_name)
 
-    props = f'name:"{safe_title}"'
+    props = f"name:({safe_title})"
     if notes:
-        props += f', body:"{safe_notes}"'
+        props += f", body:({safe_notes})"
 
     # Build due date clause
     due_clause = ""
     if due_date:
+        safe_due_date = _escape_applescript(due_date)
         due_clause = f"""
-            set dStr to "{due_date}"
+            set dStr to ({safe_due_date})
             set due date of theReminder to date dStr
         """
 
-    script = f'''
+    script = f"""
     tell application "Reminders"
         try
-            set targetList to list "{safe_list}"
+            set targetList to list ({safe_list})
         on error
             set targetList to default list
         end try
@@ -1367,7 +1428,7 @@ def reminder_create(
         {due_clause}
         return "ok"
     end tell
-    '''
+    """
     try:
         result = subprocess.run(
             ["osascript", "-e", script], capture_output=True, timeout=10, text=True
