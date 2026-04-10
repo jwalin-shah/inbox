@@ -40,6 +40,24 @@ Testing surface, required testing skills/tools, and resource cost classification
 - `tuistory` — for TUI visual validation
 - `curl` — for API endpoint validation (built-in, no special skill needed)
 
+## Flow Validator Guidance: CLI
+
+For assertions that use pytest, pyright, ruff, or python import checks:
+- Working directory: `/Users/jwalinshah/projects/inbox`
+- Commands: `uv run pytest -x -q`, `uv run pyright`, `uv run ruff check .`
+- No server needed for CLI checks
+- No isolation concerns — these are read-only analysis tools
+- Capture full command output and exit code as evidence
+
+## Flow Validator Guidance: curl
+
+For assertions that use curl against the server:
+- Server URL: http://localhost:9849
+- Start server: `cd /Users/jwalinshah/projects/inbox && uv run python inbox_server.py &`
+- Wait for healthcheck: `for i in $(seq 1 20); do curl -sf http://localhost:9849/health && break; sleep 1; done`
+- Teardown: `lsof -ti :9849 | xargs kill 2>/dev/null || true`
+- Only ONE flow validator should manage the server lifecycle at a time
+
 ## Known Limitations
 - macOS desktop notifications cannot be validated programmatically via tuistory; only the in-TUI bell indicator can be checked
 - Audio capture (ambient/dictation) requires real microphone hardware; tests must mock audio input
