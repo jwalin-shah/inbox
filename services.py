@@ -2638,6 +2638,287 @@ Received: {last_message}
 Reply:"""
 
 
+# ── Global Search ────────────────────────────────────────────────────────────
+
+SEARCH_SNIPPET_LEN = 150
+
+
+def _make_snippet(text: str, query: str, max_len: int = SEARCH_SNIPPET_LEN) -> str:
+    """Return a short snippet with the match region, up to max_len chars."""
+    if not text:
+        return ""
+    lower = text.lower()
+    idx = lower.find(query.lower())
+    if idx == -1:
+        return text[:max_len]
+    start = max(0, idx - 40)
+    end = min(len(text), start + max_len)
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(text):
+        snippet = snippet + "…"
+    return snippet
+
+
+def _search_imessage(query: str, limit: int) -> list[dict]:
+    if not IMSG_DB.exists():
+        return []
+    q = f"%{query}%"
+
+    def _run(conn: sqlite3.Connection) -> list[dict]:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                m.rowid, m.text,
+                m.date / 1000000000 + 978307200 as ts,
+                cmj.chat_id
+            FROM message m
+            JOIN chat_message_join cmj ON m.rowid = cmj.message_id
+            WHERE m.text LIKE ? AND m.text IS NOT NULL
+            ORDER BY m.rowid DESC LIMIT ?
+            """,
+            (q, limit),
+        )
+        rows = cur.fetchall()
+        results = []
+        for _rowid, text, ts_raw, chat_id in rows:
+            body = _clean_body(text)
+            if not body:
+                continue
+            ts_dt = datetime.fromtimestamp(ts_raw) if ts_raw else datetime.now()
+            results.append(
+                {
+                    "source": "imessage",
+                    "id": str(chat_id),
+                    "title": f"iMessage chat {chat_id}",
+                    "snippet": _make_snippet(body, query),
+                    "timestamp": ts_dt.isoformat(),
+                    "metadata": {"chat_id": str(chat_id)},
+                }
+            )
+        return results
+
+    return _run_sqlite_read(IMSG_DB, "_search_imessage", _run, empty_result=[], query=query)
+
+
+def _search_gmail(gmail_services: dict, query: str, limit: int) -> list[dict]:
+    results: list[dict] = []
+    for account_email, svc in gmail_services.items():
+        try:
+            resp = svc.users().messages().list(userId="me", q=query, maxResults=limit).execute()
+            messages = resp.get("messages", [])
+            if not messages:
+                continue
+            metadata = _fetch_gmail_metadata_batch(svc, [m["id"] for m in messages])
+            for m in messages:
+                msg = metadata.get(m["id"])
+                if not msg:
+                    continue
+                payload = msg.get("payload", {})
+                headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
+                subject = headers.get("Subject", "(no subject)")
+                raw_from = headers.get("From", "")
+                display_name, _ = _parse_email_address(raw_from)
+                ts_ms = int(msg.get("internalDate", 0))
+                ts_dt = datetime.fromtimestamp(ts_ms / 1000) if ts_ms else datetime.now()
+                thread_id = m.get("threadId", m["id"])
+                results.append(
+                    {
+                        "source": "gmail",
+                        "id": m["id"],
+                        "title": subject,
+                        "snippet": _make_snippet(subject, query),
+                        "timestamp": ts_dt.isoformat(),
+                        "metadata": {
+                            "thread_id": thread_id,
+                            "from": display_name,
+                            "account": account_email,
+                        },
+                    }
+                )
+        except Exception:
+            _log_service_failure("_search_gmail", account=account_email, query=query)
+    return results
+
+
+def _search_notes(query: str, limit: int) -> list[dict]:
+    if not NOTES_DB.exists():
+        return []
+    q = f"%{query}%"
+
+    def _run(conn: sqlite3.Connection) -> list[dict]:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT n.Z_PK, n.ZTITLE1, n.ZSNIPPET, n.ZMODIFICATIONDATE1
+            FROM ZICCLOUDSYNCINGOBJECT n
+            WHERE n.ZTITLE1 IS NOT NULL
+              AND (n.ZMARKEDFORDELETION IS NULL OR n.ZMARKEDFORDELETION = 0)
+              AND (n.ZTITLE1 LIKE ? OR n.ZSNIPPET LIKE ?)
+            ORDER BY n.ZMODIFICATIONDATE1 DESC LIMIT ?
+            """,
+            (q, q, limit),
+        )
+        rows = cur.fetchall()
+        results = []
+        for pk, title, snippet, mod_date in rows:
+            ts = APPLE_EPOCH + timedelta(seconds=mod_date) if mod_date else datetime.now()
+            text = f"{title} {snippet or ''}"
+            results.append(
+                {
+                    "source": "notes",
+                    "id": str(pk),
+                    "title": title or "(Untitled)",
+                    "snippet": _make_snippet(text, query),
+                    "timestamp": ts.isoformat(),
+                    "metadata": {},
+                }
+            )
+        return results
+
+    return _run_sqlite_read(NOTES_DB, "_search_notes", _run, empty_result=[], query=query)
+
+
+def _search_reminders(query: str, limit: int) -> list[dict]:
+    q = f"%{query}%"
+    results: list[dict] = []
+    for db_path in _reminders_dbs():
+
+        def _run(conn: sqlite3.Connection) -> list[dict]:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT r.Z_PK, r.ZTITLE, r.ZNOTES, r.ZDUEDATE, r.ZCREATIONDATE,
+                       COALESCE(l.ZNAME, '') as list_name
+                FROM ZREMCDREMINDER r
+                LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
+                WHERE (r.ZMARKEDFORDELETION IS NULL OR r.ZMARKEDFORDELETION = 0)
+                  AND r.ZCOMPLETED = 0
+                  AND (r.ZTITLE LIKE ? OR r.ZNOTES LIKE ?)
+                ORDER BY r.ZDUEDATE IS NULL, r.ZDUEDATE ASC LIMIT ?
+                """,
+                (q, q, limit),
+            )
+            rows = cur.fetchall()
+            items = []
+            for pk, title, notes, due, created, list_name in rows:
+                ts_raw = created or due
+                ts = (APPLE_EPOCH + timedelta(seconds=ts_raw)) if ts_raw else datetime.now()
+                text = f"{title or ''} {notes or ''}"
+                items.append(
+                    {
+                        "source": "reminders",
+                        "id": str(pk),
+                        "title": title or "(Untitled)",
+                        "snippet": _make_snippet(text, query),
+                        "timestamp": ts.isoformat(),
+                        "metadata": {"list_name": list_name},
+                    }
+                )
+            return items
+
+        results.extend(
+            _run_sqlite_read(db_path, "_search_reminders", _run, empty_result=[], query=query)
+        )
+    return results
+
+
+def _search_calendar(cal_services: dict, query: str, limit: int) -> list[dict]:
+    q = query.lower()
+    results: list[dict] = []
+    now = datetime.now().astimezone()
+    time_min = (now - timedelta(days=30)).isoformat()
+    time_max = (now + timedelta(days=180)).isoformat()
+    for account_email, svc in cal_services.items():
+        try:
+            cal_list = svc.calendarList().list().execute()  # type: ignore[attr-defined]
+            for cal_entry in cal_list.get("items", []):
+                cal_id = cal_entry["id"]
+                resp = (
+                    svc.events()  # type: ignore[attr-defined]
+                    .list(
+                        calendarId=cal_id,
+                        q=query,
+                        timeMin=time_min,
+                        timeMax=time_max,
+                        singleEvents=True,
+                        maxResults=limit,
+                        orderBy="startTime",
+                    )
+                    .execute()
+                )
+                for item in resp.get("items", []):
+                    summary = item.get("summary", "(No title)")
+                    description = item.get("description", "")
+                    text = f"{summary} {description}"
+                    if q not in text.lower():
+                        continue
+                    start_raw = item.get("start", {})
+                    start_str = start_raw.get("dateTime") or start_raw.get("date", "")
+                    try:
+                        ts_dt = datetime.fromisoformat(start_str)
+                    except (ValueError, TypeError):
+                        ts_dt = datetime.now()
+                    results.append(
+                        {
+                            "source": "calendar",
+                            "id": item.get("id", ""),
+                            "title": summary,
+                            "snippet": _make_snippet(text, query),
+                            "timestamp": ts_dt.isoformat(),
+                            "metadata": {
+                                "calendar_id": cal_id,
+                                "account": account_email,
+                                "location": item.get("location", ""),
+                            },
+                        }
+                    )
+        except Exception:
+            _log_service_failure("_search_calendar", account=account_email, query=query)
+    return results
+
+
+def search_all(
+    query: str,
+    sources: list[str],
+    limit: int = 50,
+    gmail_services: dict | None = None,
+    cal_services: dict | None = None,
+) -> dict:
+    """Search across all requested sources.  Returns ranked results dict."""
+    if not query or not query.strip():
+        return {"query": query, "total": 0, "results": []}
+
+    gmail_services = gmail_services or {}
+    cal_services = cal_services or {}
+
+    want_all = "all" in sources
+    results: list[dict] = []
+
+    if want_all or "imessage" in sources:
+        results.extend(_search_imessage(query, limit))
+
+    if want_all or "gmail" in sources:
+        results.extend(_search_gmail(gmail_services, query, limit))
+
+    if want_all or "notes" in sources:
+        results.extend(_search_notes(query, limit))
+
+    if want_all or "reminders" in sources:
+        results.extend(_search_reminders(query, limit))
+
+    if want_all or "calendar" in sources:
+        results.extend(_search_calendar(cal_services, query, limit))
+
+    # Rank by timestamp desc (most recent first)
+    results.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+    results = results[:limit]
+
+    return {"query": query, "total": len(results), "results": results}
+
+
 def build_context(messages: list[dict], max_messages: int = 6) -> str:  # type: ignore[type-arg]
     """Format recent messages into context string."""
     recent = messages[-max_messages:]

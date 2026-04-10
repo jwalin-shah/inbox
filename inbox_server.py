@@ -71,6 +71,7 @@ from services import (
     reminder_edit,
     reminders_list,
     reminders_lists,
+    search_all,
 )
 from services import (
     autocomplete as services_autocomplete,
@@ -228,6 +229,12 @@ class ComposeRequest(BaseModel):
     subject: str
     body: str
     account: str = ""
+
+
+class SearchRequest(BaseModel):
+    q: str
+    sources: list[str] = ["all"]
+    limit: int = 50
 
 
 # ── Server state ─────────────────────────────────────────────────────────────
@@ -942,6 +949,22 @@ async def delete_drive_file(file_id: str, account: str = ""):
         raise HTTPException(404, "No Drive account available")
     ok = await asyncio.to_thread(drive_delete, svc, file_id)
     return {"ok": ok}
+
+
+# ── Search ───────────────────────────────────────────────────────────────────
+
+
+@app.post("/search")
+async def search_endpoint(req: SearchRequest):
+    result = await asyncio.to_thread(
+        search_all,
+        query=req.q,
+        sources=req.sources,
+        limit=req.limit,
+        gmail_services=state.gmail_services,
+        cal_services=state.cal_services,
+    )
+    return result
 
 
 # ── Ambient / Dictation ─────────────────────────────────────────────────────

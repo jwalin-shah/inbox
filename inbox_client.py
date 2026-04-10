@@ -456,6 +456,16 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    # ── Search ───────────────────────────────────────────────────────────
+
+    def search(self, q: str, sources: list[str] | None = None, limit: int = 50) -> dict:
+        payload: dict = {"q": q, "limit": limit}
+        if sources is not None:
+            payload["sources"] = sources
+        r = self._client.post("/search", json=payload)
+        r.raise_for_status()
+        return r.json()
+
     def autocomplete(self, draft: str, **kwargs) -> str | None:  # type: ignore[type-arg]
         r = self._client.post("/autocomplete", json={"draft": draft, **kwargs})
         r.raise_for_status()

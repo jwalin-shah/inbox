@@ -343,3 +343,53 @@ class TestGitHubClient:
         client.github_pulls(repo="owner/repo")
         call_args = client._client.get.call_args
         assert call_args[1]["params"]["repo"] == "owner/repo"
+
+
+# ── Search ──────────────────────────────────────────────────────────────────
+
+
+class TestClientSearch:
+    def test_search_basic(self, client):
+        mock_result = {
+            "query": "standup",
+            "total": 1,
+            "results": [
+                {
+                    "source": "calendar",
+                    "id": "evt1",
+                    "title": "Team standup",
+                    "snippet": "standup call",
+                    "timestamp": "2026-04-10T10:00:00",
+                    "metadata": {},
+                }
+            ],
+        }
+        client._client.post.return_value = _mock_response(mock_result)
+        result = client.search("standup")
+        assert result["query"] == "standup"
+        assert result["total"] == 1
+        client._client.post.assert_called_once_with("/search", json={"q": "standup", "limit": 50})
+
+    def test_search_with_sources(self, client):
+        client._client.post.return_value = _mock_response({"query": "x", "total": 0, "results": []})
+        client.search("x", sources=["imessage", "notes"], limit=20)
+        call_args = client._client.post.call_args
+        payload = call_args[1]["json"]
+        assert payload["sources"] == ["imessage", "notes"]
+        assert payload["limit"] == 20
+
+    def test_search_default_no_sources_param(self, client):
+        client._client.post.return_value = _mock_response({"query": "x", "total": 0, "results": []})
+        client.search("x")
+        call_args = client._client.post.call_args
+        payload = call_args[1]["json"]
+        # sources should not be in payload when None
+        assert "sources" not in payload
+
+    def test_search_empty_result(self, client):
+        client._client.post.return_value = _mock_response(
+            {"query": "xyz", "total": 0, "results": []}
+        )
+        result = client.search("xyz")
+        assert result["total"] == 0
+        assert result["results"] == []
