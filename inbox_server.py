@@ -6,10 +6,12 @@ Run: uv run python inbox_server.py
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from loguru import logger
 from pydantic import BaseModel
 
 import ambient_notes
@@ -334,6 +336,18 @@ async def lifespan(app: FastAPI):
         f"Calendar accounts: {list(cal.keys())}, "
         f"Drive accounts: {list(drive.keys())}"
     )
+
+    # Pre-warm conversation cache if enabled (reduces cold-start latency)
+    if os.environ.get("INBOX_PRE_WARM_CONVERSATIONS", "").strip() in ("1", "true", "yes"):
+        try:
+            results = await _fetch_conversations("all", limit=50)
+            state.conv_cache.clear()
+            for c in results:
+                state.conv_cache[_cache_key(c.source, c.id)] = c
+            print(f"Pre-warmed {len(state.conv_cache)} conversations")
+        except Exception:
+            logger.warning("Pre-warm conversations failed (non-fatal)")
+
     try:
         yield
     finally:
@@ -362,18 +376,37 @@ async def health():
 # ── Conversations ────────────────────────────────────────────────────────────
 
 
-@app.get("/conversations", response_model=list[ConversationOut])
-async def list_conversations(source: str = "all", limit: int = 50):
-    results: list[Contact] = []
+async def _fetch_conversations(source: str, limit: int) -> list[Contact]:
+    """Fetch conversations from all requested sources in parallel.
+
+    iMessage and Gmail fetches run concurrently via asyncio.gather().
+    Multiple Gmail accounts are also fetched concurrently.
+    """
+    fetch_tasks: list[asyncio.Task[list[Contact]]] = []
 
     if source in ("all", "imessage"):
-        imsg = await asyncio.to_thread(imsg_contacts, limit=limit)
-        results.extend(imsg)
+        fetch_tasks.append(asyncio.create_task(asyncio.to_thread(imsg_contacts, limit=limit)))
 
     if source in ("all", "gmail"):
         for email, svc in state.gmail_services.items():
-            gmail = await asyncio.to_thread(gmail_contacts, svc, email, limit=limit)
-            results.extend(gmail)
+            fetch_tasks.append(
+                asyncio.create_task(asyncio.to_thread(gmail_contacts, svc, email, limit=limit))
+            )
+
+    if not fetch_tasks:
+        return []
+
+    result_lists = await asyncio.gather(*fetch_tasks)
+    results: list[Contact] = []
+    for contacts in result_lists:
+        results.extend(contacts)
+
+    return results
+
+
+@app.get("/conversations", response_model=list[ConversationOut])
+async def list_conversations(source: str = "all", limit: int = 50):
+    results = await _fetch_conversations(source, limit)
 
     results.sort(key=lambda c: c.last_ts, reverse=True)
 
