@@ -50,7 +50,9 @@ async def main():
     messages_reply = [
         {"sender": "Bob", "body": "Are you free for a call tomorrow at 2pm?"},
     ]
-    result_reply = client.autocomplete(messages=messages_reply, mode="reply", temperature=0.5)
+    result_reply = client.autocomplete(
+        draft="", messages=messages_reply, mode="reply", temperature=0.5
+    )
     print(f"  Last message: {messages_reply[-1]['body']}")
     print(f"  Suggested reply: '{result_reply if result_reply else '[no suggestion]'}'")
     print()
@@ -63,7 +65,7 @@ async def main():
         {"sender": "Bob", "body": "Oh cool! How's it going?"},
     ]
     result_context = client.autocomplete(
-        messages=messages_with_context, mode="reply", temperature=0.6, max_tokens=50
+        draft="", messages=messages_with_context, mode="reply", temperature=0.6, max_tokens=50
     )
     print(
         f"  Context: {messages_with_context[0]['body']} → You: {messages_with_context[1]['body']}"

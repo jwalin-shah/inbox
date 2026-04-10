@@ -676,7 +676,7 @@ async def upload_to_drive(
 
     try:
         result = await asyncio.to_thread(
-            drive_upload, svc, tmp_path, folder_id=folder_id, name=file.filename
+            drive_upload, svc, tmp_path, folder_id=folder_id, name=file.filename or ""
         )
     finally:
         Path(tmp_path).unlink(missing_ok=True)

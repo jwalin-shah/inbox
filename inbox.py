@@ -279,6 +279,10 @@ class InboxApp(App):
         Binding("ctrl+3", "filter_gmail", "Gmail"),
         Binding("ctrl+4", "filter_cal", "Calendar"),
         Binding("ctrl+5", "filter_notes", "Notes"),
+        Binding("ctrl+6", "filter_rem", "Reminders"),
+        Binding("ctrl+7", "filter_gh", "GitHub"),
+        Binding("ctrl+8", "filter_drv", "Drive"),
+        Binding("ctrl+shift+6", "toggle_ambient", "Ambient"),
         Binding("ctrl+a", "add_account", "Add Account"),
         Binding("ctrl+shift+a", "reauth_account", "Re-auth"),
         Binding("ctrl+n", "new_event", "New Event"),
@@ -311,6 +315,9 @@ class InboxApp(App):
                     Tab("Gmail", id="tab-gmail"),
                     Tab("Calendar", id="tab-cal"),
                     Tab("Notes", id="tab-notes"),
+                    Tab("Reminders", id="tab-rem"),
+                    Tab("GitHub", id="tab-gh"),
+                    Tab("Drive", id="tab-drv"),
                     id="tabs",
                 )
                 yield ListView(id="contact-list")
@@ -335,13 +342,22 @@ class InboxApp(App):
             "tab-gmail": "gmail",
             "tab-cal": "calendar",
             "tab-notes": "notes",
+            "tab-rem": "reminders",
+            "tab-gh": "github",
+            "tab-drv": "drive",
         }
         self._active_filter = tab_map.get(event.tab.id or "", "all")
         self._render_sidebar()
         self._toggle_views()
 
     def _toggle_views(self) -> None:
-        is_detail = self._active_filter in ("calendar", "notes")
+        is_detail = self._active_filter in (
+            "calendar",
+            "notes",
+            "reminders",
+            "github",
+            "drive",
+        )
         msg_view = self.query_one("#messages", MessageView)
         det_view = self.query_one("#detail-view", DetailView)
         compose_input = self.query_one("#compose", Input)
@@ -351,6 +367,8 @@ class InboxApp(App):
             det_view.remove_class("hidden")
             if self._active_filter == "calendar":
                 compose_input.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
+            elif self._active_filter == "reminders":
+                compose_input.placeholder = "New reminder (Enter to create)"
             else:
                 compose_input.placeholder = ""
         else:
@@ -371,14 +389,26 @@ class InboxApp(App):
                 status += f"  [dim]{n_accts} account{'s' if n_accts > 1 else ''}[/]"
             elif not self.events:
                 status += "  [yellow]ctrl+a to add account[/]"
-            self.query_one("#status").update(status)
+            self.query_one("#status", Static).update(status)
             return
 
         if self._active_filter == "notes":
             for n in self.notes_data:
                 lv.append(NoteItem(n))
             status = f"[magenta]{len(self.notes_data)} notes[/]"
-            self.query_one("#status").update(status)
+            self.query_one("#status", Static).update(status)
+            return
+
+        if self._active_filter == "reminders":
+            self.query_one("#status", Static).update("[dim]Reminders[/]")
+            return
+
+        if self._active_filter == "github":
+            self.query_one("#status", Static).update("[dim]GitHub Notifications[/]")
+            return
+
+        if self._active_filter == "drive":
+            self.query_one("#status", Static).update("[dim]Google Drive[/]")
             return
 
         if self._active_filter == "all":
@@ -399,7 +429,7 @@ class InboxApp(App):
         if unread:
             status += f"  [yellow]{unread} unread[/]"
         status += f"  [dim]{tab_label}[/]"
-        self.query_one("#status").update(status)
+        self.query_one("#status", Static).update(status)
 
     # ── Tab shortcuts ────────────────────────────────────────────────────
 
@@ -418,10 +448,45 @@ class InboxApp(App):
     def action_filter_notes(self) -> None:
         self.query_one("#tabs", Tabs).active = "tab-notes"
 
+    def action_filter_rem(self) -> None:
+        self.query_one("#tabs", Tabs).active = "tab-rem"
+
+    def action_filter_gh(self) -> None:
+        self.query_one("#tabs", Tabs).active = "tab-gh"
+
+    def action_filter_drv(self) -> None:
+        self.query_one("#tabs", Tabs).active = "tab-drv"
+
+    def action_toggle_ambient(self) -> None:
+        """Toggle ambient listening on/off."""
+        self._do_toggle_ambient()
+
+    @work(thread=True)
+    def _do_toggle_ambient(self) -> None:
+        try:
+            status = self.client.ambient_status()
+            if status.get("ambient"):
+                self.client.ambient_stop()
+                self.call_from_thread(
+                    self.query_one("#status", Static).update,
+                    "[yellow]Ambient listening stopped[/]",
+                )
+            else:
+                self.client.ambient_start()
+                self.call_from_thread(
+                    self.query_one("#status", Static).update,
+                    "[green]Ambient listening started[/]",
+                )
+        except Exception as e:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]Ambient toggle failed: {e}[/]",
+            )
+
     # ── Boot & refresh ───────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self.query_one("#status").update("[dim]Starting server...[/]")
+        self.query_one("#status", Static).update("[dim]Starting server...[/]")
         self.boot()
 
     @work(thread=True)
@@ -430,12 +495,12 @@ class InboxApp(App):
             self.client.ensure_server()
         except RuntimeError as e:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 f"[red]{e}[/]",
             )
             return
         self.call_from_thread(
-            self.query_one("#status").update,
+            self.query_one("#status", Static).update,
             "[dim]Server ready — loading...[/]",
         )
         self._do_refresh()
@@ -495,7 +560,7 @@ class InboxApp(App):
             notes = self.client.notes(limit=50)
         except Exception as e:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 f"[red]Refresh failed: {e}[/]",
             )
             return
@@ -544,7 +609,7 @@ class InboxApp(App):
             )
         except Exception as e:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 f"[red]Failed: {e}[/]",
             )
             return
@@ -565,7 +630,7 @@ class InboxApp(App):
             status = f"[bold]{name}[/]  [dim]Group · {members}[/]"
         else:
             status = f"[bold]{name}[/]  [dim]{source}{acct_tag}[/]"
-        self.query_one("#status").update(status)
+        self.query_one("#status", Static).update(status)
         self.query_one("#compose", Input).focus()
 
     @work(thread=True)
@@ -579,7 +644,7 @@ class InboxApp(App):
     def _show_note(self, note: dict) -> None:
         self.query_one("#detail-view", DetailView).detail = note
         title = note.get("title", "?")
-        self.query_one("#status").update(f"[bold]{title}[/]  [dim]note[/]")
+        self.query_one("#status", Static).update(f"[bold]{title}[/]  [dim]note[/]")
 
     # ── Send / create ────────────────────────────────────────────────────
 
@@ -621,7 +686,7 @@ class InboxApp(App):
             ok = False
 
         status = "[green]Sent[/]" if ok else "[red]Failed to send[/]"
-        self.call_from_thread(self.query_one("#status").update, status)
+        self.call_from_thread(self.query_one("#status", Static).update, status)
         if ok and conv["source"] == "imessage":
             self._reload_after_send(conv, text)
 
@@ -648,7 +713,7 @@ class InboxApp(App):
         # DB never caught up — keep the optimistic message visible,
         # just update status so the user knows
         self.call_from_thread(
-            self.query_one("#status").update,
+            self.query_one("#status", Static).update,
             "[green]Sent[/] [dim](DB sync pending)[/]",
         )
 
@@ -662,13 +727,13 @@ class InboxApp(App):
 
         if ok:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 "[green]Event created[/]",
             )
             self._do_refresh()
         else:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 "[red]Failed to create event[/]",
             )
 
@@ -681,9 +746,9 @@ class InboxApp(App):
 
     def action_delete_event(self) -> None:
         if not self.active_event or not self.active_event.get("event_id"):
-            self.query_one("#status").update("[yellow]No event selected[/]")
+            self.query_one("#status", Static).update("[yellow]No event selected[/]")
             return
-        self.query_one("#status").update(
+        self.query_one("#status", Static).update(
             f"[yellow]Deleting '{self.active_event.get('summary')}'...[/]"
         )
         self._do_delete_event(self.active_event)
@@ -701,20 +766,20 @@ class InboxApp(App):
 
         if ok:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 f"[green]Deleted '{event.get('summary')}'[/]",
             )
             self._do_refresh()
         else:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 "[red]Failed to delete[/]",
             )
 
     # ── Account actions ──────────────────────────────────────────────────
 
     def action_add_account(self) -> None:
-        self.query_one("#status").update("[yellow]Opening browser for auth...[/]")
+        self.query_one("#status", Static).update("[yellow]Opening browser for auth...[/]")
         self._do_add_account()
 
     @work(thread=True)
@@ -723,13 +788,13 @@ class InboxApp(App):
             result = self.client.add_account()
             email = result.get("email", "")
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 f"[green]Added {email} — refreshing...[/]",
             )
             self._do_refresh()
         except Exception as e:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 f"[red]Auth failed: {e}[/]",
             )
 
@@ -746,9 +811,11 @@ class InboxApp(App):
             except Exception:
                 pass
         if not email:
-            self.query_one("#status").update("[yellow]No account to re-auth — ctrl+a to add[/]")
+            self.query_one("#status", Static).update(
+                "[yellow]No account to re-auth — ctrl+a to add[/]"
+            )
             return
-        self.query_one("#status").update(f"[yellow]Re-authing {email}...[/]")
+        self.query_one("#status", Static).update(f"[yellow]Re-authing {email}...[/]")
         self._do_reauth(email)
 
     @work(thread=True)
@@ -757,13 +824,13 @@ class InboxApp(App):
             result = self.client.reauth_account(email)
             new_email = result.get("email", email)
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 f"[green]Re-authed {new_email} — refreshing...[/]",
             )
             self._do_refresh()
         except Exception as e:
             self.call_from_thread(
-                self.query_one("#status").update,
+                self.query_one("#status", Static).update,
                 f"[red]Re-auth failed: {e}[/]",
             )
 

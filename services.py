@@ -638,11 +638,11 @@ def calendar_events(
     events: list[CalendarEvent] = []
     for email, svc in cal_services.items():
         try:
-            cal_list = svc.calendarList().list().execute()
+            cal_list = svc.calendarList().list().execute()  # type: ignore[attr-defined]
             for cal_entry in cal_list.get("items", []):
                 cal_id = cal_entry["id"]
                 result = (
-                    svc.events()
+                    svc.events()  # type: ignore[attr-defined]
                     .list(
                         calendarId=cal_id,
                         timeMin=start_of_day.isoformat(),
@@ -1449,6 +1449,10 @@ class AmbientService:
     def is_running(self) -> bool:
         return self._running
 
+    @is_running.setter
+    def is_running(self, value: bool) -> None:
+        self._running = value
+
     def start(self) -> None:
         if self._running:
             return
@@ -1490,7 +1494,7 @@ class AmbientService:
                 result = mlx_whisper.transcribe(
                     audio_flat, path_or_hf_repo=MLX_WHISPER_MODEL, language="en"
                 )
-                text = result.get("text", "").strip()
+                text = result.get("text", "").strip()  # type: ignore[union-attr]
                 if text:
                     with self._buffer_lock:
                         self._buffer.append(text)
@@ -1530,14 +1534,14 @@ def _type_text(text: str) -> None:
     """Inject text at current cursor position via macOS CGEvent."""
     import Quartz
 
-    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)  # type: ignore[attr-defined]
     for char in text:
-        down = Quartz.CGEventCreateKeyboardEvent(src, 0, True)
-        up = Quartz.CGEventCreateKeyboardEvent(src, 0, False)
-        Quartz.CGEventKeyboardSetUnicodeString(down, 1, char)
-        Quartz.CGEventKeyboardSetUnicodeString(up, 1, char)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+        down = Quartz.CGEventCreateKeyboardEvent(src, 0, True)  # type: ignore[attr-defined]
+        up = Quartz.CGEventCreateKeyboardEvent(src, 0, False)  # type: ignore[attr-defined]
+        Quartz.CGEventKeyboardSetUnicodeString(down, 1, char)  # type: ignore[attr-defined]
+        Quartz.CGEventKeyboardSetUnicodeString(up, 1, char)  # type: ignore[attr-defined]
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)  # type: ignore[attr-defined]
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)  # type: ignore[attr-defined]
         time.sleep(0.001)
 
 
@@ -1553,6 +1557,7 @@ class DictationService:
 
     def __init__(self) -> None:
         self._running = False
+        self._available: bool | None = None
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         self._last_text = ""
@@ -1561,9 +1566,17 @@ class DictationService:
     def is_running(self) -> bool:
         return self._running
 
+    @is_running.setter
+    def is_running(self, value: bool) -> None:
+        self._running = value
+
     @property
     def available(self) -> bool:
-        return whisper_stream_available()
+        return whisper_stream_available() if self._available is None else self._available
+
+    @available.setter
+    def available(self, value: bool) -> None:
+        self._available = value
 
     def start(self) -> None:
         if self._running:
@@ -1657,7 +1670,7 @@ def _ensure_llm_loaded() -> None:
             return
         import mlx_lm
 
-        _llm_model, _llm_tokenizer = mlx_lm.load(MLX_MODEL)
+        _llm_model, _llm_tokenizer = mlx_lm.load(MLX_MODEL)[:2]  # type: ignore[assignment]
 
 
 def get_outlines_model() -> object:
@@ -1665,7 +1678,7 @@ def get_outlines_model() -> object:
     _ensure_llm_loaded()
     import outlines
 
-    return outlines.models.mlxlm(MLX_MODEL)
+    return outlines.models.mlxlm(MLX_MODEL)  # type: ignore[attr-defined]
 
 
 def llm_complete(prompt: str, max_tokens: int = 64, temperature: float = 0.7) -> str:
@@ -1675,8 +1688,8 @@ def llm_complete(prompt: str, max_tokens: int = 64, temperature: float = 0.7) ->
     from mlx_lm.sample_utils import make_sampler
 
     return mlx_lm.generate(
-        _llm_model,
-        _llm_tokenizer,
+        _llm_model,  # type: ignore[arg-type]
+        _llm_tokenizer,  # type: ignore[arg-type]
         prompt=prompt,
         max_tokens=max_tokens,
         sampler=make_sampler(temp=temperature),
@@ -1688,7 +1701,7 @@ def generate_json(prompt: str, schema: type[PydanticBaseModel]) -> PydanticBaseM
     import outlines
 
     model = get_outlines_model()
-    generator = outlines.generate.json(model, schema)
+    generator = outlines.generate.json(model, schema)  # type: ignore[attr-defined]
     return generator(prompt)
 
 
@@ -1716,7 +1729,7 @@ EXTRACT_PROMPT = (
 )
 
 
-class Extraction(_PydanticBase):
+class Extraction(_PydanticBase):  # type: ignore[misc]
     key_points: list[str]
     action_items: list[str]
     topics: list[str]
