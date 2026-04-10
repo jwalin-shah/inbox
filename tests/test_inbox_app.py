@@ -2074,3 +2074,204 @@ def test_github_notifications_not_fetched_on_non_github_tabs() -> None:
     # GitHub notifications should be included in refresh
     assert len(github_data) == 1
     client.github_notifications.assert_called()
+
+
+# ── Stale GitHub selection tests ────────────────────────────────────────────
+
+
+def test_notification_still_exists_returns_true_when_present() -> None:
+    """_notification_still_exists returns True when notification is in github_data."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        notif = _make_notification_data(id="42")
+        app.github_data = [notif]
+
+        async with app.run_test():
+            assert app._notification_still_exists(notif) is True
+
+    asyncio.run(runner())
+
+
+def test_notification_still_exists_returns_false_when_data_empty() -> None:
+    """_notification_still_exists returns False when github_data is empty."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        notif = _make_notification_data(id="42")
+        app.github_data = []
+
+        async with app.run_test():
+            assert app._notification_still_exists(notif) is False
+
+    asyncio.run(runner())
+
+
+def test_notification_still_exists_returns_false_when_id_missing() -> None:
+    """_notification_still_exists returns False when the notification id
+    is no longer in the current github_data (e.g. removed by refresh)."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        old_notif = _make_notification_data(id="42")
+        app.github_data = [_make_notification_data(id="99")]
+
+        async with app.run_test():
+            assert app._notification_still_exists(old_notif) is False
+
+    asyncio.run(runner())
+
+
+def test_populate_clears_active_notification_when_data_empty() -> None:
+    """_populate clears active_notification and DetailView when github_data
+    becomes empty after a refresh."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        notif = _make_notification_data()
+        app.active_notification = notif
+        app.github_data = [notif]
+
+        async with app.run_test() as pilot:
+            # Populate with empty github_data — should clear selection
+            app._populate([], [], [], [], [], [])
+            assert app.active_notification is None
+            # Detail view should be cleared when on github tab
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.3)
+            app._populate([], [], [], [], [], [])
+            detail = app.query_one("#detail-view", DetailView)
+            assert detail.detail is None
+
+    asyncio.run(runner())
+
+
+def test_populate_clears_stale_active_notification() -> None:
+    """_populate clears active_notification when the selected notification
+    is no longer in the updated github_data."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        old_notif = _make_notification_data(id="42")
+        app.active_notification = old_notif
+        app.github_data = [old_notif]
+
+        async with app.run_test():
+            # Refresh with data that doesn't contain the old notification
+            new_data = [_make_notification_data(id="99"), _make_notification_data(id="100")]
+            app._populate([], [], [], [], [], new_data)
+            assert app.active_notification is None
+
+    asyncio.run(runner())
+
+
+def test_populate_preserves_active_notification_when_still_present() -> None:
+    """_populate does NOT clear active_notification if it's still in
+    the updated github_data."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        notif = _make_notification_data(id="42")
+        app.active_notification = notif
+        app.github_data = [notif]
+
+        async with app.run_test():
+            # Refresh with data that still contains the notification
+            updated = _make_notification_data(id="42", unread=False)
+            app._populate([], [], [], [], [], [updated])
+            assert app.active_notification is not None
+            assert app.active_notification["id"] == "42"
+
+    asyncio.run(runner())
+
+
+def test_mark_read_guard_against_stale_selection() -> None:
+    """action_mark_notification_read refuses to act when the active
+    notification is no longer in github_data."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        # Active notification exists but is NOT in current data
+        app.active_notification = _make_notification_data(id="42")
+        app.github_data = [_make_notification_data(id="99")]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            app.action_mark_notification_read()
+            # Should NOT have called the API
+            client.github_mark_read.assert_not_called()
+            # active_notification should be cleared
+            assert app.active_notification is None
+
+    asyncio.run(runner())
+
+
+def test_mark_read_guard_clears_detail_view() -> None:
+    """When a stale notification is detected by mark-read, the DetailView
+    is also cleared."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.active_notification = _make_notification_data(id="42")
+        app.github_data = []
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            app.action_mark_notification_read()
+            detail = app.query_one("#detail-view", DetailView)
+            assert detail.detail is None
+
+    asyncio.run(runner())
+
+
+def test_open_url_guard_against_stale_selection() -> None:
+    """action_open_notification_url refuses to act when the active
+    notification is no longer in github_data."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.active_notification = _make_notification_data(id="42")
+        app.github_data = [_make_notification_data(id="99")]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            with patch.object(inbox.webbrowser, "open") as mock_open:
+                app.action_open_notification_url()
+                mock_open.assert_not_called()
+            # active_notification should be cleared
+            assert app.active_notification is None
+
+    asyncio.run(runner())
+
+
+def test_open_url_guard_clears_detail_view() -> None:
+    """When a stale notification is detected by open-URL, the DetailView
+    is also cleared."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.active_notification = _make_notification_data(id="42")
+        app.github_data = []
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            with patch.object(inbox.webbrowser, "open"):
+                app.action_open_notification_url()
+            detail = app.query_one("#detail-view", DetailView)
+            assert detail.detail is None
+
+    asyncio.run(runner())

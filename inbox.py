@@ -511,6 +511,18 @@ class InboxApp(App):
         except Exception:
             pass
 
+    def _notification_still_exists(self, notification: dict) -> bool:
+        """Check whether a notification is still present in github_data.
+
+        Returns False if github_data is empty or the notification's id
+        is not found in the current list. Used to detect stale selections
+        after data refreshes.
+        """
+        if not self.github_data:
+            return False
+        notif_id = notification.get("id")
+        return any(n.get("id") == notif_id for n in self.github_data)
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="main"):
@@ -987,6 +999,15 @@ class InboxApp(App):
         if github_data is not None:
             self.github_data = github_data
             self._update_github_badge()
+            # Clear active_notification if it's stale — either the data is
+            # now empty or the previously selected notification is no longer
+            # in the current list (e.g. marked-read on server, API refresh).
+            if self.active_notification and not self._notification_still_exists(
+                self.active_notification
+            ):
+                self.active_notification = None
+                if self._active_filter == "github":
+                    self.query_one("#detail-view", DetailView).detail = None
         self._render_sidebar()
         if status_override:
             self.query_one("#status", Static).update(status_override)
@@ -1561,12 +1582,26 @@ class InboxApp(App):
         if not self.active_notification or not self.active_notification.get("id"):
             self.query_one("#status", Static).update("[yellow]No notification selected[/]")
             return
+        # Guard against stale selection — the notification may have been
+        # removed by a concurrent refresh or mark-all-read.
+        if not self._notification_still_exists(self.active_notification):
+            self.active_notification = None
+            self.query_one("#detail-view", DetailView).detail = None
+            self.query_one("#status", Static).update("[yellow]Notification no longer available[/]")
+            return
         title = self.active_notification.get("title", "?")
         self.query_one("#status", Static).update(f"[yellow]Marking '{title}' as read...[/]")
         self._do_mark_notification_read(self.active_notification)
 
     @work(thread=True, exit_on_error=False)
     def _do_mark_notification_read(self, notification: dict) -> None:
+        # Re-check in case data refreshed between action handler and worker start
+        if not self._notification_still_exists(notification):
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[yellow]Notification no longer available[/]",
+            )
+            return
         status_override = None
         try:
             ok = self.client.github_mark_read(notification_id=notification["id"])
@@ -1626,6 +1661,13 @@ class InboxApp(App):
             return
         if not self.active_notification:
             self.query_one("#status", Static).update("[yellow]No notification selected[/]")
+            return
+        # Guard against stale selection — the notification may have been
+        # removed by a concurrent refresh or mark-all-read.
+        if not self._notification_still_exists(self.active_notification):
+            self.active_notification = None
+            self.query_one("#detail-view", DetailView).detail = None
+            self.query_one("#status", Static).update("[yellow]Notification no longer available[/]")
             return
         url = self.active_notification.get("url", "")
         if not url:
