@@ -5,7 +5,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import services
-from services import reminder_complete, reminder_create, reminders_list, reminders_lists
+from services import (
+    reminder_by_id,
+    reminder_complete,
+    reminder_create,
+    reminders_list,
+    reminders_lists,
+)
 
 
 class TestRemindersLists:
@@ -199,3 +205,131 @@ class TestReminderDelete:
             reminder_delete('Buy "important" stuff')
         script = mock_run.call_args[0][0][2]
         assert services._escape_applescript('Buy "important" stuff') in script
+
+
+class TestReminderById:
+    def test_finds_reminder_by_id(self, tmp_reminders_db):
+        with patch("services.REMINDERS_DIR", tmp_reminders_db):
+            reminder = reminder_by_id("1")
+        assert reminder is not None
+        assert reminder.id == "1"
+        assert reminder.title == "Buy groceries"
+        assert reminder.list_name == "Daily"
+        assert reminder.completed is False
+
+    def test_finds_reminder_in_work_list(self, tmp_reminders_db):
+        with patch("services.REMINDERS_DIR", tmp_reminders_db):
+            reminder = reminder_by_id("3")
+        assert reminder is not None
+        assert reminder.id == "3"
+        assert reminder.title == "Ship feature"
+        assert reminder.list_name == "Work"
+        assert reminder.flagged is True
+
+    def test_returns_none_for_nonexistent_id(self, tmp_reminders_db):
+        with patch("services.REMINDERS_DIR", tmp_reminders_db):
+            reminder = reminder_by_id("999")
+        assert reminder is None
+
+    def test_returns_none_for_empty_dir(self, tmp_path):
+        with patch("services.REMINDERS_DIR", tmp_path / "nonexistent"):
+            reminder = reminder_by_id("1")
+        assert reminder is None
+
+    def test_no_limit_needed(self, tmp_reminders_db):
+        """reminder_by_id queries SQLite directly, no limit cap."""
+        with patch("services.REMINDERS_DIR", tmp_reminders_db):
+            # This would fail with the old limit=500 approach for ID 3
+            # if there were 500+ reminders, but direct lookup always works
+            reminder = reminder_by_id("3")
+        assert reminder is not None
+        assert reminder.title == "Ship feature"
+
+
+class TestApplescriptFindReminder:
+    def test_without_list_name(self):
+        clause = services._applescript_find_reminder("Buy groceries")
+        assert "Buy groceries" in clause
+        assert "container" not in clause
+        assert "completed is false" in clause
+
+    def test_with_list_name(self):
+        clause = services._applescript_find_reminder("Buy groceries", list_name="Daily")
+        assert "Buy groceries" in clause
+        assert "Daily" in clause
+        assert "container" in clause
+        assert "completed is false" in clause
+
+    def test_escapes_title(self):
+        clause = services._applescript_find_reminder('Buy "fancy" stuff')
+        assert services._escape_applescript('Buy "fancy" stuff') in clause
+
+    def test_escapes_list_name(self):
+        clause = services._applescript_find_reminder("Task", list_name='My "Special" List')
+        assert services._escape_applescript('My "Special" List') in clause
+
+
+class TestReminderCompleteWithListName:
+    def test_passes_list_name_to_applescript(self):
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_complete("Buy groceries", list_name="Daily")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "Daily" in script
+        assert "container" in script
+
+    def test_without_list_name_uses_title_only(self):
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_complete("Buy groceries")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "container" not in script
+
+
+class TestReminderEditWithListName:
+    def test_passes_list_name_to_applescript(self):
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_edit("Buy groceries", title="Buy organic", list_name="Daily")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "Daily" in script
+        assert "container" in script
+        assert "Buy organic" in script
+
+    def test_without_list_name_uses_title_only(self):
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_edit("Buy groceries", title="Buy organic")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "container" not in script
+
+
+class TestReminderDeleteWithListName:
+    def test_passes_list_name_to_applescript(self):
+        from services import reminder_delete
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_delete("Buy groceries", list_name="Daily")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "Daily" in script
+        assert "container" in script
+
+    def test_without_list_name_uses_title_only(self):
+        from services import reminder_delete
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_delete("Buy groceries")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "container" not in script

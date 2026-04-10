@@ -52,6 +52,7 @@ from services import (
     notes_list,
     parse_quick_event,
     reauth_google_account,
+    reminder_by_id,
     reminder_complete,
     reminder_create,
     reminder_delete,
@@ -612,12 +613,10 @@ async def list_reminders(
 
 @app.post("/reminders/{reminder_id}/complete")
 async def complete_reminder(reminder_id: str):
-    # Look up title from the DB to use with AppleScript
-    items = await asyncio.to_thread(reminders_list, show_completed=False, limit=500)
-    reminder = next((r for r in items if r.id == reminder_id), None)
+    reminder = await asyncio.to_thread(reminder_by_id, reminder_id)
     if not reminder:
         raise HTTPException(404, "Reminder not found")
-    ok = await asyncio.to_thread(reminder_complete, reminder.title)
+    ok = await asyncio.to_thread(reminder_complete, reminder.title, reminder.list_name)
     return {"ok": ok}
 
 
@@ -635,9 +634,7 @@ async def create_reminder(req: ReminderCreateRequest):
 
 @app.put("/reminders/{reminder_id}")
 async def edit_reminder(reminder_id: str, req: ReminderEditRequest):
-    # Look up title from the DB to identify the reminder for AppleScript
-    items = await asyncio.to_thread(reminders_list, show_completed=False, limit=500)
-    reminder = next((r for r in items if r.id == reminder_id), None)
+    reminder = await asyncio.to_thread(reminder_by_id, reminder_id)
     if not reminder:
         raise HTTPException(404, "Reminder not found")
     ok = await asyncio.to_thread(
@@ -646,18 +643,17 @@ async def edit_reminder(reminder_id: str, req: ReminderEditRequest):
         title=req.title,
         due_date=req.due_date,
         notes=req.notes,
+        list_name=reminder.list_name,
     )
     return {"ok": ok}
 
 
 @app.delete("/reminders/{reminder_id}")
 async def delete_reminder(reminder_id: str):
-    # Look up title from the DB to identify the reminder for AppleScript
-    items = await asyncio.to_thread(reminders_list, show_completed=False, limit=500)
-    reminder = next((r for r in items if r.id == reminder_id), None)
+    reminder = await asyncio.to_thread(reminder_by_id, reminder_id)
     if not reminder:
         raise HTTPException(404, "Reminder not found")
-    ok = await asyncio.to_thread(reminder_delete, reminder.title)
+    ok = await asyncio.to_thread(reminder_delete, reminder.title, reminder.list_name)
     return {"ok": ok}
 
 

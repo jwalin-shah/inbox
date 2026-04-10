@@ -71,9 +71,9 @@ class TestReminderEndpoints:
         c, _ = client
         from services import Reminder
 
-        mock_items = [Reminder(id="1", title="Buy milk", completed=False)]
+        mock_reminder = Reminder(id="1", title="Buy milk", completed=False, list_name="Daily")
         with (
-            patch("inbox_server.reminders_list", return_value=mock_items),
+            patch("inbox_server.reminder_by_id", return_value=mock_reminder),
             patch("inbox_server.reminder_complete", return_value=True),
         ):
             resp = c.post("/reminders/1/complete")
@@ -82,7 +82,7 @@ class TestReminderEndpoints:
 
     def test_complete_nonexistent_reminder(self, client):
         c, _ = client
-        with patch("inbox_server.reminders_list", return_value=[]):
+        with patch("inbox_server.reminder_by_id", return_value=None):
             resp = c.post("/reminders/999/complete")
         assert resp.status_code == 404
 
@@ -90,9 +90,9 @@ class TestReminderEndpoints:
         c, _ = client
         from services import Reminder
 
-        mock_items = [Reminder(id="1", title="Buy milk", completed=False)]
+        mock_reminder = Reminder(id="1", title="Buy milk", completed=False, list_name="Daily")
         with (
-            patch("inbox_server.reminders_list", return_value=mock_items),
+            patch("inbox_server.reminder_by_id", return_value=mock_reminder),
             patch("inbox_server.reminder_edit", return_value=True),
         ):
             resp = c.put("/reminders/1", json={"title": "Buy almond milk"})
@@ -103,9 +103,9 @@ class TestReminderEndpoints:
         c, _ = client
         from services import Reminder
 
-        mock_items = [Reminder(id="1", title="Buy milk", completed=False)]
+        mock_reminder = Reminder(id="1", title="Buy milk", completed=False, list_name="Daily")
         with (
-            patch("inbox_server.reminders_list", return_value=mock_items),
+            patch("inbox_server.reminder_by_id", return_value=mock_reminder),
             patch("inbox_server.reminder_edit", return_value=True),
         ):
             resp = c.put(
@@ -117,7 +117,7 @@ class TestReminderEndpoints:
 
     def test_edit_nonexistent_reminder(self, client):
         c, _ = client
-        with patch("inbox_server.reminders_list", return_value=[]):
+        with patch("inbox_server.reminder_by_id", return_value=None):
             resp = c.put("/reminders/999", json={"title": "New title"})
         assert resp.status_code == 404
 
@@ -125,9 +125,9 @@ class TestReminderEndpoints:
         c, _ = client
         from services import Reminder
 
-        mock_items = [Reminder(id="1", title="Buy milk", completed=False)]
+        mock_reminder = Reminder(id="1", title="Buy milk", completed=False, list_name="Daily")
         with (
-            patch("inbox_server.reminders_list", return_value=mock_items),
+            patch("inbox_server.reminder_by_id", return_value=mock_reminder),
             patch("inbox_server.reminder_delete", return_value=True),
         ):
             resp = c.delete("/reminders/1")
@@ -136,9 +136,63 @@ class TestReminderEndpoints:
 
     def test_delete_nonexistent_reminder(self, client):
         c, _ = client
-        with patch("inbox_server.reminders_list", return_value=[]):
+        with patch("inbox_server.reminder_by_id", return_value=None):
             resp = c.delete("/reminders/999")
         assert resp.status_code == 404
+
+    def test_complete_reminder_passes_list_name(self, client):
+        """Server passes list_name from reminder_by_id to AppleScript for disambiguation."""
+        c, _ = client
+        from services import Reminder
+
+        mock_reminder = Reminder(id="1", title="Buy milk", completed=False, list_name="Daily")
+        with (
+            patch("inbox_server.reminder_by_id", return_value=mock_reminder),
+            patch("inbox_server.reminder_complete") as mock_complete,
+        ):
+            mock_complete.return_value = True
+            resp = c.post("/reminders/1/complete")
+        assert resp.status_code == 200
+        # Verify list_name was passed to the AppleScript function
+        mock_complete.assert_called_once_with("Buy milk", "Daily")
+
+    def test_edit_reminder_passes_list_name(self, client):
+        """Server passes list_name from reminder_by_id to AppleScript for disambiguation."""
+        c, _ = client
+        from services import Reminder
+
+        mock_reminder = Reminder(id="1", title="Buy milk", completed=False, list_name="Daily")
+        with (
+            patch("inbox_server.reminder_by_id", return_value=mock_reminder),
+            patch("inbox_server.reminder_edit") as mock_edit,
+        ):
+            mock_edit.return_value = True
+            resp = c.put("/reminders/1", json={"title": "Buy oat milk"})
+        assert resp.status_code == 200
+        # Verify list_name was passed to the AppleScript function
+        mock_edit.assert_called_once_with(
+            current_title="Buy milk",
+            title="Buy oat milk",
+            due_date=None,
+            notes=None,
+            list_name="Daily",
+        )
+
+    def test_delete_reminder_passes_list_name(self, client):
+        """Server passes list_name from reminder_by_id to AppleScript for disambiguation."""
+        c, _ = client
+        from services import Reminder
+
+        mock_reminder = Reminder(id="1", title="Buy milk", completed=False, list_name="Daily")
+        with (
+            patch("inbox_server.reminder_by_id", return_value=mock_reminder),
+            patch("inbox_server.reminder_delete") as mock_delete,
+        ):
+            mock_delete.return_value = True
+            resp = c.delete("/reminders/1")
+        assert resp.status_code == 200
+        # Verify list_name was passed to the AppleScript function
+        mock_delete.assert_called_once_with("Buy milk", "Daily")
 
 
 class TestGitHubEndpoints:

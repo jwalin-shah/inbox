@@ -1234,6 +1234,11 @@ class InboxApp(App):
                     self._rem_list_filter = ""
             except ValueError:
                 self._rem_list_filter = list_names[0]
+        # Clear active_reminder and detail view — the selected reminder may
+        # no longer be visible after the filter change, and actions on a
+        # stale reminder could target the wrong item.
+        self.active_reminder = None
+        self.query_one("#detail-view", DetailView).detail = None
         self._render_sidebar()
 
     # ── Account actions ──────────────────────────────────────────────────

@@ -1369,13 +1369,93 @@ def reminders_list(
     return reminders
 
 
-def reminder_complete(title: str) -> bool:
-    """Mark a reminder as complete via AppleScript."""
+def reminder_by_id(reminder_id: str) -> Reminder | None:
+    """Look up a single reminder by its SQLite Z_PK (id) across all reminder DBs.
+
+    This avoids loading all reminders with a limit when we only need one.
+    Returns None if the reminder is not found.
+    """
+    for db_path in _reminders_dbs():
+
+        def _lookup(conn: sqlite3.Connection) -> Reminder | None:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT
+                    r.Z_PK, r.ZTITLE, r.ZCOMPLETED, r.ZFLAGGED, r.ZPRIORITY,
+                    r.ZDUEDATE, r.ZNOTES, r.ZCREATIONDATE,
+                    COALESCE(l.ZNAME, '') as list_name
+                FROM ZREMCDREMINDER r
+                LEFT JOIN ZREMCDBASELIST l ON r.ZLIST = l.Z_PK
+                WHERE r.Z_PK = ?
+                    AND (r.ZMARKEDFORDELETION IS NULL OR r.ZMARKEDFORDELETION = 0)
+            """,
+                (int(reminder_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            pk, title, completed, flagged, priority, due, notes, created, lname = row
+            due_dt = (APPLE_EPOCH + timedelta(seconds=due)) if due else None
+            created_dt = (APPLE_EPOCH + timedelta(seconds=created)) if created else None
+            return Reminder(
+                id=str(pk),
+                title=title or "(Untitled)",
+                completed=bool(completed),
+                list_name=lname,
+                due_date=due_dt,
+                notes=notes or "",
+                priority=priority or 0,
+                flagged=bool(flagged),
+                creation_date=created_dt,
+            )
+
+        result = _run_sqlite_read(
+            db_path,
+            "reminder_by_id",
+            _lookup,
+            empty_result=None,
+            reminder_id=reminder_id,
+        )
+        if result is not None:
+            return result
+    return None
+
+
+def _applescript_find_reminder(title: str, list_name: str = "") -> str:
+    """Build the AppleScript 'set theReminder to ...' clause with list_name disambiguation.
+
+    When list_name is provided, the AppleScript matches on both name and
+    container list name, which prevents matching the wrong reminder when
+    duplicate titles exist across different lists.
+    """
     safe_title = _escape_applescript(title)
+    if list_name:
+        safe_list = _escape_applescript(list_name)
+        return (
+            f"set theReminder to (first reminder whose name is ({safe_title}) "
+            f"and completed is false and name of container is ({safe_list}))"
+        )
+    return (
+        f"set theReminder to (first reminder whose name is ({safe_title}) and completed is false)"
+    )
+
+
+def reminder_complete(title: str, list_name: str = "") -> bool:
+    """Mark a reminder as complete via AppleScript.
+
+    Args:
+        title: The title of the reminder to complete.
+        list_name: Optional list name for disambiguation when duplicate titles exist.
+
+    Returns:
+        True if the completion succeeded, False otherwise.
+    """
+    find_clause = _applescript_find_reminder(title, list_name)
     script = f"""
     tell application "Reminders"
         try
-            set theReminder to (first reminder whose name is ({safe_title}) and completed is false)
+            {find_clause}
             set completed of theReminder to true
             return "ok"
         on error
@@ -1389,7 +1469,7 @@ def reminder_complete(title: str) -> bool:
         )
         return result.returncode == 0 and "ok" in result.stdout
     except Exception:  # logged below
-        _log_service_failure("reminder_complete", title=title)
+        _log_service_failure("reminder_complete", title=title, list_name=list_name)
         return False
 
 
@@ -1450,6 +1530,7 @@ def reminder_edit(
     title: str | None = None,
     due_date: str | None = None,
     notes: str | None = None,
+    list_name: str = "",
 ) -> bool:
     """Edit an existing reminder's title, due_date, and/or notes via AppleScript.
 
@@ -1458,11 +1539,12 @@ def reminder_edit(
         title: New title to set (or None to keep current).
         due_date: New due date string (or None to keep current).
         notes: New notes/body text (or None to keep current).
+        list_name: Optional list name for disambiguation when duplicate titles exist.
 
     Returns:
         True if the edit succeeded, False otherwise.
     """
-    safe_title = _escape_applescript(current_title)
+    find_clause = _applescript_find_reminder(current_title, list_name)
     set_clauses: list[str] = []
 
     if title is not None:
@@ -1484,7 +1566,7 @@ def reminder_edit(
     script = f"""
     tell application "Reminders"
         try
-            set theReminder to (first reminder whose name is ({safe_title}) and completed is false)
+            {find_clause}
             {set_block}
             return "ok"
         on error
@@ -1504,24 +1586,26 @@ def reminder_edit(
             new_title=title,
             due_date=due_date,
             notes_present=notes is not None,
+            list_name=list_name,
         )
         return False
 
 
-def reminder_delete(title: str) -> bool:
+def reminder_delete(title: str, list_name: str = "") -> bool:
     """Delete a reminder via AppleScript.
 
     Args:
         title: The title of the reminder to delete.
+        list_name: Optional list name for disambiguation when duplicate titles exist.
 
     Returns:
         True if the deletion succeeded, False otherwise.
     """
-    safe_title = _escape_applescript(title)
+    find_clause = _applescript_find_reminder(title, list_name)
     script = f"""
     tell application "Reminders"
         try
-            set theReminder to (first reminder whose name is ({safe_title}) and completed is false)
+            {find_clause}
             delete theReminder
             return "ok"
         on error
@@ -1535,7 +1619,7 @@ def reminder_delete(title: str) -> bool:
         )
         return result.returncode == 0 and "ok" in result.stdout
     except Exception:  # logged below
-        _log_service_failure("reminder_delete", title=title)
+        _log_service_failure("reminder_delete", title=title, list_name=list_name)
         return False
 
 

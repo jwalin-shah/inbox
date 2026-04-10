@@ -9,7 +9,7 @@ import httpx
 from textual.widgets import Input, Static
 
 import inbox
-from inbox import InboxApp, MessageView, ReminderItem
+from inbox import DetailView, InboxApp, MessageView, ReminderItem
 
 
 class HarnessInboxApp(InboxApp):
@@ -850,6 +850,51 @@ def test_reminder_filter_by_list() -> None:
     else:
         app._rem_list_filter = ""
     assert app._rem_list_filter == ""
+
+
+def test_reminder_filter_change_clears_active_reminder() -> None:
+    """Changing the reminder list filter clears active_reminder and detail view.
+
+    Tests the core logic of action_filter_reminder_list — that after
+    changing the filter, active_reminder and detail view are cleared
+    to prevent actions on hidden reminders.
+    """
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.conversations.return_value = []
+        app = _make_app(client)
+        app.reminders_data = [
+            _make_reminder_data(id="r1", title="Groceries", list_name="Shopping"),
+            _make_reminder_data(id="r2", title="Deploy", list_name="Work"),
+        ]
+        app.reminder_lists = [
+            {"name": "Shopping", "incomplete_count": 1},
+            {"name": "Work", "incomplete_count": 1},
+        ]
+        app.active_reminder = _make_reminder_data(id="r1", title="Groceries", list_name="Shopping")
+
+        async with app.run_test() as pilot:
+            # Set filter to reminders and set active reminder
+            app._active_filter = "reminders"
+            app.query_one("#detail-view", DetailView).detail = app.active_reminder
+
+            # Trigger the filter change
+            app.action_filter_reminder_list()
+            await pilot.pause(0.3)
+
+            # active_reminder should be cleared
+            assert app.active_reminder is None
+            # detail view should be cleared
+            assert app.query_one("#detail-view", DetailView).detail is None
+            # filter should have changed
+            assert app._rem_list_filter == "Shopping"
+
+    asyncio.run(runner())
 
 
 def test_tab_switching_preserves_reminder_state() -> None:
