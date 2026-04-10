@@ -6,9 +6,11 @@ Auto-starts the server on launch.
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 
+import httpx
 from rich.align import Align
 from rich.panel import Panel
 from rich.text import Text
@@ -30,6 +32,27 @@ from textual.widgets import (
 )
 
 from inbox_client import InboxClient
+
+DEFAULT_POLL_INTERVAL = 10.0
+
+
+def _poll_interval_from_env() -> float:
+    raw_value = os.environ.get("INBOX_POLL_INTERVAL", str(DEFAULT_POLL_INTERVAL)).strip()
+    try:
+        interval = float(raw_value)
+    except ValueError:
+        return DEFAULT_POLL_INTERVAL
+    return interval if interval > 0 else DEFAULT_POLL_INTERVAL
+
+
+def _format_request_error(action: str, exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return f"{action} failed (HTTP {status_code})"
+    if isinstance(exc, httpx.RequestError):
+        return "Server unreachable — press Ctrl+R to retry"
+    return f"{action} failed: {exc}"
+
 
 # ── UI Widgets ───────────────────────────────────────────────────────────────
 
@@ -291,7 +314,7 @@ class InboxApp(App):
         Binding("ctrl+q", "quit", "Quit"),
     ]
 
-    POLL_INTERVAL = 10  # seconds between auto-refreshes
+    POLL_INTERVAL = _poll_interval_from_env()
 
     def __init__(self) -> None:
         super().__init__()
@@ -304,6 +327,8 @@ class InboxApp(App):
         self.active_event: dict | None = None
         self._active_filter: str = "all"
         self._poll_timer = None
+        self._client_closed = False
+        self._poll_had_error = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -480,7 +505,7 @@ class InboxApp(App):
         except Exception as e:
             self.call_from_thread(
                 self.query_one("#status", Static).update,
-                f"[red]Ambient toggle failed: {e}[/]",
+                f"[red]{_format_request_error('Ambient toggle', e)}[/]",
             )
 
     # ── Boot & refresh ───────────────────────────────────────────────────
@@ -524,10 +549,89 @@ class InboxApp(App):
     @work(thread=True)
     def _bg_poll(self) -> None:
         """Lightweight poll — updates data without disrupting UI if unchanged."""
+        convos, events, notes, status_override, changed = self._collect_poll_data()
+
+        if changed:
+            self._poll_had_error = status_override is not None
+            self.call_from_thread(self._populate, convos, events, notes, status_override)
+            return
+
+        self.conversations = convos
+        if status_override:
+            self._poll_had_error = True
+            self.call_from_thread(self.query_one("#status", Static).update, status_override)
+            return
+
+        if self._poll_had_error:
+            self._poll_had_error = False
+            self.call_from_thread(self._render_sidebar)
+
+    def _do_refresh(self) -> None:
+        """Fetch all data from the server (runs in worker thread)."""
+        convos, events, notes, status_override = self._collect_refresh_data()
+        self.call_from_thread(self._populate, convos, events, notes, status_override)
+
+    def _populate(
+        self,
+        convos: list[dict],
+        events: list[dict],
+        notes: list[dict],
+        status_override: str | None = None,
+    ) -> None:
+        self.conversations = convos
+        self.events = events
+        self.notes_data = notes
+        self._render_sidebar()
+        if status_override:
+            self.query_one("#status", Static).update(status_override)
+
+    def _merge_status_errors(self, errors: list[str]) -> str | None:
+        unique_errors = list(dict.fromkeys(errors))
+        if not unique_errors:
+            return None
+        return f"[red]{' · '.join(unique_errors)}[/]"
+
+    def _collect_auxiliary_data(self) -> tuple[list[dict], list[dict], list[str]]:
+        events = self.events
+        notes = self.notes_data
+        errors: list[str] = []
+
+        try:
+            events = self.client.calendar_events()
+        except Exception as exc:
+            errors.append(_format_request_error("Calendar refresh", exc))
+
+        try:
+            notes = self.client.notes(limit=50)
+        except Exception as exc:
+            errors.append(_format_request_error("Notes refresh", exc))
+
+        return events, notes, errors
+
+    def _collect_refresh_data(self) -> tuple[list[dict], list[dict], list[dict], str | None]:
+        convos = self.conversations
+        errors: list[str] = []
+
         try:
             convos = self.client.conversations(limit=100)
-        except Exception:
-            return  # silent fail on poll
+        except Exception as exc:
+            errors.append(_format_request_error("Conversation refresh", exc))
+
+        events, notes, aux_errors = self._collect_auxiliary_data()
+        errors.extend(aux_errors)
+        return convos, events, notes, self._merge_status_errors(errors)
+
+    def _collect_poll_data(self) -> tuple[list[dict], list[dict], list[dict], str | None, bool]:
+        try:
+            convos = self.client.conversations(limit=100)
+        except Exception as exc:
+            return (
+                self.conversations,
+                self.events,
+                self.notes_data,
+                self._merge_status_errors([_format_request_error("Auto-refresh", exc)]),
+                False,
+            )
 
         # Check if unread counts changed
         old_unread = sum(c.get("unread", 0) for c in self.conversations)
@@ -539,44 +643,11 @@ class InboxApp(App):
             old_unread != new_unread or old_ids != new_ids or len(self.conversations) != len(convos)
         )
 
-        if changed:
-            # Also refresh calendar and notes
-            try:
-                events = self.client.calendar_events()
-                notes = self.client.notes(limit=50)
-            except Exception:
-                events = self.events
-                notes = self.notes_data
-            self.call_from_thread(self._populate, convos, events, notes)
-        else:
-            # Just update conversation data silently (snippets may change)
-            self.conversations = convos
+        if not changed:
+            return convos, self.events, self.notes_data, None, False
 
-    def _do_refresh(self) -> None:
-        """Fetch all data from the server (runs in worker thread)."""
-        try:
-            convos = self.client.conversations(limit=100)
-            events = self.client.calendar_events()
-            notes = self.client.notes(limit=50)
-        except Exception as e:
-            self.call_from_thread(
-                self.query_one("#status", Static).update,
-                f"[red]Refresh failed: {e}[/]",
-            )
-            return
-
-        self.call_from_thread(self._populate, convos, events, notes)
-
-    def _populate(
-        self,
-        convos: list[dict],
-        events: list[dict],
-        notes: list[dict],
-    ) -> None:
-        self.conversations = convos
-        self.events = events
-        self.notes_data = notes
-        self._render_sidebar()
+        events, notes, errors = self._collect_auxiliary_data()
+        return convos, events, notes, self._merge_status_errors(errors), True
 
     # ── Selection ────────────────────────────────────────────────────────
 
@@ -610,7 +681,7 @@ class InboxApp(App):
         except Exception as e:
             self.call_from_thread(
                 self.query_one("#status", Static).update,
-                f"[red]Failed: {e}[/]",
+                f"[red]{_format_request_error('Thread load', e)}[/]",
             )
             return
         self.call_from_thread(self._show_thread, msgs, conv)
@@ -635,14 +706,19 @@ class InboxApp(App):
 
     @work(thread=True)
     def _load_note(self, note_data: dict) -> None:
+        status_override = None
         try:
             full = self.client.note(note_data["id"])
-        except Exception:
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Note load', exc)}[/]"
             full = note_data
-        self.call_from_thread(self._show_note, full)
+        self.call_from_thread(self._show_note, full, status_override)
 
-    def _show_note(self, note: dict) -> None:
+    def _show_note(self, note: dict, status_override: str | None = None) -> None:
         self.query_one("#detail-view", DetailView).detail = note
+        if status_override:
+            self.query_one("#status", Static).update(status_override)
+            return
         title = note.get("title", "?")
         self.query_one("#status", Static).update(f"[bold]{title}[/]  [dim]note[/]")
 
@@ -676,16 +752,19 @@ class InboxApp(App):
 
     @work(thread=True)
     def _do_send(self, conv: dict, text: str) -> None:
+        status = "[red]Failed to send[/]"
         try:
             ok = self.client.send(
                 conv_id=conv["id"],
                 source=conv["source"],
                 text=text,
             )
-        except Exception:
+        except Exception as exc:
             ok = False
-
-        status = "[green]Sent[/]" if ok else "[red]Failed to send[/]"
+            status = f"[red]{_format_request_error('Send', exc)}[/]"
+        else:
+            if ok:
+                status = "[green]Sent[/]"
         self.call_from_thread(self.query_one("#status", Static).update, status)
         if ok and conv["source"] == "imessage":
             self._reload_after_send(conv, text)
@@ -719,10 +798,12 @@ class InboxApp(App):
 
     @work(thread=True)
     def _create_quick_event(self, text: str) -> None:
+        status_override = None
         try:
             result = self.client.create_quick_event(text)
             ok = result.get("ok", False)
-        except Exception:
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Event creation', exc)}[/]"
             ok = False
 
         if ok:
@@ -734,7 +815,7 @@ class InboxApp(App):
         else:
             self.call_from_thread(
                 self.query_one("#status", Static).update,
-                "[red]Failed to create event[/]",
+                status_override or "[red]Failed to create event[/]",
             )
 
     # ── Calendar actions ─────────────────────────────────────────────────
@@ -755,13 +836,15 @@ class InboxApp(App):
 
     @work(thread=True)
     def _do_delete_event(self, event: dict) -> None:
+        status_override = None
         try:
             ok = self.client.delete_event(
                 event_id=event["event_id"],
                 calendar_id=event.get("calendar_id", "primary"),
                 account=event.get("account", ""),
             )
-        except Exception:
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Delete event', exc)}[/]"
             ok = False
 
         if ok:
@@ -773,7 +856,7 @@ class InboxApp(App):
         else:
             self.call_from_thread(
                 self.query_one("#status", Static).update,
-                "[red]Failed to delete[/]",
+                status_override or "[red]Failed to delete[/]",
             )
 
     # ── Account actions ──────────────────────────────────────────────────
@@ -795,7 +878,7 @@ class InboxApp(App):
         except Exception as e:
             self.call_from_thread(
                 self.query_one("#status", Static).update,
-                f"[red]Auth failed: {e}[/]",
+                f"[red]{_format_request_error('Auth', e)}[/]",
             )
 
     def action_reauth_account(self) -> None:
@@ -831,13 +914,28 @@ class InboxApp(App):
         except Exception as e:
             self.call_from_thread(
                 self.query_one("#status", Static).update,
-                f"[red]Re-auth failed: {e}[/]",
+                f"[red]{_format_request_error('Re-auth', e)}[/]",
             )
 
     # ── Misc ─────────────────────────────────────────────────────────────
 
     def action_clear_compose(self) -> None:
         self.query_one("#compose", Input).clear()
+
+    def _cleanup_resources(self) -> None:
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+        if not self._client_closed:
+            self.client.close()
+            self._client_closed = True
+
+    def action_quit(self) -> None:
+        self._cleanup_resources()
+        self.exit()
+
+    def on_unmount(self) -> None:
+        self._cleanup_resources()
 
 
 if __name__ == "__main__":
