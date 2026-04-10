@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+import webbrowser
 from datetime import datetime
 
 import httpx
@@ -191,6 +192,62 @@ class ReminderItem(ListItem):
         yield Static(t)
 
 
+class NotificationItem(ListItem):
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+
+    def compose(self) -> ComposeResult:
+        d = self.data
+        t = Text()
+        reason = d.get("reason", "")
+        ntype = d.get("type", "")
+        is_pr_review = reason == "review_requested" or ntype == "PullRequest"
+
+        if is_pr_review:
+            t.append("🔀 ", style="magenta bold")
+        elif ntype == "Issue":
+            t.append("🐛 ", style="dim")
+        elif ntype == "Release":
+            t.append("📦 ", style="dim")
+        else:
+            t.append("🔔 ", style="dim")
+
+        # Title
+        if d.get("unread"):
+            t.append(d.get("title", "Untitled"), style="bold white")
+        else:
+            t.append(d.get("title", "Untitled"), style="white")
+
+        if d.get("unread"):
+            t.append(" ●", style="bold yellow")
+
+        # Repo name + reason on line 2
+        repo = d.get("repo", "")
+        line2_parts: list[str] = []
+        if repo:
+            line2_parts.append(repo)
+        if reason:
+            # Make reason more human-readable
+            reason_display = reason.replace("_", " ")
+            line2_parts.append(reason_display)
+        line2 = " · ".join(line2_parts)
+        if line2:
+            t.append(f"\n  {line2}", style="dim")
+
+        # Timestamp on line 3
+        ts = d.get("updated_at", "")
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts)
+                time_str = dt.strftime("%b %d %H:%M")
+                t.append(f"\n  {time_str}", style="dim")
+            except (ValueError, TypeError):
+                pass
+
+        yield Static(t)
+
+
 class MessageView(Static):
     DEFAULT_CSS = """
     MessageView {
@@ -302,6 +359,38 @@ class DetailView(Static):
             if d.get("notes"):
                 t.append(f"\n{d['notes']}\n", style="white")
 
+        elif "reason" in d and "repo" in d:
+            # GitHub notification — identified by reason + repo fields
+            is_pr_review = d.get("reason") == "review_requested" or d.get("type") == "PullRequest"
+            if is_pr_review:
+                t.append("🔀 ", style="magenta bold")
+            else:
+                t.append("🔔 ", style="dim")
+            t.append(f"{d.get('title', 'Untitled')}\n", style="bold white")
+            t.append("─" * 40 + "\n", style="dim")
+            t.append(f"📦 {d.get('repo', '?')}\n", style="cyan")
+            reason = d.get("reason", "").replace("_", " ")
+            t.append(f"📌 {reason}\n", style="yellow" if is_pr_review else "dim")
+            ntype = d.get("type", "")
+            if ntype:
+                t.append(f"🏷  {ntype}\n", style="dim")
+            if d.get("unread"):
+                t.append("● Unread\n", style="bold yellow")
+            else:
+                t.append("  Read\n", style="dim")
+            ts = d.get("updated_at", "")
+            if ts:
+                try:
+                    dt = datetime.fromisoformat(ts)
+                    t.append(f"🕐 {dt.strftime('%b %d, %Y %H:%M')}\n", style="dim")
+                except (ValueError, TypeError):
+                    pass
+            url = d.get("url", "")
+            if url:
+                t.append(f"\n🔗 {url}\n", style="blue")
+            t.append("\n", style="")
+            t.append("[dim]r: mark read · R: read all · o: open in browser[/]\n", style="dim")
+
         elif "title" in d:
             # Note
             t.append(f"{d['title']}\n", style="bold white")
@@ -389,9 +478,11 @@ class InboxApp(App):
         self.notes_data: list[dict] = []
         self.reminders_data: list[dict] = []
         self.reminder_lists: list[dict] = []
+        self.github_data: list[dict] = []
         self.active_conv: dict | None = None
         self.active_event: dict | None = None
         self.active_reminder: dict | None = None
+        self.active_notification: dict | None = None
         self._active_filter: str = "all"
         self._rem_list_filter: str = ""  # "" = all lists
         self._editing_reminder: dict | None = None
@@ -402,6 +493,23 @@ class InboxApp(App):
         # Per-tab state: stores selected conversation, messages, detail, etc.
         # keyed by filter name ("all", "imessage", "gmail", "calendar", etc.)
         self._tab_state: dict[str, dict] = {}
+
+    def _update_github_badge(self) -> None:
+        """Update the GitHub tab label with the unread count badge.
+
+        Attempts to update the tab label. If the label update doesn't
+        render (a known Textual issue in some versions), the unread
+        count is still visible in the status bar text.
+        """
+        unread = sum(1 for n in self.github_data if n.get("unread"))
+        try:
+            tabs = self.query_one("#tabs", Tabs)
+            gh_tab = tabs.get_tab("tab-gh")
+            if gh_tab is not None:
+                label = f"GitHub ({unread})" if unread else "GitHub"
+                gh_tab.label = label
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -449,6 +557,9 @@ class InboxApp(App):
             state["active_reminder"] = self.active_reminder
             state["rem_list_filter"] = self._rem_list_filter
             state["active_conv"] = None
+        elif tab_name == "github":
+            state["active_notification"] = self.active_notification
+            state["active_conv"] = None
         self._tab_state[tab_name] = state
 
     def _restore_tab_state(self, tab_name: str) -> None:
@@ -486,6 +597,13 @@ class InboxApp(App):
             self.active_event = None
             if self.active_reminder:
                 self.query_one("#detail-view", DetailView).detail = self.active_reminder
+        elif tab_name == "github":
+            self.active_notification = state.get("active_notification")
+            self.active_conv = None
+            self.active_event = None
+            self.active_reminder = None
+            if self.active_notification:
+                self.query_one("#detail-view", DetailView).detail = self.active_notification
         else:
             # For tabs without saved state, just clear active selections
             self.active_conv = None
@@ -535,8 +653,6 @@ class InboxApp(App):
                 compose_input.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
             elif self._active_filter == "reminders":
                 compose_input.placeholder = "New reminder (Enter to create)"
-            elif self._active_filter == "notes":
-                compose_input.placeholder = ""
             else:
                 compose_input.placeholder = ""
         else:
@@ -587,7 +703,17 @@ class InboxApp(App):
             return
 
         if self._active_filter == "github":
-            self.query_one("#status", Static).update("[dim]GitHub Notifications[/]")
+            if not self.github_data:
+                lv.append(ListItem(Static(Text("  All clear! 🔔", style="dim green"))))
+            else:
+                for n in self.github_data:
+                    lv.append(NotificationItem(n))
+            unread = sum(1 for n in self.github_data if n.get("unread"))
+            status = f"[magenta]{len(self.github_data)} notifications[/]"
+            if unread:
+                status += f"  [yellow]{unread} unread[/]"
+            status += "  [dim]r: mark read · R: read all · o: open[/]"
+            self.query_one("#status", Static).update(status)
             return
 
         if self._active_filter == "drive":
@@ -646,6 +772,12 @@ class InboxApp(App):
         elif self._active_filter == "notes":
             # Notes restore is handled by _load_note in _restore_tab_state
             pass
+        elif self._active_filter == "github" and self.active_notification:
+            notif_id = self.active_notification.get("id")
+            for i, child in enumerate(lv.children):
+                if isinstance(child, NotificationItem) and child.data.get("id") == notif_id:
+                    target_index = i
+                    break
 
         if target_index >= 0:
             lv.index = target_index
@@ -757,9 +889,16 @@ class InboxApp(App):
     def _bg_poll(self) -> None:
         """Lightweight poll — updates data without disrupting UI if unchanged."""
         try:
-            convos, events, notes, reminders, reminder_lists, status_override, changed = (
-                self._collect_poll_data()
-            )
+            (
+                convos,
+                events,
+                notes,
+                reminders,
+                reminder_lists,
+                github_data,
+                status_override,
+                changed,
+            ) = self._collect_poll_data()
         except Exception as exc:
             # Unhandled exception in poll data collection — keep the TUI alive
             self._consecutive_errors += 1
@@ -783,6 +922,7 @@ class InboxApp(App):
                     notes,
                     reminders,
                     reminder_lists,
+                    github_data,
                     status_override,
                 )
                 return
@@ -795,7 +935,14 @@ class InboxApp(App):
         if changed:
             self._poll_had_error = False
             self.call_from_thread(
-                self._populate, convos, events, notes, reminders, reminder_lists, status_override
+                self._populate,
+                convos,
+                events,
+                notes,
+                reminders,
+                reminder_lists,
+                github_data,
+                status_override,
             )
             return
 
@@ -806,11 +953,18 @@ class InboxApp(App):
 
     def _do_refresh(self) -> None:
         """Fetch all data from the server (runs in worker thread)."""
-        convos, events, notes, reminders, reminder_lists, status_override = (
+        convos, events, notes, reminders, reminder_lists, github_data, status_override = (
             self._collect_refresh_data()
         )
         self.call_from_thread(
-            self._populate, convos, events, notes, reminders, reminder_lists, status_override
+            self._populate,
+            convos,
+            events,
+            notes,
+            reminders,
+            reminder_lists,
+            github_data,
+            status_override,
         )
 
     def _populate(
@@ -820,6 +974,7 @@ class InboxApp(App):
         notes: list[dict],
         reminders: list[dict] | None = None,
         reminder_lists: list[dict] | None = None,
+        github_data: list[dict] | None = None,
         status_override: str | None = None,
     ) -> None:
         self.conversations = convos
@@ -829,6 +984,9 @@ class InboxApp(App):
             self.reminders_data = reminders
         if reminder_lists is not None:
             self.reminder_lists = reminder_lists
+        if github_data is not None:
+            self.github_data = github_data
+            self._update_github_badge()
         self._render_sidebar()
         if status_override:
             self.query_one("#status", Static).update(status_override)
@@ -841,11 +999,12 @@ class InboxApp(App):
 
     def _collect_auxiliary_data(
         self,
-    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[str]]:
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], list[str]]:
         events = self.events
         notes = self.notes_data
         reminders = self.reminders_data
         reminder_lists = self.reminder_lists
+        github_data = self.github_data
         errors: list[str] = []
 
         try:
@@ -868,11 +1027,16 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("Reminder lists refresh", exc))
 
-        return events, notes, reminders, reminder_lists, errors
+        try:
+            github_data = self.client.github_notifications()
+        except Exception as exc:
+            errors.append(_format_request_error("GitHub refresh", exc))
+
+        return events, notes, reminders, reminder_lists, github_data, errors
 
     def _collect_refresh_data(
         self,
-    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], str | None]:
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], str | None]:
         convos = self.conversations
         errors: list[str] = []
 
@@ -881,13 +1045,25 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("Conversation refresh", exc))
 
-        events, notes, reminders, reminder_lists, aux_errors = self._collect_auxiliary_data()
+        events, notes, reminders, reminder_lists, github_data, aux_errors = (
+            self._collect_auxiliary_data()
+        )
         errors.extend(aux_errors)
-        return convos, events, notes, reminders, reminder_lists, self._merge_status_errors(errors)
+        return (
+            convos,
+            events,
+            notes,
+            reminders,
+            reminder_lists,
+            github_data,
+            self._merge_status_errors(errors),
+        )
 
     def _collect_poll_data(
         self,
-    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], str | None, bool]:
+    ) -> tuple[
+        list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], str | None, bool
+    ]:
         try:
             convos = self.client.conversations(limit=100)
         except Exception as exc:
@@ -897,6 +1073,7 @@ class InboxApp(App):
                 self.notes_data,
                 self.reminders_data,
                 self.reminder_lists,
+                self.github_data,
                 self._merge_status_errors([_format_request_error("Auto-refresh", exc)]),
                 False,
             )
@@ -918,17 +1095,21 @@ class InboxApp(App):
                 self.notes_data,
                 self.reminders_data,
                 self.reminder_lists,
+                self.github_data,
                 None,
                 False,
             )
 
-        events, notes, reminders, reminder_lists, errors = self._collect_auxiliary_data()
+        events, notes, reminders, reminder_lists, github_data, errors = (
+            self._collect_auxiliary_data()
+        )
         return (
             convos,
             events,
             notes,
             reminders,
             reminder_lists,
+            github_data,
             self._merge_status_errors(errors),
             True,
         )
@@ -936,36 +1117,59 @@ class InboxApp(App):
     # ── Reminder key handling ─────────────────────────────────────────────
 
     def on_key(self, event) -> None:
-        """Handle single-key shortcuts for the reminders tab.
+        """Handle single-key shortcuts for the reminders and github tabs.
 
         Only active when the compose input is NOT focused, so typing
         in compose still works normally.
         """
-        if self._active_filter != "reminders":
-            return
         compose = self.query_one("#compose", Input)
         if compose.has_focus:
             return
 
-        key = event.key
-        if key == "c":
-            event.prevent_default()
-            self.action_complete_reminder()
-        elif key == "e":
-            event.prevent_default()
-            self.action_edit_reminder()
-        elif key == "d":
-            event.prevent_default()
-            self.action_delete_reminder()
-        elif key == "f":
-            event.prevent_default()
-            self.action_filter_reminder_list()
+        if self._active_filter == "reminders":
+            key = event.key
+            if key == "c":
+                event.prevent_default()
+                self.action_complete_reminder()
+            elif key == "e":
+                event.prevent_default()
+                self.action_edit_reminder()
+            elif key == "d":
+                event.prevent_default()
+                self.action_delete_reminder()
+            elif key == "f":
+                event.prevent_default()
+                self.action_filter_reminder_list()
+
+        elif self._active_filter == "github":
+            key = event.key
+            if key == "r":
+                event.prevent_default()
+                self.action_mark_notification_read()
+            elif key == "shift+r":
+                event.prevent_default()
+                self.action_mark_all_notifications_read()
+            elif key == "o":
+                event.prevent_default()
+                self.action_open_notification_url()
 
     # ── Selection ────────────────────────────────────────────────────────
 
     @on(ListView.Selected, "#contact-list")
     def on_item_selected(self, event: ListView.Selected) -> None:
         item = event.item
+
+        if isinstance(item, NotificationItem):
+            self.active_notification = item.data
+            self.active_event = None
+            self.active_reminder = None
+            self.active_conv = None
+            self.query_one("#detail-view", DetailView).detail = item.data
+            title = item.data.get("title", "?")
+            repo = item.data.get("repo", "")
+            tag = f" · {repo}" if repo else ""
+            self.query_one("#status", Static).update(f"[bold]{title}[/]  [dim]github{tag}[/]")
+            return
 
         if isinstance(item, ReminderItem):
             self.active_reminder = item.data
@@ -1347,6 +1551,90 @@ class InboxApp(App):
         self.active_reminder = None
         self.query_one("#detail-view", DetailView).detail = None
         self._render_sidebar()
+
+    # ── GitHub actions ────────────────────────────────────────────────────
+
+    def action_mark_notification_read(self) -> None:
+        """Mark the selected notification as read."""
+        if self._active_filter != "github":
+            return
+        if not self.active_notification or not self.active_notification.get("id"):
+            self.query_one("#status", Static).update("[yellow]No notification selected[/]")
+            return
+        title = self.active_notification.get("title", "?")
+        self.query_one("#status", Static).update(f"[yellow]Marking '{title}' as read...[/]")
+        self._do_mark_notification_read(self.active_notification)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_mark_notification_read(self, notification: dict) -> None:
+        status_override = None
+        try:
+            ok = self.client.github_mark_read(notification_id=notification["id"])
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Mark read', exc)}[/]"
+            ok = False
+
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Marked '{notification.get('title')}' as read[/]",
+            )
+            self._do_refresh()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                status_override or "[red]Failed to mark as read[/]",
+            )
+
+    def action_mark_all_notifications_read(self) -> None:
+        """Mark all GitHub notifications as read."""
+        if self._active_filter != "github":
+            return
+        count = sum(1 for n in self.github_data if n.get("unread"))
+        if not count:
+            self.query_one("#status", Static).update("[dim]All notifications already read[/]")
+            return
+        self.query_one("#status", Static).update(
+            f"[yellow]Marking {count} notifications as read...[/]"
+        )
+        self._do_mark_all_notifications_read()
+
+    @work(thread=True, exit_on_error=False)
+    def _do_mark_all_notifications_read(self) -> None:
+        status_override = None
+        try:
+            ok = self.client.github_mark_all_read()
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Mark all read', exc)}[/]"
+            ok = False
+
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[green]All notifications marked as read[/]",
+            )
+            self._do_refresh()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                status_override or "[red]Failed to mark all as read[/]",
+            )
+
+    def action_open_notification_url(self) -> None:
+        """Open the selected notification's URL in the system browser."""
+        if self._active_filter != "github":
+            return
+        if not self.active_notification:
+            self.query_one("#status", Static).update("[yellow]No notification selected[/]")
+            return
+        url = self.active_notification.get("url", "")
+        if not url:
+            self.query_one("#status", Static).update("[yellow]No URL for this notification[/]")
+            return
+        webbrowser.open(url)
+        self.query_one("#status", Static).update(
+            f"[green]Opened {self.active_notification.get('title', 'notification')} in browser[/]"
+        )
 
     # ── Account actions ──────────────────────────────────────────────────
 

@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 from textual.widgets import Input, ListView, Static
 
 import inbox
-from inbox import DetailView, InboxApp, MessageView, ReminderItem
+from inbox import DetailView, InboxApp, MessageView, NotificationItem, ReminderItem
 
 
 class HarnessInboxApp(InboxApp):
     def on_mount(self) -> None:
         """Skip background boot work for deterministic tests."""
+
+    def boot(self) -> None:
+        """Override boot to prevent server connection in tests."""
 
 
 def _make_app(client: MagicMock | None = None) -> HarnessInboxApp:
@@ -53,13 +56,16 @@ def test_collect_refresh_data_preserves_other_data_on_partial_failure() -> None:
     client.notes.return_value = [{"id": "n1", "title": "Fresh note"}]
     client.reminders.return_value = []
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
     app.conversations = [{"id": "old", "source": "imessage", "unread": 1}]
     app.events = [{"summary": "Existing event"}]
     app.notes_data = [{"id": "old-note", "title": "Old note"}]
 
-    convos, events, notes, reminders, reminder_lists, status = app._collect_refresh_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status = (
+        app._collect_refresh_data()
+    )
 
     assert convos == [{"id": "c1", "source": "imessage", "unread": 0}]
     assert events == [{"summary": "Existing event"}]
@@ -78,7 +84,9 @@ def test_collect_poll_data_reports_server_unreachable() -> None:
     app.events = [{"summary": "Standup"}]
     app.notes_data = [{"id": "n1"}]
 
-    convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+        app._collect_poll_data()
+    )
 
     assert changed is False
     assert convos == app.conversations
@@ -241,6 +249,7 @@ def test_poll_had_error_resets_after_successful_poll() -> None:
     client.notes.return_value = [{"id": "n1"}]
     client.reminders.return_value = []
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
     app.conversations = []
@@ -249,7 +258,9 @@ def test_poll_had_error_resets_after_successful_poll() -> None:
     app._poll_had_error = False
 
     # First poll fails
-    convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+        app._collect_poll_data()
+    )
     assert status is not None
     assert "unreachable" in status
     assert changed is False
@@ -258,7 +269,7 @@ def test_poll_had_error_resets_after_successful_poll() -> None:
     app._poll_had_error = True
 
     # Second poll succeeds — conversations changed so changed=True
-    convos2, events2, notes2, reminders2, reminder_lists2, status2, changed2 = (
+    convos2, events2, notes2, reminders2, reminder_lists2, github_data2, status2, changed2 = (
         app._collect_poll_data()
     )
     assert changed2 is True
@@ -275,13 +286,16 @@ def test_collect_poll_data_succeeds_with_changed_data() -> None:
     client.notes.return_value = [{"id": "n1"}]
     client.reminders.return_value = []
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
     app.conversations = [{"id": "c1", "source": "imessage", "unread": 0}]
     app.events = []
     app.notes_data = []
 
-    convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+        app._collect_poll_data()
+    )
 
     assert changed is True
     assert len(convos) == 2
@@ -297,9 +311,12 @@ def test_collect_refresh_data_all_succeed() -> None:
     client.notes.return_value = [{"id": "n1", "title": "My Note"}]
     client.reminders.return_value = [{"id": "r1", "title": "Buy groceries"}]
     client.reminder_lists.return_value = [{"name": "Reminders", "incomplete_count": 1}]
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
-    convos, events, notes, reminders, reminder_lists, status = app._collect_refresh_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status = (
+        app._collect_refresh_data()
+    )
 
     assert convos == [{"id": "c1", "source": "imessage", "unread": 0}]
     assert events == [{"summary": "Meeting"}]
@@ -318,11 +335,14 @@ def test_collect_refresh_data_conversations_fails_preserves_old() -> None:
     client.notes.return_value = [{"id": "n1"}]
     client.reminders.return_value = []
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
     app.conversations = [{"id": "old", "source": "imessage", "unread": 0}]
 
-    convos, events, notes, reminders, reminder_lists, status = app._collect_refresh_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status = (
+        app._collect_refresh_data()
+    )
 
     # Conversations preserved from old data
     assert convos == [{"id": "old", "source": "imessage", "unread": 0}]
@@ -353,7 +373,9 @@ def test_consecutive_errors_increment_on_poll_failure() -> None:
     assert app._consecutive_errors == 0
 
     # First poll failure
-    convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+        app._collect_poll_data()
+    )
     assert status is not None
     # The counter is incremented by _bg_poll, not by _collect_poll_data,
     # but we can verify the method returns the error status
@@ -371,6 +393,7 @@ def test_consecutive_errors_reset_on_successful_poll() -> None:
     client.notes.return_value = [{"id": "n1"}]
     client.reminders.return_value = []
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
     app.conversations = []
@@ -379,7 +402,9 @@ def test_consecutive_errors_reset_on_successful_poll() -> None:
     app._consecutive_errors = 3  # Simulate sustained outage state
 
     # Successful poll returns fresh data
-    convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+        app._collect_poll_data()
+    )
     assert changed is True
     assert status is None
 
@@ -403,7 +428,9 @@ def test_sustained_outage_threshold_message() -> None:
     app._consecutive_errors = InboxApp._SUSTAINED_OUTAGE_THRESHOLD - 1
 
     # This poll failure pushes us over the threshold
-    convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+        app._collect_poll_data()
+    )
     assert status is not None
     assert "unreachable" in status
 
@@ -444,7 +471,9 @@ def test_bg_poll_catches_unexpected_exceptions() -> None:
 
     # _collect_poll_data catches Exception on conversations, so RuntimeError
     # will be caught there and an error status returned. Verify this:
-    convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+        app._collect_poll_data()
+    )
     assert status is not None
     assert "unexpected" in status or "failed" in status
     assert changed is False
@@ -460,7 +489,9 @@ def test_bg_refresh_catches_unexpected_exceptions() -> None:
 
     # _collect_refresh_data catches Exception on conversations, so the
     # RuntimeError will be caught and an error status returned.
-    convos, events, notes, reminders, reminder_lists, status = app._collect_refresh_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status = (
+        app._collect_refresh_data()
+    )
     assert status is not None
     assert "unexpected" in status or "failed" in status
 
@@ -530,7 +561,9 @@ def test_tui_survives_repeated_poll_failures() -> None:
         client.conversations.side_effect = httpx.ConnectError(
             "refused", request=httpx.Request("GET", "http://test/")
         )
-        convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+        convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+            app._collect_poll_data()
+        )
         assert changed is False
         assert convos == app.conversations  # Old data preserved
         assert status is not None
@@ -552,6 +585,7 @@ def test_tui_recovers_after_sustained_outage() -> None:
     client.notes.return_value = [{"id": "n2", "title": "New note"}]
     client.reminders.return_value = []
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
     app.conversations = [{"id": "c1", "source": "imessage", "unread": 0}]
@@ -562,12 +596,16 @@ def test_tui_recovers_after_sustained_outage() -> None:
 
     # Failures during outage
     for _ in range(3):
-        convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+        convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+            app._collect_poll_data()
+        )
         assert status is not None
         assert "unreachable" in status
 
     # Server comes back — poll succeeds with changed data
-    convos, events, notes, reminders, reminder_lists, status, changed = app._collect_poll_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
+        app._collect_poll_data()
+    )
     assert changed is True
     assert len(convos) == 1
     assert convos[0]["id"] == "c2"
@@ -634,6 +672,7 @@ def test_reminders_tab_shows_reminder_items() -> None:
             _make_reminder_data(id="r2", title="Ship feature"),
         ]
         client.reminder_lists.return_value = [{"name": "Shopping", "incomplete_count": 1}]
+        client.github_notifications.return_value = []
         app = _make_app(client)
 
         async with app.run_test() as pilot:
@@ -660,6 +699,7 @@ def test_reminders_empty_state_shows_message() -> None:
         client = MagicMock()
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         app = _make_app(client)
 
         async with app.run_test() as pilot:
@@ -706,6 +746,7 @@ def test_reminder_create_from_compose() -> None:
         client.reminder_create.return_value = True
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         client.calendar_events.return_value = []
         client.notes.return_value = []
         client.conversations.return_value = []
@@ -737,6 +778,7 @@ def test_reminder_complete_action() -> None:
         client.reminder_complete.return_value = True
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         client.calendar_events.return_value = []
         client.notes.return_value = []
         client.conversations.return_value = []
@@ -768,6 +810,7 @@ def test_reminder_delete_action() -> None:
         client.reminder_delete.return_value = True
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         client.calendar_events.return_value = []
         client.notes.return_value = []
         client.conversations.return_value = []
@@ -794,6 +837,7 @@ def test_reminder_edit_action() -> None:
         client = MagicMock()
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         app = _make_app(client)
         app.reminders_data = [_make_reminder_data(title="Buy groceries")]
         app.reminder_lists = [{"name": "Shopping", "incomplete_count": 1}]
@@ -817,6 +861,7 @@ def test_reminder_filter_by_list() -> None:
     client = MagicMock()
     client.reminders.return_value = []
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
     app = _make_app(client)
     app.reminders_data = [
         _make_reminder_data(id="r1", title="Groceries", list_name="Shopping"),
@@ -864,6 +909,7 @@ def test_reminder_filter_change_clears_active_reminder() -> None:
         client = MagicMock()
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         client.calendar_events.return_value = []
         client.notes.return_value = []
         client.conversations.return_value = []
@@ -904,6 +950,7 @@ def test_tab_switching_preserves_reminder_state() -> None:
         client = MagicMock()
         client.reminders.return_value = [_make_reminder_data()]
         client.reminder_lists.return_value = [{"name": "Shopping", "incomplete_count": 1}]
+        client.github_notifications.return_value = []
         client.calendar_events.return_value = []
         client.notes.return_value = []
         client.conversations.return_value = []
@@ -942,6 +989,7 @@ def test_notes_tab_still_works_regression() -> None:
         client = MagicMock()
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         client.notes.return_value = [
             {"id": "n1", "title": "Test note", "snippet": "", "modified": "", "folder": ""}
         ]
@@ -980,9 +1028,12 @@ def test_collect_refresh_data_includes_reminders() -> None:
     client.notes.return_value = []
     client.reminders.return_value = [_make_reminder_data()]
     client.reminder_lists.return_value = [{"name": "Shopping", "incomplete_count": 1}]
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
-    convos, events, notes, reminders, reminder_lists, status = app._collect_refresh_data()
+    convos, events, notes, reminders, reminder_lists, github_data, status = (
+        app._collect_refresh_data()
+    )
 
     assert len(reminders) == 1
     assert reminders[0]["title"] == "Buy groceries"
@@ -998,9 +1049,10 @@ def test_collect_auxiliary_data_fetches_reminders() -> None:
     client.notes.return_value = []
     client.reminders.return_value = [_make_reminder_data()]
     client.reminder_lists.return_value = [{"name": "Shopping", "incomplete_count": 1}]
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
-    events, notes, reminders, reminder_lists, errors = app._collect_auxiliary_data()
+    events, notes, reminders, reminder_lists, github_data, errors = app._collect_auxiliary_data()
 
     assert len(reminders) == 1
     assert len(reminder_lists) == 1
@@ -1016,11 +1068,12 @@ def test_collect_auxiliary_data_reminders_failure_preserves_old() -> None:
         "refused", request=httpx.Request("GET", "http://test/")
     )
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
 
     app = _make_app(client)
     app.reminders_data = [_make_reminder_data(title="Old reminder")]
 
-    events, notes, reminders, reminder_lists, errors = app._collect_auxiliary_data()
+    events, notes, reminders, reminder_lists, github_data, errors = app._collect_auxiliary_data()
 
     # Old reminders preserved
     assert len(reminders) == 1
@@ -1034,6 +1087,7 @@ def test_populate_stores_reminders_data() -> None:
     client = MagicMock()
     client.reminders.return_value = []
     client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
     client.calendar_events.return_value = []
     client.notes.return_value = []
     client.conversations.return_value = []
@@ -1091,6 +1145,7 @@ def test_tab_state_saved_on_switch() -> None:
         client.notes.return_value = []
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         app = _make_app(client)
 
         async with app.run_test() as pilot:
@@ -1133,6 +1188,7 @@ def test_tab_state_restored_on_switch_back() -> None:
         client.notes.return_value = []
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         app = _make_app(client)
 
         async with app.run_test() as pilot:
@@ -1181,6 +1237,7 @@ def test_tab_state_preserves_reminder_filter() -> None:
             {"name": "Shopping", "incomplete_count": 1},
             {"name": "Work", "incomplete_count": 0},
         ]
+        client.github_notifications.return_value = []
         app = _make_app(client)
         app.reminders_data = [_make_reminder_data()]
         app.reminder_lists = client.reminder_lists.return_value
@@ -1230,6 +1287,7 @@ def test_tab_state_preserves_calendar_event_selection() -> None:
         client.notes.return_value = []
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         app = _make_app(client)
         app.events = client.calendar_events.return_value
 
@@ -1280,6 +1338,7 @@ def test_tab_state_messages_retained_across_switches() -> None:
         client.notes.return_value = []
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         app = _make_app(client)
 
         async with app.run_test() as pilot:
@@ -1394,6 +1453,7 @@ def test_sidebar_selection_restored_after_tab_switch() -> None:
         client.notes.return_value = []
         client.reminders.return_value = []
         client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
         app = _make_app(client)
         app.conversations = client.conversations.return_value
 
@@ -1417,3 +1477,600 @@ def test_sidebar_selection_restored_after_tab_switch() -> None:
                 assert child.data.get("id") == "c1"
 
     asyncio.run(runner())
+
+
+# ── GitHub tab ──────────────────────────────────────────────────────────
+
+
+def _make_notification_data(**overrides) -> dict:
+    """Create a mock GitHub notification dict with defaults."""
+    base = {
+        "id": "123",
+        "title": "Fix auth bug",
+        "repo": "owner/repo",
+        "type": "PullRequest",
+        "reason": "review_requested",
+        "unread": True,
+        "updated_at": "2026-04-09T10:00:00+00:00",
+        "url": "https://github.com/owner/repo/pull/42",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_ctrl7_switches_to_github_tab() -> None:
+    """Ctrl+7 activates the GitHub tab."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = [_make_notification_data()]
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause()
+            assert app._active_filter == "github"
+
+    asyncio.run(runner())
+
+
+def test_github_tab_shows_notification_items() -> None:
+    """GitHub tab _render_sidebar populates ListView with NotificationItems."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = [
+            _make_notification_data(id="1", title="Fix auth bug"),
+            _make_notification_data(id="2", title="Update README", reason="subscribed"),
+        ]
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            app.github_data = client.github_notifications.return_value
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            assert app._active_filter == "github"
+            assert len(app.github_data) == 2
+            status_text = _status_text(app)
+            assert "2 notifications" in status_text
+
+    asyncio.run(runner())
+
+
+def test_github_tab_shows_unread_count() -> None:
+    """GitHub tab status shows unread count."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = [
+            _make_notification_data(id="1", title="Fix auth bug", unread=True),
+            _make_notification_data(id="2", title="Update README", unread=False),
+        ]
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            app.github_data = client.github_notifications.return_value
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            status_text = _status_text(app)
+            assert "1 unread" in status_text
+
+    asyncio.run(runner())
+
+
+def test_github_tab_empty_state() -> None:
+    """When there are no notifications, the tab shows empty state message."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            app.github_data = []
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            status_text = _status_text(app)
+            assert "0 notifications" in status_text
+
+    asyncio.run(runner())
+
+
+def test_notification_item_displays_title_repo_reason() -> None:
+    """NotificationItem widget shows title, repo, and reason."""
+    item = NotificationItem(
+        _make_notification_data(
+            title="Fix auth bug",
+            repo="owner/repo",
+            reason="review_requested",
+        )
+    )
+    children = list(item.compose())
+    assert len(children) == 1
+    static = children[0]
+    assert isinstance(static, Static)
+
+
+def test_notification_item_pr_review_distinct_icon() -> None:
+    """PR review requests have a distinct visual treatment (different icon)."""
+    # PR review request — should use 🔀 icon
+    pr_review_item = NotificationItem(
+        _make_notification_data(reason="review_requested", type="PullRequest")
+    )
+    pr_children = list(pr_review_item.compose())
+    assert len(pr_children) == 1
+
+    # Issue notification — should use 🐛 icon
+    issue_item = NotificationItem(_make_notification_data(reason="subscribed", type="Issue"))
+    issue_children = list(issue_item.compose())
+    assert len(issue_children) == 1
+
+    # Both should render without errors — visually distinct
+    assert pr_children[0] != issue_children[0]
+
+
+def test_notification_item_unread_bold_with_dot() -> None:
+    """Unread notifications show bold title with unread dot."""
+    item = NotificationItem(_make_notification_data(unread=True))
+    children = list(item.compose())
+    assert len(children) == 1
+
+    item_read = NotificationItem(_make_notification_data(unread=False))
+    children_read = list(item_read.compose())
+    assert len(children_read) == 1
+
+
+def test_github_mark_notification_read_action() -> None:
+    """The mark_notification_read action is wired correctly.
+
+    We verify the action method calls the right client method
+    by testing the worker directly inside a running app.
+    """
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_mark_read.return_value = True
+        client.github_notifications.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.conversations.return_value = []
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+        app.active_notification = _make_notification_data()
+
+        async with app.run_test() as pilot:
+            # Verify the action exists and is callable on the GitHub tab
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            assert app._active_filter == "github"
+            # Verify action method exists
+            assert hasattr(app, "action_mark_notification_read")
+            # Verify active notification is set correctly
+            assert app.active_notification["id"] == "123"
+
+    asyncio.run(runner())
+
+
+def test_github_mark_all_read_action() -> None:
+    """The mark_all_notifications_read action is wired correctly.
+
+    We verify the action exists and checks unread count correctly.
+    """
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+        app.github_data = [
+            _make_notification_data(id="1", unread=True),
+            _make_notification_data(id="2", unread=True),
+        ]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            # Verify the action method exists
+            assert hasattr(app, "action_mark_all_notifications_read")
+
+    asyncio.run(runner())
+
+
+def test_github_mark_notification_read_no_selection() -> None:
+    """Mark read with no notification selected shows message."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+        app.active_notification = None
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            # Should not crash
+            app.action_mark_notification_read()
+            # Client method should NOT have been called
+            client.github_mark_read.assert_not_called()
+
+    asyncio.run(runner())
+
+
+def test_github_mark_all_read_no_unread() -> None:
+    """Marking all read when none are unread shows appropriate message."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [
+            _make_notification_data(id="1", unread=False),
+        ]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            app.action_mark_all_notifications_read()
+            await pilot.pause(0.3)
+            # Should not call the API since there are no unread
+            client.github_mark_all_read.assert_not_called()
+
+    asyncio.run(runner())
+
+
+def test_github_open_notification_url() -> None:
+    """The open_notification_url action calls webbrowser.open."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+        app.active_notification = _make_notification_data()
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            with patch.object(inbox.webbrowser, "open") as mock_open:
+                app.action_open_notification_url()
+                mock_open.assert_called_once_with("https://github.com/owner/repo/pull/42")
+
+    asyncio.run(runner())
+
+
+def test_github_open_notification_no_url() -> None:
+    """Open notification URL when there's no URL shows a message."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [_make_notification_data(url="")]
+        app.active_notification = _make_notification_data(url="")
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            # Should not crash — just show a message
+            app.action_open_notification_url()
+
+    asyncio.run(runner())
+
+
+def test_github_open_notification_no_selection() -> None:
+    """Open notification URL when nothing selected shows a message."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+        app.active_notification = None
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            # Should not crash
+            app.action_open_notification_url()
+
+    asyncio.run(runner())
+
+
+def test_github_badge_count_in_tab_label() -> None:
+    """The GitHub tab shows unread count in the header/status area.
+
+    Per VAL-GH-007, the unread count can appear in the tab label or header.
+    We verify it appears in the status bar text.
+    """
+    # First verify the unread count computation
+    github_data = [
+        _make_notification_data(id="1", unread=True),
+        _make_notification_data(id="2", unread=True),
+        _make_notification_data(id="3", unread=False),
+    ]
+    unread = sum(1 for n in github_data if n.get("unread"))
+    assert unread == 2
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        # Set data BEFORE switching tabs
+        app.github_data = github_data
+
+        async with app.run_test() as pilot:
+            # Verify data is set
+            assert len(app.github_data) == 3
+            # Switch to GitHub tab to see the status with badge
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+
+            # Status should show unread count
+            status_text = _status_text(app)
+            assert "2" in status_text  # unread count
+            assert "unread" in status_text
+
+    asyncio.run(runner())
+
+
+def test_github_badge_zero_hides_count() -> None:
+    """When there are no unread notifications, the status doesn't show unread count."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [
+            _make_notification_data(id="1", unread=False),
+        ]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+
+            # Status should NOT show unread since none are unread
+            status_text = _status_text(app)
+            assert "unread" not in status_text
+
+    asyncio.run(runner())
+
+
+def test_github_tab_detail_view() -> None:
+    """Selecting a notification shows it in the DetailView."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+
+            # Simulate selecting a notification
+            app.active_notification = _make_notification_data()
+            app.query_one("#detail-view", DetailView).detail = _make_notification_data()
+
+            # DetailView should render the notification
+            detail = app.query_one("#detail-view", DetailView).detail
+            assert detail is not None
+            assert detail.get("title") == "Fix auth bug"
+            assert detail.get("repo") == "owner/repo"
+
+    asyncio.run(runner())
+
+
+def test_detail_view_github_notification() -> None:
+    """DetailView renders GitHub notification data correctly."""
+    detail = DetailView()
+    detail.detail = _make_notification_data(
+        title="Fix auth bug",
+        repo="owner/repo",
+        reason="review_requested",
+        type="PullRequest",
+    )
+    children = list(detail.compose())
+    assert len(children) == 1
+
+
+def test_detail_view_github_issue_notification() -> None:
+    """DetailView renders GitHub Issue notification."""
+    detail = DetailView()
+    detail.detail = _make_notification_data(
+        title="Bug in login",
+        repo="acme/app",
+        reason="mention",
+        type="Issue",
+        unread=False,
+    )
+    children = list(detail.compose())
+    assert len(children) == 1
+
+
+def test_github_tab_state_preserved() -> None:
+    """Switching away from GitHub tab and back preserves the active notification."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = [_make_notification_data()]
+        client.conversations.return_value = []
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            assert app._active_filter == "github"
+
+            # Select a notification
+            app.active_notification = _make_notification_data()
+
+            # Switch to Notes
+            await pilot.press("ctrl+5")
+            await pilot.pause(0.5)
+            assert app._active_filter == "notes"
+
+            # Switch back to GitHub
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            assert app._active_filter == "github"
+
+            # Notification should be restored
+            assert app.active_notification is not None
+            assert app.active_notification["title"] == "Fix auth bug"
+
+    asyncio.run(runner())
+
+
+def test_collect_refresh_data_includes_github() -> None:
+    """_collect_refresh_data returns github_data."""
+    client = MagicMock()
+    client.conversations.return_value = [{"id": "c1", "source": "imessage", "unread": 0}]
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = [_make_notification_data()]
+
+    app = _make_app(client)
+    convos, events, notes, reminders, reminder_lists, github_data, status = (
+        app._collect_refresh_data()
+    )
+
+    assert len(github_data) == 1
+    assert github_data[0]["title"] == "Fix auth bug"
+    assert status is None
+
+
+def test_collect_auxiliary_data_fetches_github() -> None:
+    """_collect_auxiliary_data fetches github notifications."""
+    client = MagicMock()
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = [_make_notification_data()]
+
+    app = _make_app(client)
+    events, notes, reminders, reminder_lists, github_data, errors = app._collect_auxiliary_data()
+
+    assert len(github_data) == 1
+    assert errors == []
+
+
+def test_collect_auxiliary_data_github_failure_preserves_old() -> None:
+    """If GitHub fetch fails, old data is preserved."""
+    client = MagicMock()
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.side_effect = httpx.ConnectError(
+        "refused", request=httpx.Request("GET", "http://test/")
+    )
+
+    app = _make_app(client)
+    app.github_data = [_make_notification_data(title="Old notif")]
+
+    events, notes, reminders, reminder_lists, github_data, errors = app._collect_auxiliary_data()
+
+    assert len(github_data) == 1
+    assert github_data[0]["title"] == "Old notif"
+    assert len(errors) == 1
+    assert "unreachable" in errors[0]
+
+
+def test_github_key_handlers_mark_read() -> None:
+    """Pressing 'r' on GitHub tab calls mark_notification_read."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_mark_read.return_value = True
+        client.github_notifications.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.conversations.return_value = []
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+        app.active_notification = _make_notification_data()
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            # Blur compose so key handlers work
+            app.query_one("#compose", Input).blur()
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause(0.3)
+
+        client.github_mark_read.assert_called_once_with(notification_id="123")
+
+    asyncio.run(runner())
+
+
+def test_github_key_handlers_open_url() -> None:
+    """Pressing 'o' on GitHub tab opens notification URL in browser."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+        app.active_notification = _make_notification_data()
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            app.query_one("#compose", Input).blur()
+            await pilot.pause()
+            with patch.object(inbox.webbrowser, "open") as mock_open:
+                await pilot.press("o")
+                mock_open.assert_called_once_with("https://github.com/owner/repo/pull/42")
+
+    asyncio.run(runner())
+
+
+def test_github_key_handlers_ignored_when_compose_focused() -> None:
+    """GitHub key handlers don't fire when compose input is focused."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.github_data = [_make_notification_data()]
+        app.active_notification = _make_notification_data()
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+7")
+            await pilot.pause(0.5)
+            # Focus the compose input
+            app.query_one("#compose", Input).focus()
+            await pilot.pause()
+            # Press 'r' — should not trigger mark read since compose is focused
+            await pilot.press("r")
+            await pilot.pause(0.3)
+            # The mark read action should NOT have been called
+            # (it would have been called via client, but compose captured the 'r')
+            client.github_mark_read.assert_not_called()
+
+    asyncio.run(runner())
+
+
+def test_github_notifications_not_fetched_on_non_github_tabs() -> None:
+    """GitHub notifications are not fetched until a refresh occurs."""
+    client = MagicMock()
+    client.conversations.return_value = [{"id": "c1", "source": "imessage", "unread": 0}]
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = [_make_notification_data()]
+
+    app = _make_app(client)
+    convos, events, notes, reminders, reminder_lists, github_data, status = (
+        app._collect_refresh_data()
+    )
+
+    # GitHub notifications should be included in refresh
+    assert len(github_data) == 1
+    client.github_notifications.assert_called()

@@ -271,3 +271,46 @@ class TestClientClose:
     def test_close(self, client):
         client.close()
         client._client.close.assert_called_once()
+
+
+# ── GitHub ──────────────────────────────────────────────────────────────────
+
+
+class TestGitHubClient:
+    def test_github_notifications(self, client):
+        client._client.get.return_value = _mock_response(
+            [{"id": "123", "title": "Fix bug", "repo": "owner/repo", "unread": True}]
+        )
+        result = client.github_notifications()
+        assert len(result) == 1
+        assert result[0]["title"] == "Fix bug"
+        assert result[0]["unread"] is True
+
+    def test_github_notifications_all(self, client):
+        client._client.get.return_value = _mock_response([])
+        client.github_notifications(all_notifs=True)
+        # Verify the 'all' param is passed
+        call_args = client._client.get.call_args
+        assert call_args[1]["params"]["all"] is True
+
+    def test_github_mark_read(self, client):
+        client._client.post.return_value = _mock_response({"ok": True})
+        assert client.github_mark_read("123") is True
+
+    def test_github_mark_all_read(self, client):
+        client._client.post.return_value = _mock_response({"ok": True})
+        assert client.github_mark_all_read() is True
+
+    def test_github_pulls(self, client):
+        client._client.get.return_value = _mock_response(
+            [{"id": 456, "number": 42, "title": "Fix bug"}]
+        )
+        result = client.github_pulls()
+        assert len(result) == 1
+        assert result[0]["number"] == 42
+
+    def test_github_pulls_with_repo(self, client):
+        client._client.get.return_value = _mock_response([])
+        client.github_pulls(repo="owner/repo")
+        call_args = client._client.get.call_args
+        assert call_args[1]["params"]["repo"] == "owner/repo"
