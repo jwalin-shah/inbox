@@ -23,7 +23,7 @@ Client-server architecture running entirely on localhost. A **FastAPI server** (
 
 ### Data Access Layer (services.py)
 
-The central data module — every integration's read/write logic lives here as plain functions. No classes (aside from dataclasses for models). Key responsibilities:
+The central data module — every integration's read/write logic lives here (primarily as functions, plus service classes for ambient/dictation/LLM helpers). Key responsibilities:
 
 - **Data models**: `Contact`, `Msg`, `CalendarEvent`, `Note`, `Reminder`, `GitHubNotification`, `DriveFile` — all `@dataclass` types used throughout the stack.
 - **iMessage**: `imsg_contacts(limit)` reads `~/Library/Messages/chat.db` via read-only SQLite, joining `chat`, `message`, `handle`, and `chat_message_join` tables. `imsg_thread(chat_id, limit)` fetches messages for a conversation. `imsg_send(contact, text)` sends via AppleScript (`osascript`), handling both 1:1 and group chats by `contact.guid`.
@@ -61,11 +61,11 @@ Textual `App` subclass (`InboxApp`) with a sidebar + content layout.
 
 - **Widget hierarchy**: `Header` → `Horizontal#main` → (`Vertical#sidebar` [Tabs + ListView#contact-list], `Vertical#content` [Static#status, MessageView#messages, DetailView#detail-view, Horizontal#compose-area [Input#compose]]) → `Footer`.
 - **Custom widgets**: `ConversationItem(ListItem)` renders iMessage/Gmail entries with source icons and unread badges. `EventItem(ListItem)` renders calendar events with time ranges. `NoteItem(ListItem)` renders note titles with folder/snippet. `MessageView(Static)` uses `reactive[list[dict]]` — recomposes on change, renders messages as Rich `Panel` widgets (right-aligned cyan for self, left-aligned green for others). `DetailView(Static)` uses `reactive[dict | None]` — renders calendar event details or note bodies.
-- **Tab navigation**: 5 tabs (All, iMessage, Gmail, Calendar, Notes) via `Tabs` widget. `_active_filter` tracks current filter. `_toggle_views()` swaps between `MessageView` and `DetailView` based on tab. `_render_sidebar()` re-populates `ListView` based on filter.
+- **Tab navigation**: 8 tabs (All, iMessage, Gmail, Calendar, Notes, Reminders, GitHub, Drive) via `Tabs` widget. `_active_filter` tracks current filter. `_toggle_views()` swaps between `MessageView` and `DetailView` based on tab. `_render_sidebar()` re-populates `ListView` based on filter.
 - **Threading model**: `@work(thread=True)` decorator for all I/O operations (`boot()`, `_bg_refresh()`, `_bg_poll()`, `_load_thread()`, `_load_note()`, `_do_send()`, `_create_quick_event()`, `_do_delete_event()`, `_do_add_account()`, `_do_reauth()`). Results pushed back to main thread via `self.call_from_thread()`.
 - **Polling**: `POLL_INTERVAL = 10` seconds. `_poll_refresh()` → `_bg_poll()` does a lightweight check — fetches conversations, compares unread counts and IDs, only fully refreshes sidebar if data changed.
 - **Optimistic send**: On `Input.Submitted`, immediately appends a synthetic "Me" message to `MessageView.messages`, then fires `_do_send()` in background. For iMessage, `_reload_after_send()` retries thread reload up to 3 times (1s, 2s, 3s delays) until the sent message appears in the SQLite DB.
-- **Key bindings**: `Ctrl+1-5` (tab switch), `Ctrl+R` (refresh), `Ctrl+A` (add account), `Ctrl+Shift+A` (re-auth), `Ctrl+N` (new event), `Ctrl+D` (delete event), `Escape` (clear compose), `Ctrl+Q` (quit).
+- **Key bindings**: `Ctrl+1-8` (tab switch), `Ctrl+R` (refresh), `Ctrl+A` (add account), `Ctrl+Shift+A` (re-auth), `Ctrl+N` (new event), `Ctrl+D` (delete event), `Ctrl+Shift+6` (ambient toggle), `Escape` (clear compose), `Ctrl+Q` (quit).
 
 ### Contacts (contacts.py)
 
@@ -89,9 +89,9 @@ Writes structured markdown to an Obsidian vault at `~/vault/`.
 Standalone background process for continuous audio capture → ASR → extraction → notes.
 
 - **`main()`**: Checks `whisper_stream_available()`, sets up `SIGINT`/`SIGTERM` signal handlers, creates `AmbientService(on_note=on_note)`, starts it, then sleeps in a loop.
-- **`on_note(raw_transcript, summary)`**: Callback that optionally runs `llm.extract.extract()` for topic extraction, then calls `save_note()`.
+- **`on_note(raw_transcript, summary)`**: Callback that optionally runs `services.extract()` for topic extraction, then calls `save_note()`.
 - **Designed for `launchctl`**: Can be auto-started via macOS LaunchAgent plist.
-- **Dependencies**: `audio.ambient.AmbientService` (audio capture + ASR), `audio.whisper` (whisper-stream availability check), `llm.extract` (topic extraction).
+- **Dependencies**: `services.AmbientService` (audio capture + ASR), `services.whisper_stream_available` (dictation availability check), `services.extract` (topic extraction).
 
 ## Data Sources
 
