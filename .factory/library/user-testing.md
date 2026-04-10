@@ -36,6 +36,11 @@ Testing surface, required testing skills/tools, and resource cost classification
 - Lightweight, shares server with tuistory
 - **Max concurrent validators: 5** (negligible memory per curl process)
 
+### CLI validator surface (pytest/pyright/ruff)
+- `pytest` and static checks are CPU-heavy and can contend with TUI rendering
+- **Max concurrent validators: 1** for full-suite pytest-based validation
+- Rationale: keep one heavyweight validator to avoid noisy timing/resource skew
+
 ## Testing Skills Required
 - `tuistory` — for TUI visual validation
 - `curl` — for API endpoint validation (built-in, no special skill needed)
@@ -48,6 +53,17 @@ For assertions that use pytest, pyright, ruff, or python import checks:
 - No server needed for CLI checks
 - No isolation concerns — these are read-only analysis tools
 - Capture full command output and exit code as evidence
+
+## Flow Validator Guidance: tuistory
+
+For assertions that require end-user TUI behavior validation:
+- Working directory: `/Users/jwalinshah/projects/inbox`
+- Launch command: `uv run python inbox.py`
+- Validate behavior through keyboard-driven flows and snapshots
+- If a scenario requires server-down behavior, explicitly stop server (`lsof -ti :9849 | xargs kill 2>/dev/null || true`) before launching/refreshing the app
+- If a scenario requires server-up behavior, ensure health first: `curl -sf http://localhost:9849/health`
+- Keep all validation on port `9849` only
+- Capture clear evidence in report steps: key presses, observed status bar text, and whether the app stayed responsive
 
 ## Flow Validator Guidance: curl
 
@@ -62,3 +78,5 @@ For assertions that use curl against the server:
 - macOS desktop notifications cannot be validated programmatically via tuistory; only the in-TUI bell indicator can be checked
 - Audio capture (ambient/dictation) requires real microphone hardware; tests must mock audio input
 - LLM model loading takes 5-30 seconds; tests with real models need longer timeouts
+- In some automation sessions, `curl http://localhost:9849/...` may fail while `http://127.0.0.1:9849/...` succeeds; prefer `127.0.0.1` fallback when health checks are unexpectedly flaky
+- tuistory may occasionally miss `Ctrl+<number>` tab shortcuts; use click-based tab switching as a fallback and record the workaround in evidence

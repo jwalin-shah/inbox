@@ -316,6 +316,9 @@ class InboxApp(App):
 
     POLL_INTERVAL = _poll_interval_from_env()
 
+    # After this many consecutive poll errors, show a persistent outage message
+    _SUSTAINED_OUTAGE_THRESHOLD = 3
+
     def __init__(self) -> None:
         super().__init__()
         # Use longer timeout for first requests (data loading can be slow)
@@ -329,6 +332,7 @@ class InboxApp(App):
         self._poll_timer = None
         self._client_closed = False
         self._poll_had_error = False
+        self._consecutive_errors = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -486,7 +490,7 @@ class InboxApp(App):
         """Toggle ambient listening on/off."""
         self._do_toggle_ambient()
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _do_toggle_ambient(self) -> None:
         try:
             status = self.client.ambient_status()
@@ -514,7 +518,7 @@ class InboxApp(App):
         self.query_one("#status", Static).update("[dim]Starting server...[/]")
         self.boot()
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def boot(self) -> None:
         try:
             self.client.ensure_server()
@@ -523,6 +527,10 @@ class InboxApp(App):
                 self.query_one("#status", Static).update,
                 f"[red]{e}[/]",
             )
+            # Start polling even if server boot fails — polling will keep
+            # trying so the TUI recovers automatically when the server
+            # comes back.
+            self.call_from_thread(self._start_polling)
             return
         self.call_from_thread(
             self.query_one("#status", Static).update,
@@ -540,28 +548,56 @@ class InboxApp(App):
         self._bg_poll()
 
     def action_refresh(self) -> None:
+        # Manual refresh resets outage counters so the user's explicit
+        # retry always tries fresh, regardless of prior poll failures.
+        self._consecutive_errors = 0
         self._bg_refresh()
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _bg_refresh(self) -> None:
-        self._do_refresh()
+        try:
+            self._do_refresh()
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Refresh', exc)}[/]",
+            )
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _bg_poll(self) -> None:
         """Lightweight poll — updates data without disrupting UI if unchanged."""
-        convos, events, notes, status_override, changed = self._collect_poll_data()
+        try:
+            convos, events, notes, status_override, changed = self._collect_poll_data()
+        except Exception as exc:
+            # Unhandled exception in poll data collection — keep the TUI alive
+            self._consecutive_errors += 1
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Auto-refresh', exc)}[/]",
+            )
+            return
 
+        if status_override:
+            self._consecutive_errors += 1
+            self._poll_had_error = True
+            if self._consecutive_errors >= self._SUSTAINED_OUTAGE_THRESHOLD:
+                # Show persistent outage message that reminds user about retry
+                status_override = "[red]Server unreachable — press Ctrl+R to retry[/]"
+            if changed:
+                self.call_from_thread(self._populate, convos, events, notes, status_override)
+                return
+            self.conversations = convos
+            self.call_from_thread(self.query_one("#status", Static).update, status_override)
+            return
+
+        # Success path — reset counters
+        self._consecutive_errors = 0
         if changed:
-            self._poll_had_error = status_override is not None
+            self._poll_had_error = False
             self.call_from_thread(self._populate, convos, events, notes, status_override)
             return
 
         self.conversations = convos
-        if status_override:
-            self._poll_had_error = True
-            self.call_from_thread(self.query_one("#status", Static).update, status_override)
-            return
-
         if self._poll_had_error:
             self._poll_had_error = False
             self.call_from_thread(self._render_sidebar)
@@ -670,7 +706,7 @@ class InboxApp(App):
             self.active_event = None
             self._load_thread(item.data)
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _load_thread(self, conv: dict) -> None:
         try:
             msgs = self.client.messages(
@@ -704,7 +740,7 @@ class InboxApp(App):
         self.query_one("#status", Static).update(status)
         self.query_one("#compose", Input).focus()
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _load_note(self, note_data: dict) -> None:
         status_override = None
         try:
@@ -750,7 +786,7 @@ class InboxApp(App):
         mv.messages = [*mv.messages, optimistic]
         self._do_send(self.active_conv, text)
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _do_send(self, conv: dict, text: str) -> None:
         status = "[red]Failed to send[/]"
         try:
@@ -796,7 +832,7 @@ class InboxApp(App):
             "[green]Sent[/] [dim](DB sync pending)[/]",
         )
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _create_quick_event(self, text: str) -> None:
         status_override = None
         try:
@@ -834,7 +870,7 @@ class InboxApp(App):
         )
         self._do_delete_event(self.active_event)
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _do_delete_event(self, event: dict) -> None:
         status_override = None
         try:
@@ -865,7 +901,7 @@ class InboxApp(App):
         self.query_one("#status", Static).update("[yellow]Opening browser for auth...[/]")
         self._do_add_account()
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _do_add_account(self) -> None:
         try:
             result = self.client.add_account()
@@ -901,7 +937,7 @@ class InboxApp(App):
         self.query_one("#status", Static).update(f"[yellow]Re-authing {email}...[/]")
         self._do_reauth(email)
 
-    @work(thread=True)
+    @work(thread=True, exit_on_error=False)
     def _do_reauth(self, email: str) -> None:
         try:
             result = self.client.reauth_account(email)
@@ -918,6 +954,10 @@ class InboxApp(App):
             )
 
     # ── Misc ─────────────────────────────────────────────────────────────
+
+    def _update_status_from_thread(self, message: str) -> None:
+        """Safely update the status bar from a worker thread."""
+        self.call_from_thread(self.query_one("#status", Static).update, message)
 
     def action_clear_compose(self) -> None:
         self.query_one("#compose", Input).clear()
