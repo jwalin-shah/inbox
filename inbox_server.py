@@ -32,6 +32,8 @@ from services import (
     calendar_events,
     calendar_update_event,
     close_sqlite_connections,
+    contacts_profile,
+    contacts_search,
     drive_create_folder,
     drive_delete,
     drive_download,
@@ -60,6 +62,7 @@ from services import (
     imsg_send,
     imsg_thread,
     init_contacts,
+    load_favorites,
     note_body,
     notes_list,
     parse_quick_event,
@@ -71,6 +74,7 @@ from services import (
     reminder_edit,
     reminders_list,
     reminders_lists,
+    save_favorites,
 )
 from services import (
     autocomplete as services_autocomplete,
@@ -1036,6 +1040,53 @@ async def llm_warmup_endpoint():
 
     await asyncio.to_thread(llm_warmup)
     return {"status": "ready"}
+
+
+# ── Contacts ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/contacts/search")
+async def search_contacts(q: str = "", limit: int = 20):
+    results = await asyncio.to_thread(
+        contacts_search,
+        state.gmail_services,
+        q,
+        limit,
+    )
+    return results
+
+
+@app.get("/contacts/{contact_id}/profile")
+async def get_contact_profile(contact_id: str):
+    profile = await asyncio.to_thread(
+        contacts_profile,
+        contact_id,
+        state.gmail_services,
+        state.cal_services,
+    )
+    return profile
+
+
+@app.get("/contacts/favorites")
+async def get_favorites():
+    favs = await asyncio.to_thread(load_favorites)
+    return {"favorites": sorted(favs)}
+
+
+@app.post("/contacts/favorites/{contact_id}")
+async def add_favorite(contact_id: str):
+    favs = await asyncio.to_thread(load_favorites)
+    favs.add(contact_id)
+    await asyncio.to_thread(save_favorites, favs)
+    return {"ok": True, "favorites": sorted(favs)}
+
+
+@app.delete("/contacts/favorites/{contact_id}")
+async def remove_favorite(contact_id: str):
+    favs = await asyncio.to_thread(load_favorites)
+    favs.discard(contact_id)
+    await asyncio.to_thread(save_favorites, favs)
+    return {"ok": True, "favorites": sorted(favs)}
 
 
 # ── Accounts ─────────────────────────────────────────────────────────────────

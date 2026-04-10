@@ -419,6 +419,33 @@ class InboxClient:
         r.raise_for_status()
         return r.json().get("ok", False)
 
+    # ── Contacts ─────────────────────────────────────────────────────────
+
+    def contacts_search(self, q: str = "", limit: int = 20) -> list[dict]:
+        r = self._client.get("/contacts/search", params={"q": q, "limit": limit})
+        r.raise_for_status()
+        return r.json()
+
+    def contacts_profile(self, contact_id: str) -> dict:
+        r = self._client.get(f"/contacts/{contact_id}/profile")
+        r.raise_for_status()
+        return r.json()
+
+    def favorites(self) -> list[str]:
+        r = self._client.get("/contacts/favorites")
+        r.raise_for_status()
+        return r.json().get("favorites", [])
+
+    def favorite_add(self, contact_id: str) -> list[str]:
+        r = self._client.post(f"/contacts/favorites/{contact_id}")
+        r.raise_for_status()
+        return r.json().get("favorites", [])
+
+    def favorite_remove(self, contact_id: str) -> list[str]:
+        r = self._client.delete(f"/contacts/favorites/{contact_id}")
+        r.raise_for_status()
+        return r.json().get("favorites", [])
+
     # ── Ambient / Dictation / LLM ──────────────────────────────────────
 
     def ambient_start(self) -> dict:

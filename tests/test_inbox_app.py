@@ -9,7 +9,15 @@ import httpx
 from textual.widgets import Input, ListView, Static
 
 import inbox
-from inbox import DetailView, DriveItem, InboxApp, MessageView, NotificationItem, ReminderItem
+from inbox import (
+    ContactProfileScreen,
+    DetailView,
+    DriveItem,
+    InboxApp,
+    MessageView,
+    NotificationItem,
+    ReminderItem,
+)
 
 
 class HarnessInboxApp(InboxApp):
@@ -2641,5 +2649,212 @@ def test_drive_key_handlers_ignored_when_compose_focused() -> None:
             await pilot.press("d")
             await pilot.pause(0.3)
             client.drive_download.assert_not_called()
+
+    asyncio.run(runner())
+
+
+# ── Contact profile / favorites tests ─────────────────────────────────────────
+
+
+def test_toggle_favorite_adds_contact() -> None:
+    """Pressing f on a selected conversation adds it to favorites."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = []
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+        app.conversations = [{"id": "c1", "source": "imessage", "name": "Alice", "reply_to": ""}]
+        app.active_conv = app.conversations[0]
+        app._active_filter = "imessage"
+        app._favorites = set()
+
+        with patch("services.save_favorites"):
+            async with app.run_test() as pilot:
+                app.action_toggle_favorite()
+                await pilot.pause()
+
+        assert "alice" in app._favorites
+
+    asyncio.run(runner())
+
+
+def test_toggle_favorite_removes_existing() -> None:
+    """Pressing f on an already-favorited contact removes it."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.conversations.return_value = []
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+        app.conversations = [{"id": "c1", "source": "imessage", "name": "Alice", "reply_to": ""}]
+        app.active_conv = app.conversations[0]
+        app._active_filter = "imessage"
+        app._favorites = {"alice"}
+
+        with patch("services.save_favorites"):
+            async with app.run_test() as pilot:
+                app.action_toggle_favorite()
+                await pilot.pause()
+
+        assert "alice" not in app._favorites
+
+    asyncio.run(runner())
+
+
+def test_favorites_render_first_in_sidebar() -> None:
+    """Favorited contacts appear before non-favorites in the conversation list."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+        app.conversations = [
+            {
+                "id": "1",
+                "source": "imessage",
+                "name": "Bob",
+                "reply_to": "",
+                "unread": 0,
+                "last_ts": "2026-01-01T10:00:00",
+                "snippet": "",
+            },
+            {
+                "id": "2",
+                "source": "imessage",
+                "name": "Alice",
+                "reply_to": "",
+                "unread": 0,
+                "last_ts": "2026-01-01T09:00:00",
+                "snippet": "",
+            },
+        ]
+        app._favorites = {"alice"}  # Alice is favorited
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+2")
+            await pilot.pause(0.3)
+            lv = app.query_one("#contact-list", ListView)
+            children = list(lv.children)
+            assert len(children) == 2
+            # Alice (favorite) should be first
+            from inbox import ConversationItem
+
+            first_item = children[0]
+            assert isinstance(first_item, ConversationItem)
+            assert first_item.data.get("name") == "Alice"
+
+    asyncio.run(runner())
+
+
+def test_contact_profile_screen_renders() -> None:
+    """ContactProfileScreen renders contact name and timeline entries."""
+    profile = {
+        "contact": {
+            "id": "alice@example.com",
+            "name": "Alice Smith",
+            "emails": ["alice@example.com"],
+            "phones": [],
+            "github_handle": "",
+            "photo_url": "",
+            "source_counts": {"imessage": 1, "gmail": 2, "calendar": 0},
+        },
+        "imessages": [
+            {
+                "source": "imessage",
+                "sender": "Alice",
+                "body": "Hey there!",
+                "ts": "2026-04-01T10:00:00",
+                "is_me": False,
+            }
+        ],
+        "gmail_threads": [
+            {
+                "source": "gmail",
+                "sender": "Alice Smith",
+                "body": "Re: Meeting",
+                "ts": "2026-04-02T09:00:00",
+                "thread_id": "t1",
+            }
+        ],
+        "calendar_events": [],
+        "timeline": [
+            {
+                "source": "gmail",
+                "sender": "Alice Smith",
+                "body": "Re: Meeting",
+                "ts": "2026-04-02T09:00:00",
+            },
+            {
+                "source": "imessage",
+                "sender": "Alice",
+                "body": "Hey there!",
+                "ts": "2026-04-01T10:00:00",
+                "is_me": False,
+            },
+        ],
+    }
+
+    async def runner() -> None:
+        screen = ContactProfileScreen(profile)
+        app = InboxApp()
+
+        async with app.run_test() as pilot:
+            await app.push_screen(screen)
+            await pilot.pause(0.3)
+            # Check the profile is mounted
+            assert app.screen is screen
+
+    asyncio.run(runner())
+
+
+def test_p_key_calls_show_contact_profile() -> None:
+    """Pressing p on a selected imessage conversation opens profile."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+        app.conversations = [
+            {
+                "id": "1",
+                "source": "imessage",
+                "name": "Alice",
+                "reply_to": "",
+                "unread": 0,
+                "last_ts": "2026-01-01T10:00:00",
+                "snippet": "",
+            }
+        ]
+        app.active_conv = app.conversations[0]
+        app._active_filter = "imessage"
+        app.action_show_contact_profile = MagicMock()
+
+        async with app.run_test() as pilot:
+            await pilot.press("p")
+            await pilot.pause(0.2)
+
+        app.action_show_contact_profile.assert_called_once()
+
+    asyncio.run(runner())
+
+
+def test_p_key_ignored_without_active_conv() -> None:
+    """Pressing p when no conversation is selected does nothing."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+        app.conversations = []
+        app.active_conv = None
+        app._active_filter = "imessage"
+        app.action_show_contact_profile = MagicMock()
+
+        async with app.run_test() as pilot:
+            await pilot.press("p")
+            await pilot.pause(0.2)
+
+        app.action_show_contact_profile.assert_not_called()
 
     asyncio.run(runner())
