@@ -234,6 +234,29 @@ class InboxClient:
         r.raise_for_status()
         return r.json().get("ok", False)
 
+    def reminder_edit(
+        self,
+        reminder_id: str,
+        title: str | None = None,
+        due_date: str | None = None,
+        notes: str | None = None,
+    ) -> bool:
+        payload: dict = {}
+        if title is not None:
+            payload["title"] = title
+        if due_date is not None:
+            payload["due_date"] = due_date
+        if notes is not None:
+            payload["notes"] = notes
+        r = self._client.put(f"/reminders/{reminder_id}", json=payload)
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def reminder_delete(self, reminder_id: str) -> bool:
+        r = self._client.delete(f"/reminders/{reminder_id}")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
     # ── GitHub ──────────────────────────────────────────────────────────
 
     def github_notifications(self, all_notifs: bool = False) -> list[dict]:

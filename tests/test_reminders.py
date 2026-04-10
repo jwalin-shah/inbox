@@ -107,3 +107,95 @@ class TestReminderCreate:
             reminder_create("Task", notes="Some details")
         script = mock_run.call_args[0][0][2]
         assert "Some details" in script
+
+
+class TestReminderEdit:
+    def test_edits_title_via_osascript(self):
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_edit("Buy groceries", title="Buy organic groceries")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "Buy organic groceries" in script
+        assert "Buy groceries" in script
+        # Verify _escape_applescript is used for title
+        assert services._escape_applescript("Buy organic groceries") in script
+
+    def test_edits_due_date_via_osascript(self):
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_edit("Buy groceries", due_date="4/15/2026")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "due date" in script.lower()
+
+    def test_edits_notes_via_osascript(self):
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_edit("Buy groceries", notes="Get almond milk")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "body" in script.lower() or "note" in script.lower()
+        assert services._escape_applescript("Get almond milk") in script
+
+    def test_returns_false_on_failure(self):
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="fail")
+            result = reminder_edit("Nonexistent", title="New title")
+        assert result is False
+
+    def test_escapes_special_chars_in_title(self):
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            reminder_edit("Old task", title='Buy "fancy" stuff\\here')
+        script = mock_run.call_args[0][0][2]
+        assert services._escape_applescript('Buy "fancy" stuff\\here') in script
+
+    def test_no_fields_to_edit_still_runs(self):
+        from services import reminder_edit
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            # Editing with only the identifier, no new fields — should still find the reminder
+            result = reminder_edit("Buy groceries")
+        assert result is True
+
+
+class TestReminderDelete:
+    def test_deletes_via_osascript(self):
+        from services import reminder_delete
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            result = reminder_delete("Buy groceries")
+        assert result is True
+        script = mock_run.call_args[0][0][2]
+        assert "delete" in script.lower()
+        assert "Buy groceries" in script
+
+    def test_returns_false_on_failure(self):
+        from services import reminder_delete
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="fail")
+            result = reminder_delete("Nonexistent")
+        assert result is False
+
+    def test_escapes_special_chars_in_title(self):
+        from services import reminder_delete
+
+        with patch("services.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok")
+            reminder_delete('Buy "important" stuff')
+        script = mock_run.call_args[0][0][2]
+        assert services._escape_applescript('Buy "important" stuff') in script

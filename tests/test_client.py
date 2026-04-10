@@ -154,6 +154,28 @@ class TestClientReminders:
         client._client.post.return_value = _mock_response({"ok": True})
         assert client.reminder_create("New task") is True
 
+    def test_reminder_edit(self, client):
+        client._client.put.return_value = _mock_response({"ok": True})
+        assert client.reminder_edit("1", title="Updated task") is True
+        client._client.put.assert_called_once_with("/reminders/1", json={"title": "Updated task"})
+
+    def test_reminder_edit_with_all_fields(self, client):
+        client._client.put.return_value = _mock_response({"ok": True})
+        assert (
+            client.reminder_edit("1", title="Updated", due_date="4/15/2026", notes="details")
+            is True
+        )
+        call_args = client._client.put.call_args
+        assert call_args[0][0] == "/reminders/1"
+        assert call_args[1]["json"]["title"] == "Updated"
+        assert call_args[1]["json"]["due_date"] == "4/15/2026"
+        assert call_args[1]["json"]["notes"] == "details"
+
+    def test_reminder_delete(self, client):
+        client._client.delete.return_value = _mock_response({"ok": True})
+        assert client.reminder_delete("1") is True
+        client._client.delete.assert_called_once_with("/reminders/1")
+
 
 # ── GitHub ──────────────────────────────────────────────────────────────────
 

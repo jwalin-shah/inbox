@@ -41,6 +41,8 @@ GET  /reminders?list_name=...&show_completed=false&limit=100
 GET  /reminders/lists
 POST /reminders  {"title", "list_name", "due_date", "notes"}
 POST /reminders/{id}/complete
+PUT  /reminders/{id}  {"title", "due_date", "notes"}
+DELETE /reminders/{id}
 GET  /github/notifications?all=false
 POST /github/notifications/{id}/read
 POST /github/notifications/read-all

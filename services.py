@@ -1445,6 +1445,100 @@ def reminder_create(
         return False
 
 
+def reminder_edit(
+    current_title: str,
+    title: str | None = None,
+    due_date: str | None = None,
+    notes: str | None = None,
+) -> bool:
+    """Edit an existing reminder's title, due_date, and/or notes via AppleScript.
+
+    Args:
+        current_title: The current title of the reminder to find.
+        title: New title to set (or None to keep current).
+        due_date: New due date string (or None to keep current).
+        notes: New notes/body text (or None to keep current).
+
+    Returns:
+        True if the edit succeeded, False otherwise.
+    """
+    safe_title = _escape_applescript(current_title)
+    set_clauses: list[str] = []
+
+    if title is not None:
+        safe_new_title = _escape_applescript(title)
+        set_clauses.append(f"set name of theReminder to ({safe_new_title})")
+
+    if due_date is not None:
+        safe_due_date = _escape_applescript(due_date)
+        set_clauses.append(
+            f"set dStr to ({safe_due_date})\n            set due date of theReminder to date dStr"
+        )
+
+    if notes is not None:
+        safe_notes = _escape_applescript(notes)
+        set_clauses.append(f"set body of theReminder to ({safe_notes})")
+
+    set_block = "\n            ".join(set_clauses) if set_clauses else ""
+
+    script = f"""
+    tell application "Reminders"
+        try
+            set theReminder to (first reminder whose name is ({safe_title}) and completed is false)
+            {set_block}
+            return "ok"
+        on error
+            return "fail"
+        end try
+    end tell
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, timeout=10, text=True
+        )
+        return result.returncode == 0 and "ok" in result.stdout
+    except Exception:  # logged below
+        _log_service_failure(
+            "reminder_edit",
+            current_title=current_title,
+            new_title=title,
+            due_date=due_date,
+            notes_present=notes is not None,
+        )
+        return False
+
+
+def reminder_delete(title: str) -> bool:
+    """Delete a reminder via AppleScript.
+
+    Args:
+        title: The title of the reminder to delete.
+
+    Returns:
+        True if the deletion succeeded, False otherwise.
+    """
+    safe_title = _escape_applescript(title)
+    script = f"""
+    tell application "Reminders"
+        try
+            set theReminder to (first reminder whose name is ({safe_title}) and completed is false)
+            delete theReminder
+            return "ok"
+        on error
+            return "fail"
+        end try
+    end tell
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, timeout=10, text=True
+        )
+        return result.returncode == 0 and "ok" in result.stdout
+    except Exception:  # logged below
+        _log_service_failure("reminder_delete", title=title)
+        return False
+
+
 # ── GitHub ──────────────────────────────────────────────────────────────────
 
 _GITHUB_API = "https://api.github.com"

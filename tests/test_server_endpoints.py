@@ -86,6 +86,60 @@ class TestReminderEndpoints:
             resp = c.post("/reminders/999/complete")
         assert resp.status_code == 404
 
+    def test_edit_reminder(self, client):
+        c, _ = client
+        from services import Reminder
+
+        mock_items = [Reminder(id="1", title="Buy milk", completed=False)]
+        with (
+            patch("inbox_server.reminders_list", return_value=mock_items),
+            patch("inbox_server.reminder_edit", return_value=True),
+        ):
+            resp = c.put("/reminders/1", json={"title": "Buy almond milk"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    def test_edit_reminder_with_due_date_and_notes(self, client):
+        c, _ = client
+        from services import Reminder
+
+        mock_items = [Reminder(id="1", title="Buy milk", completed=False)]
+        with (
+            patch("inbox_server.reminders_list", return_value=mock_items),
+            patch("inbox_server.reminder_edit", return_value=True),
+        ):
+            resp = c.put(
+                "/reminders/1",
+                json={"title": "Buy almond milk", "due_date": "4/15/2026", "notes": "Oat milk"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    def test_edit_nonexistent_reminder(self, client):
+        c, _ = client
+        with patch("inbox_server.reminders_list", return_value=[]):
+            resp = c.put("/reminders/999", json={"title": "New title"})
+        assert resp.status_code == 404
+
+    def test_delete_reminder(self, client):
+        c, _ = client
+        from services import Reminder
+
+        mock_items = [Reminder(id="1", title="Buy milk", completed=False)]
+        with (
+            patch("inbox_server.reminders_list", return_value=mock_items),
+            patch("inbox_server.reminder_delete", return_value=True),
+        ):
+            resp = c.delete("/reminders/1")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    def test_delete_nonexistent_reminder(self, client):
+        c, _ = client
+        with patch("inbox_server.reminders_list", return_value=[]):
+            resp = c.delete("/reminders/999")
+        assert resp.status_code == 404
+
 
 class TestGitHubEndpoints:
     def test_list_notifications(self, client):

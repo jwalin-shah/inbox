@@ -54,6 +54,8 @@ from services import (
     reauth_google_account,
     reminder_complete,
     reminder_create,
+    reminder_delete,
+    reminder_edit,
     reminders_list,
     reminders_lists,
 )
@@ -161,6 +163,12 @@ class ReminderCreateRequest(BaseModel):
     list_name: str = "Reminders"
     due_date: str = ""
     notes: str = ""
+
+
+class ReminderEditRequest(BaseModel):
+    title: str | None = None
+    due_date: str | None = None
+    notes: str | None = None
 
 
 class GitHubNotificationOut(BaseModel):
@@ -622,6 +630,34 @@ async def create_reminder(req: ReminderCreateRequest):
         due_date=req.due_date,
         notes=req.notes,
     )
+    return {"ok": ok}
+
+
+@app.put("/reminders/{reminder_id}")
+async def edit_reminder(reminder_id: str, req: ReminderEditRequest):
+    # Look up title from the DB to identify the reminder for AppleScript
+    items = await asyncio.to_thread(reminders_list, show_completed=False, limit=500)
+    reminder = next((r for r in items if r.id == reminder_id), None)
+    if not reminder:
+        raise HTTPException(404, "Reminder not found")
+    ok = await asyncio.to_thread(
+        reminder_edit,
+        current_title=reminder.title,
+        title=req.title,
+        due_date=req.due_date,
+        notes=req.notes,
+    )
+    return {"ok": ok}
+
+
+@app.delete("/reminders/{reminder_id}")
+async def delete_reminder(reminder_id: str):
+    # Look up title from the DB to identify the reminder for AppleScript
+    items = await asyncio.to_thread(reminders_list, show_completed=False, limit=500)
+    reminder = next((r for r in items if r.id == reminder_id), None)
+    if not reminder:
+        raise HTTPException(404, "Reminder not found")
+    ok = await asyncio.to_thread(reminder_delete, reminder.title)
     return {"ok": ok}
 
 
