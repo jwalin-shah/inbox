@@ -6,6 +6,7 @@ Run: uv run python inbox_server.py
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -33,6 +34,7 @@ from services import (
     close_sqlite_connections,
     drive_create_folder,
     drive_delete,
+    drive_download,
     drive_files,
     drive_get,
     drive_upload,
@@ -40,9 +42,19 @@ from services import (
     github_mark_read,
     github_notifications,
     github_pulls,
+    gmail_archive,
+    gmail_attachment_download,
+    gmail_compose_send,
     gmail_contacts,
+    gmail_contacts_by_label,
+    gmail_delete,
+    gmail_labels,
+    gmail_mark_read,
+    gmail_mark_unread,
     gmail_send,
+    gmail_star,
     gmail_thread,
+    gmail_unstar,
     google_auth_all,
     imsg_contacts,
     imsg_send,
@@ -92,6 +104,7 @@ class MessageOut(BaseModel):
     ts: str
     is_me: bool
     source: str
+    attachments: list[dict] = []  # type: ignore[type-arg]
 
 
 class CalendarEventOut(BaseModel):
@@ -104,6 +117,7 @@ class CalendarEventOut(BaseModel):
     all_day: bool = False
     event_id: str = ""
     calendar_id: str = ""
+    attendees: list[dict[str, str]] = []
 
 
 class NoteOut(BaseModel):
@@ -209,6 +223,13 @@ class AutocompleteRequest(BaseModel):
     mode: str = "complete"
 
 
+class ComposeRequest(BaseModel):
+    to: str
+    subject: str
+    body: str
+    account: str = ""
+
+
 # ── Server state ─────────────────────────────────────────────────────────────
 
 
@@ -256,6 +277,7 @@ def _msg_to_out(m: Msg) -> MessageOut:
         ts=m.ts.isoformat(),
         is_me=m.is_me,
         source=m.source,
+        attachments=m.attachments,
     )
 
 
@@ -270,6 +292,7 @@ def _event_to_out(e: CalendarEvent) -> CalendarEventOut:
         all_day=e.all_day,
         event_id=e.event_id,
         calendar_id=e.calendar_id,
+        attendees=e.attendees,
     )
 
 
@@ -470,13 +493,135 @@ async def send_message(req: SendRequest):
     return {"ok": ok}
 
 
+# ── Gmail actions ────────────────────────────────────────────────────────────
+
+
+def _get_gmail_service(msg_id: str) -> tuple[object, Contact | None]:
+    """Look up the correct Gmail service for a message, using cache or fallback."""
+    contact = state.conv_cache.get(_cache_key("gmail", msg_id))
+    if contact and contact.gmail_account in state.gmail_services:
+        return state.gmail_services[contact.gmail_account], contact
+    if state.gmail_services:
+        return next(iter(state.gmail_services.values())), contact
+    raise HTTPException(404, "No Gmail service available")
+
+
+@app.post("/messages/gmail/{msg_id}/archive")
+async def archive_gmail(msg_id: str):
+    svc, _ = _get_gmail_service(msg_id)
+    ok = await asyncio.to_thread(gmail_archive, svc, msg_id)
+    return {"ok": ok}
+
+
+@app.post("/messages/gmail/{msg_id}/delete")
+async def delete_gmail(msg_id: str):
+    svc, _ = _get_gmail_service(msg_id)
+    ok = await asyncio.to_thread(gmail_delete, svc, msg_id)
+    return {"ok": ok}
+
+
+@app.post("/messages/gmail/{msg_id}/star")
+async def star_gmail(msg_id: str):
+    svc, _ = _get_gmail_service(msg_id)
+    ok = await asyncio.to_thread(gmail_star, svc, msg_id)
+    return {"ok": ok}
+
+
+@app.post("/messages/gmail/{msg_id}/unstar")
+async def unstar_gmail(msg_id: str):
+    svc, _ = _get_gmail_service(msg_id)
+    ok = await asyncio.to_thread(gmail_unstar, svc, msg_id)
+    return {"ok": ok}
+
+
+@app.post("/messages/gmail/{msg_id}/read")
+async def mark_gmail_read(msg_id: str):
+    svc, _ = _get_gmail_service(msg_id)
+    ok = await asyncio.to_thread(gmail_mark_read, svc, msg_id)
+    return {"ok": ok}
+
+
+@app.post("/messages/gmail/{msg_id}/unread")
+async def mark_gmail_unread(msg_id: str):
+    svc, _ = _get_gmail_service(msg_id)
+    ok = await asyncio.to_thread(gmail_mark_unread, svc, msg_id)
+    return {"ok": ok}
+
+
+@app.get("/gmail/labels")
+async def list_gmail_labels(account: str = ""):
+    acct = account or (next(iter(state.gmail_services)) if state.gmail_services else "")
+    svc = state.gmail_services.get(acct)
+    if not svc:
+        raise HTTPException(404, "No Gmail account available")
+    labels = await asyncio.to_thread(gmail_labels, svc)
+    return labels
+
+
+@app.get("/messages/gmail/{msg_id}/attachments/{att_id}")
+async def download_gmail_attachment(msg_id: str, att_id: str):
+    svc, _ = _get_gmail_service(msg_id)
+    data = await asyncio.to_thread(gmail_attachment_download, svc, msg_id, att_id)
+    if data is None:
+        raise HTTPException(404, "Attachment not found")
+    return {"data": base64.urlsafe_b64encode(data).decode(), "size": len(data)}
+
+
+@app.post("/messages/compose")
+async def compose_email(req: ComposeRequest):
+    acct = req.account or (next(iter(state.gmail_services)) if state.gmail_services else "")
+    svc = state.gmail_services.get(acct)
+    if not svc:
+        raise HTTPException(404, "No Gmail account available")
+    ok = await asyncio.to_thread(gmail_compose_send, svc, req.to, req.subject, req.body)
+    return {"ok": ok}
+
+
+@app.get("/gmail/conversations", response_model=list[ConversationOut])
+async def list_gmail_by_label(label: str = "INBOX", limit: int = 50, account: str = ""):
+    """List Gmail conversations filtered by label."""
+    results: list[Contact] = []
+    targets = (
+        {account: state.gmail_services[account]}
+        if account and account in state.gmail_services
+        else state.gmail_services
+    )
+    for email, svc in targets.items():
+        contacts = await asyncio.to_thread(
+            gmail_contacts_by_label, svc, email, label_id=label, limit=limit
+        )
+        results.extend(contacts)
+
+    results.sort(key=lambda c: c.last_ts, reverse=True)
+
+    # Update cache with these results
+    for c in results:
+        state.conv_cache[_cache_key(c.source, c.id)] = c
+
+    return [_contact_to_out(c) for c in results]
+
+
 # ── Calendar ─────────────────────────────────────────────────────────────────
 
 
 @app.get("/calendar/events", response_model=list[CalendarEventOut])
-async def list_events(date: str | None = None):
-    dt = datetime.fromisoformat(date) if date else None
-    evts = await asyncio.to_thread(calendar_events, state.cal_services, dt)
+async def list_events(
+    date: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+):
+    if start and end:
+        start_dt = datetime.fromisoformat(start)
+        end_dt = datetime.fromisoformat(end)
+        evts = await asyncio.to_thread(
+            calendar_events,
+            state.cal_services,
+            start_date=start_dt,
+            end_date=end_dt,
+        )
+    else:
+        dt = datetime.fromisoformat(date) if date else None
+        evts = await asyncio.to_thread(calendar_events, state.cal_services, dt)
     state.events_cache = evts
     return [_event_to_out(e) for e in evts]
 
@@ -693,6 +838,7 @@ async def list_drive_files(
     shared: bool = False,
     limit: int = 20,
     account: str = "",
+    folder_id: str = "",
 ):
     results: list[DriveFileOut] = []
     targets = (
@@ -702,11 +848,31 @@ async def list_drive_files(
     )
     for email, svc in targets.items():
         files = await asyncio.to_thread(
-            drive_files, svc, query=q, limit=limit, shared_with_me=shared
+            drive_files,
+            svc,
+            query=q,
+            limit=limit,
+            shared_with_me=shared,
+            folder_id=folder_id,
         )
         results.extend(_drive_to_out(f, account=email) for f in files)
     results.sort(key=lambda f: f.modified, reverse=True)
     return results[:limit]
+
+
+@app.get("/drive/files/{file_id}/download")
+async def download_drive_file(file_id: str, account: str = ""):
+    from fastapi.responses import Response
+
+    acct = account or (next(iter(state.drive_services)) if state.drive_services else "")
+    svc = state.drive_services.get(acct)
+    if not svc:
+        raise HTTPException(404, "No Drive account available")
+    result = await asyncio.to_thread(drive_download, svc, file_id)
+    if not result:
+        raise HTTPException(404, "File not found or download failed")
+    content, mime_type = result
+    return Response(content=content, media_type=mime_type)
 
 
 @app.get("/drive/files/{file_id}", response_model=DriveFileOut)

@@ -103,13 +103,88 @@ class InboxClient:
         r.raise_for_status()
         return r.json().get("ok", False)
 
+    # ── Gmail actions ────────────────────────────────────────────────────
+
+    def gmail_archive(self, msg_id: str) -> bool:
+        r = self._client.post(f"/messages/gmail/{msg_id}/archive")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def gmail_delete(self, msg_id: str) -> bool:
+        r = self._client.post(f"/messages/gmail/{msg_id}/delete")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def gmail_star(self, msg_id: str) -> bool:
+        r = self._client.post(f"/messages/gmail/{msg_id}/star")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def gmail_unstar(self, msg_id: str) -> bool:
+        r = self._client.post(f"/messages/gmail/{msg_id}/unstar")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def gmail_mark_read(self, msg_id: str) -> bool:
+        r = self._client.post(f"/messages/gmail/{msg_id}/read")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def gmail_mark_unread(self, msg_id: str) -> bool:
+        r = self._client.post(f"/messages/gmail/{msg_id}/unread")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def gmail_labels(self, account: str = "") -> list[dict]:
+        params = {"account": account} if account else {}
+        r = self._client.get("/gmail/labels", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def gmail_attachment(self, msg_id: str, att_id: str) -> dict:
+        r = self._client.get(f"/messages/gmail/{msg_id}/attachments/{att_id}")
+        r.raise_for_status()
+        return r.json()
+
+    def gmail_compose(self, to: str, subject: str, body: str, account: str = "") -> bool:
+        r = self._client.post(
+            "/messages/compose",
+            json={"to": to, "subject": subject, "body": body, "account": account},
+        )
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def gmail_conversations_by_label(
+        self, label: str = "INBOX", limit: int = 50, account: str = ""
+    ) -> list[dict]:
+        r = self._client.get(
+            "/gmail/conversations",
+            params={"label": label, "limit": limit, "account": account},
+        )
+        r.raise_for_status()
+        return r.json()
+
     # ── Calendar ─────────────────────────────────────────────────────────
 
-    def calendar_events(self, date: str | None = None) -> list[dict]:
-        params = {"date": date} if date else {}
+    def calendar_events(
+        self,
+        date: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
+        params: dict[str, str] = {}
+        if start_date and end_date:
+            params["start"] = start_date
+            params["end"] = end_date
+        elif date:
+            params["date"] = date
         r = self._client.get("/calendar/events", params=params)
         r.raise_for_status()
         return r.json()
+
+    def calendar_events_range(self, start: str, end: str) -> list[dict]:
+        """Convenience method for fetching events over a date range."""
+        return self.calendar_events(start_date=start, end_date=end)
 
     def create_event(
         self,
@@ -288,11 +363,17 @@ class InboxClient:
         shared: bool = False,
         limit: int = 20,
         account: str = "",
+        folder_id: str = "",
     ) -> list[dict]:
-        r = self._client.get(
-            "/drive/files",
-            params={"q": query, "shared": shared, "limit": limit, "account": account},
-        )
+        params: dict = {
+            "q": query,
+            "shared": shared,
+            "limit": limit,
+            "account": account,
+        }
+        if folder_id:
+            params["folder_id"] = folder_id
+        r = self._client.get("/drive/files", params=params)
         r.raise_for_status()
         return r.json()
 
@@ -300,6 +381,16 @@ class InboxClient:
         r = self._client.get(f"/drive/files/{file_id}", params={"account": account})
         r.raise_for_status()
         return r.json()
+
+    def drive_download(self, file_id: str, account: str = "") -> bytes:
+        """Download file content from Drive. Returns raw bytes."""
+        r = self._client.get(
+            f"/drive/files/{file_id}/download",
+            params={"account": account},
+            timeout=120,
+        )
+        r.raise_for_status()
+        return r.content
 
     def drive_upload(self, file_path: str, folder_id: str = "", account: str = "") -> dict:
         from pathlib import Path as P

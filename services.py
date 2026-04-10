@@ -97,6 +97,7 @@ class Msg:
     ts: datetime
     is_me: bool
     source: str
+    attachments: list[dict[str, str | int]] = field(default_factory=list)
 
 
 @dataclass
@@ -110,6 +111,7 @@ class CalendarEvent:
     all_day: bool = False
     event_id: str = ""
     calendar_id: str = ""
+    attendees: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -851,6 +853,31 @@ def gmail_contacts(service, account_email: str, limit: int = 20) -> list[Contact
         return []
 
 
+def _extract_attachments(payload: dict, msg_id: str) -> list[dict[str, str | int]]:
+    """Extract attachment metadata from a Gmail message payload."""
+    attachments: list[dict[str, str | int]] = []
+
+    def _walk(part: dict) -> None:
+        filename = part.get("filename", "")
+        body = part.get("body", {})
+        att_id = body.get("attachmentId", "")
+        if filename and att_id:
+            attachments.append(
+                {
+                    "filename": filename,
+                    "mimeType": part.get("mimeType", "application/octet-stream"),
+                    "size": body.get("size", 0),
+                    "attachmentId": att_id,
+                    "messageId": msg_id,
+                }
+            )
+        for sub in part.get("parts", []):
+            _walk(sub)
+
+    _walk(payload)
+    return attachments
+
+
 def gmail_thread(service, msg_id: str, thread_id: str = "") -> list[Msg]:
     try:
         tid = thread_id or msg_id
@@ -868,6 +895,7 @@ def gmail_thread(service, msg_id: str, thread_id: str = "") -> list[Msg]:
             ts = datetime.fromtimestamp(ts_ms / 1000) if ts_ms else datetime.now()
             is_me = me_email.lower() in email_addr.lower()
             sender = "Me" if is_me else display_name
+            atts = _extract_attachments(m["payload"], m.get("id", msg_id))
             if body:
                 if i == 0 and subject:
                     body = f"Subject: {subject}\nTo: {to_raw}\n{'─' * 30}\n\n{body}"
@@ -878,6 +906,7 @@ def gmail_thread(service, msg_id: str, thread_id: str = "") -> list[Msg]:
                         ts=ts,
                         is_me=is_me,
                         source="gmail",
+                        attachments=atts,
                     )
                 )
         return msgs
@@ -910,16 +939,222 @@ def gmail_send(service, contact: Contact, body: str) -> bool:
         return False
 
 
+# ── Gmail actions ────────────────────────────────────────────────────────────
+
+
+def gmail_archive(service, msg_id: str) -> bool:
+    """Archive a Gmail message by removing the INBOX label."""
+    try:
+        service.users().messages().modify(
+            userId="me", id=msg_id, body={"removeLabelIds": ["INBOX"]}
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure("gmail_archive", msg_id=msg_id)
+        return False
+
+
+def gmail_delete(service, msg_id: str) -> bool:
+    """Move a Gmail message to trash."""
+    try:
+        service.users().messages().trash(userId="me", id=msg_id).execute()
+        return True
+    except Exception:
+        _log_service_failure("gmail_delete", msg_id=msg_id)
+        return False
+
+
+def gmail_star(service, msg_id: str) -> bool:
+    """Add STARRED label to a Gmail message."""
+    try:
+        service.users().messages().modify(
+            userId="me", id=msg_id, body={"addLabelIds": ["STARRED"]}
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure("gmail_star", msg_id=msg_id)
+        return False
+
+
+def gmail_unstar(service, msg_id: str) -> bool:
+    """Remove STARRED label from a Gmail message."""
+    try:
+        service.users().messages().modify(
+            userId="me", id=msg_id, body={"removeLabelIds": ["STARRED"]}
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure("gmail_unstar", msg_id=msg_id)
+        return False
+
+
+def gmail_mark_read(service, msg_id: str) -> bool:
+    """Mark a Gmail message as read by removing UNREAD label."""
+    try:
+        service.users().messages().modify(
+            userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure("gmail_mark_read", msg_id=msg_id)
+        return False
+
+
+def gmail_mark_unread(service, msg_id: str) -> bool:
+    """Mark a Gmail message as unread by adding UNREAD label."""
+    try:
+        service.users().messages().modify(
+            userId="me", id=msg_id, body={"addLabelIds": ["UNREAD"]}
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure("gmail_mark_unread", msg_id=msg_id)
+        return False
+
+
+def gmail_labels(service) -> list[dict[str, str]]:
+    """List all Gmail labels for the account."""
+    try:
+        result = service.users().labels().list(userId="me").execute()
+        labels = []
+        for lbl in result.get("labels", []):
+            labels.append(
+                {
+                    "id": lbl.get("id", ""),
+                    "name": lbl.get("name", ""),
+                    "type": lbl.get("type", ""),
+                }
+            )
+        return labels
+    except Exception:
+        _log_service_failure("gmail_labels")
+        return []
+
+
+def gmail_attachment_download(service, msg_id: str, att_id: str) -> bytes | None:
+    """Download a Gmail attachment and return the binary data."""
+    try:
+        att = (
+            service.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=msg_id, id=att_id)
+            .execute()
+        )
+        data = att.get("data", "")
+        if data:
+            return base64.urlsafe_b64decode(data)
+        return None
+    except Exception:
+        _log_service_failure("gmail_attachment_download", msg_id=msg_id, att_id=att_id)
+        return None
+
+
+def gmail_compose_send(service, to: str, subject: str, body: str) -> bool:
+    """Send a new email (not a reply)."""
+    msg = MIMEText(body)
+    msg["to"] = to
+    msg["subject"] = subject
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    try:
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True
+    except Exception:
+        _log_service_failure("gmail_compose_send", to=to, subject=subject, body_length=len(body))
+        return False
+
+
+def gmail_contacts_by_label(
+    service, account_email: str, label_id: str = "INBOX", limit: int = 20
+) -> list[Contact]:
+    """List Gmail conversations filtered by label."""
+    try:
+        result = (
+            service.users()
+            .messages()
+            .list(userId="me", labelIds=[label_id], maxResults=limit)
+            .execute()
+        )
+        messages = result.get("messages", [])
+        contacts: list[Contact] = []
+        seen_threads: set[str] = set()
+        thread_messages: list[dict[str, str]] = []
+        for m in messages:
+            thread_id = m.get("threadId", m["id"])
+            if thread_id in seen_threads:
+                continue
+            thread_messages.append(m)
+            seen_threads.add(thread_id)
+
+        metadata_by_id = _fetch_gmail_metadata_batch(
+            service, [message["id"] for message in thread_messages]
+        )
+
+        for m in thread_messages:
+            msg = metadata_by_id.get(m["id"])
+            if not msg:
+                continue
+
+            thread_id = m.get("threadId", m["id"])
+            payload = msg.get("payload", {})
+            raw_headers = payload.get("headers", [])
+            headers = {h["name"]: h["value"] for h in raw_headers}
+            raw_from = headers.get("From", "Unknown")
+            display_name, email_addr = _parse_email_address(raw_from)
+            subject = headers.get("Subject", "(no subject)")
+            msg_id_header = headers.get("Message-ID", "")
+            unread = "UNREAD" in msg.get("labelIds", [])
+            ts_ms = int(msg.get("internalDate", 0))
+            msg_ts = datetime.fromtimestamp(ts_ms / 1000) if ts_ms else datetime.now()
+            contacts.append(
+                Contact(
+                    id=m["id"],
+                    name=display_name,
+                    source="gmail",
+                    snippet=subject[:60],
+                    unread=1 if unread else 0,
+                    last_ts=msg_ts,
+                    reply_to=email_addr,
+                    thread_id=thread_id,
+                    message_id_header=msg_id_header,
+                    gmail_account=account_email,
+                )
+            )
+        return contacts
+    except Exception:
+        _log_service_failure(
+            "gmail_contacts_by_label",
+            account_email=account_email,
+            label_id=label_id,
+            limit=limit,
+        )
+        return []
+
+
 # ── Calendar ─────────────────────────────────────────────────────────────────
 
 
 def calendar_events(
-    cal_services: dict[str, object], date: datetime | None = None
+    cal_services: dict[str, object],
+    date: datetime | None = None,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
 ) -> list[CalendarEvent]:
-    """Fetch events for a given day from all accounts."""
-    now = (date or datetime.now()).astimezone()
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_day = start_of_day + timedelta(days=1)
+    """Fetch events from all accounts.
+
+    Supports two modes:
+    - Single day: pass ``date`` (defaults to today).
+    - Date range: pass both ``start_date`` and ``end_date``.
+    """
+    if start_date and end_date:
+        range_start = start_date.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        range_end = end_date.astimezone().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+    else:
+        now = (date or datetime.now()).astimezone()
+        range_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        range_end = range_start + timedelta(days=1)
 
     events: list[CalendarEvent] = []
     for email, svc in cal_services.items():
@@ -931,8 +1166,8 @@ def calendar_events(
                     svc.events()  # type: ignore[attr-defined]
                     .list(
                         calendarId=cal_id,
-                        timeMin=start_of_day.isoformat(),
-                        timeMax=end_of_day.isoformat(),
+                        timeMin=range_start.isoformat(),
+                        timeMax=range_end.isoformat(),
                         singleEvents=True,
                         orderBy="startTime",
                     )
@@ -951,6 +1186,17 @@ def calendar_events(
                         start_dt = datetime.fromisoformat(start_raw.get("dateTime", ""))
                         end_dt = datetime.fromisoformat(end_raw.get("dateTime", ""))
 
+                    # Extract attendee data
+                    raw_attendees = item.get("attendees", [])
+                    attendee_list = [
+                        {
+                            "name": a.get("displayName", ""),
+                            "email": a.get("email", ""),
+                            "responseStatus": a.get("responseStatus", ""),
+                        }
+                        for a in raw_attendees
+                    ]
+
                     events.append(
                         CalendarEvent(
                             summary=item.get("summary", "(No title)"),
@@ -962,13 +1208,14 @@ def calendar_events(
                             all_day=all_day,
                             event_id=item.get("id", ""),
                             calendar_id=cal_id,
+                            attendees=attendee_list,
                         )
                     )
         except Exception:  # logged below
             _log_service_failure(
                 "calendar_events.account",
                 account=email,
-                date=start_of_day.date().isoformat(),
+                date=range_start.date().isoformat(),
             )
             continue
 
@@ -1799,6 +2046,7 @@ def drive_files(
     query: str = "",
     limit: int = 20,
     shared_with_me: bool = False,
+    folder_id: str = "",
 ) -> list[DriveFile]:
     """List files from Google Drive."""
     try:
@@ -1807,6 +2055,8 @@ def drive_files(
             q_parts.append("sharedWithMe = true")
         if query:
             q_parts.append(f"name contains '{query}'")
+        if folder_id:
+            q_parts.append(f"'{folder_id}' in parents")
         q_parts.append("trashed = false")
         q = " and ".join(q_parts)
 
@@ -1958,6 +2208,49 @@ def drive_get(drive_service, file_id: str) -> DriveFile | None:
         )
     except Exception:  # logged below
         _log_service_failure("drive_get", file_id=file_id)
+        return None
+
+
+def drive_download(drive_service, file_id: str) -> tuple[bytes, str] | None:
+    """Download file content from Google Drive.
+
+    Returns a (content_bytes, mime_type) tuple, or None on error.
+    For Google Workspace files (Docs, Sheets, etc.) that cannot be
+    downloaded directly, exports as PDF.
+    """
+    from io import BytesIO
+
+    from googleapiclient.http import MediaIoBaseDownload
+
+    try:
+        # First get metadata to know the mime type
+        meta = drive_service.files().get(fileId=file_id, fields="mimeType, name").execute()
+        mime_type = meta.get("mimeType", "application/octet-stream")
+
+        # Google Workspace files need export, not direct download
+        google_export_map = {
+            "application/vnd.google-apps.document": "application/pdf",
+            "application/vnd.google-apps.spreadsheet": "application/pdf",
+            "application/vnd.google-apps.presentation": "application/pdf",
+            "application/vnd.google-apps.drawing": "application/pdf",
+        }
+
+        buf = BytesIO()
+        if mime_type in google_export_map:
+            export_mime = google_export_map[mime_type]
+            request = drive_service.files().export_media(fileId=file_id, mimeType=export_mime)
+            mime_type = export_mime
+        else:
+            request = drive_service.files().get_media(fileId=file_id)
+
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        return buf.getvalue(), mime_type
+    except Exception:  # logged below
+        _log_service_failure("drive_download", file_id=file_id)
         return None
 
 
