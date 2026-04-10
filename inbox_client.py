@@ -487,3 +487,20 @@ class InboxClient:
         r = self._client.post("/accounts/reauth", json={"email": email}, timeout=120)
         r.raise_for_status()
         return r.json()
+
+    # ── Notifications ────────────────────────────────────────────────────
+
+    def notification_config(self) -> dict:
+        r = self._client.get("/notifications/config")
+        r.raise_for_status()
+        return r.json()
+
+    def update_notification_config(self, cfg: dict) -> bool:
+        r = self._client.put("/notifications/config", json=cfg)
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def test_notification(self, title: str, body: str = "") -> bool:
+        r = self._client.post("/notifications/test", json={"title": title, "body": body})
+        r.raise_for_status()
+        return r.json().get("sent", False)

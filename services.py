@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import json
 import mimetypes
 import os
 import re
@@ -2683,3 +2684,128 @@ def autocomplete(
     result = llm_complete(prompt, max_tokens=max_tokens, temperature=temperature)
     result = result.strip()
     return result if result else None
+
+
+# ── Desktop Notifications ─────────────────────────────────────────────────────
+
+NOTIFICATION_CONFIG_PATH = Path.home() / ".config" / "inbox" / "notifications.json"
+
+_DEFAULT_NOTIFICATION_CONFIG: dict = {
+    "enabled": True,
+    "sources": {
+        "imessage": True,
+        "gmail": True,
+        "calendar": True,
+        "github": True,
+    },
+    "quiet_hours": {
+        "enabled": False,
+        "start": "22:00",
+        "end": "08:00",
+    },
+}
+
+
+def load_notification_config() -> dict:  # type: ignore[type-arg]
+    """Load notification config, creating defaults if missing."""
+    if not NOTIFICATION_CONFIG_PATH.exists():
+        NOTIFICATION_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        NOTIFICATION_CONFIG_PATH.write_text(json.dumps(_DEFAULT_NOTIFICATION_CONFIG, indent=2))
+        return dict(_DEFAULT_NOTIFICATION_CONFIG)
+    try:
+        data = json.loads(NOTIFICATION_CONFIG_PATH.read_text())
+        # Fill in any missing keys from defaults
+        cfg = dict(_DEFAULT_NOTIFICATION_CONFIG)
+        cfg.update(data)
+        if "sources" in data:
+            sources = dict(_DEFAULT_NOTIFICATION_CONFIG["sources"])
+            sources.update(data["sources"])
+            cfg["sources"] = sources
+        if "quiet_hours" in data:
+            qh = dict(_DEFAULT_NOTIFICATION_CONFIG["quiet_hours"])
+            qh.update(data["quiet_hours"])
+            cfg["quiet_hours"] = qh
+        return cfg
+    except Exception:
+        return dict(_DEFAULT_NOTIFICATION_CONFIG)
+
+
+def save_notification_config(cfg: dict) -> bool:  # type: ignore[type-arg]
+    """Persist notification config. Returns True on success."""
+    try:
+        NOTIFICATION_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        NOTIFICATION_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+        return True
+    except Exception:
+        _log_service_failure("save_notification_config")
+        return False
+
+
+def _in_quiet_hours(quiet_hours: dict) -> bool:  # type: ignore[type-arg]
+    """Return True if current time falls within the configured quiet-hours window."""
+    if not quiet_hours.get("enabled"):
+        return False
+    try:
+        now_str = datetime.now().strftime("%H:%M")
+        start = quiet_hours.get("start", "22:00")
+        end = quiet_hours.get("end", "08:00")
+        # Handle overnight range (e.g. 22:00 – 08:00)
+        if start <= end:
+            return start <= now_str < end
+        # Overnight: quiet if now >= start OR now < end
+        return now_str >= start or now_str < end
+    except Exception:
+        return False
+
+
+def send_notification(title: str, body: str, source: str = "") -> bool:
+    """Send a macOS desktop notification. Returns True if sent.
+
+    Uses UNUserNotificationCenter via pyobjc if available;
+    falls back to osascript so tests/CI without pyobjc still work.
+    Respects the notification config (enabled flag, per-source toggle, quiet hours).
+    """
+    cfg = load_notification_config()
+    if not cfg.get("enabled", True):
+        return False
+    if source and not cfg.get("sources", {}).get(source, True):
+        return False
+    if _in_quiet_hours(cfg.get("quiet_hours", {})):
+        return False
+
+    # Try pyobjc UNUserNotificationCenter first
+    try:
+        import importlib
+
+        objc_mod = importlib.import_module("objc")  # noqa: F841
+        un_mod = importlib.import_module("UserNotifications")
+        UNUserNotificationCenter = un_mod.UNUserNotificationCenter
+        UNMutableNotificationContent = un_mod.UNMutableNotificationContent
+        UNNotificationRequest = un_mod.UNNotificationRequest
+
+        center = UNUserNotificationCenter.currentNotificationCenter()
+        content = UNMutableNotificationContent.alloc().init()
+        content.setTitle_(title)
+        content.setBody_(body)
+        req = UNNotificationRequest.requestWithIdentifier_content_trigger_(
+            f"inbox-{time.time()}", content, None
+        )
+        center.addNotificationRequest_withCompletionHandler_(req, None)
+        return True
+    except Exception:
+        pass
+
+    # Fallback: osascript
+    try:
+        safe_title = title.replace("'", "\\'")
+        safe_body = body.replace("'", "\\'")
+        script = f"display notification '{safe_body}' with title '{safe_title}'"
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        _log_service_failure("send_notification", title=title, source=source)
+        return False
