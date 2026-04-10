@@ -405,3 +405,92 @@ class TestAccountsEndpoint:
         assert "github" in data
         assert data["drive"] == ["test@gmail.com"]
         assert data["github"] is True
+
+
+class TestContactsEndpoints:
+    def test_search_contacts_returns_list(self, client):
+        c, _ = client
+        mock_results = [
+            {
+                "id": "alice@example.com",
+                "name": "Alice Smith",
+                "emails": ["alice@example.com"],
+                "phones": [],
+                "github_handle": "",
+                "photo_url": "",
+                "source_counts": {"imessage": 0, "gmail": 2, "calendar": 0},
+            }
+        ]
+        with patch("inbox_server.contacts_search", return_value=mock_results):
+            resp = c.get("/contacts/search", params={"q": "alice"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice Smith"
+
+    def test_search_contacts_empty(self, client):
+        c, _ = client
+        with patch("inbox_server.contacts_search", return_value=[]):
+            resp = c.get("/contacts/search", params={"q": "nobody"})
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_get_contact_profile(self, client):
+        c, _ = client
+        mock_profile = {
+            "contact": {
+                "id": "alice@example.com",
+                "name": "Alice Smith",
+                "emails": ["alice@example.com"],
+                "phones": [],
+                "github_handle": "",
+                "photo_url": "",
+                "source_counts": {"imessage": 1, "gmail": 2, "calendar": 0},
+            },
+            "imessages": [],
+            "gmail_threads": [],
+            "calendar_events": [],
+            "timeline": [],
+        }
+        with patch("inbox_server.contacts_profile", return_value=mock_profile):
+            resp = c.get("/contacts/alice@example.com/profile")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["contact"]["name"] == "Alice Smith"
+        assert "timeline" in data
+
+    def test_favorites_round_trip(self, client, tmp_path, monkeypatch):
+        c, _ = client
+        fav_file = tmp_path / "favorites.json"
+        monkeypatch.setattr("services.FAVORITES_FILE", fav_file)
+        monkeypatch.setattr("inbox_server.load_favorites", lambda: set())
+        monkeypatch.setattr("inbox_server.save_favorites", lambda ids: None)
+
+        with patch("inbox_server.load_favorites", return_value=set()):
+            resp = c.get("/contacts/favorites")
+        assert resp.status_code == 200
+        assert resp.json()["favorites"] == []
+
+    def test_add_favorite(self, client):
+        c, _ = client
+        with (
+            patch("inbox_server.load_favorites", return_value=set()),
+            patch("inbox_server.save_favorites"),
+        ):
+            resp = c.post("/contacts/favorites/alice@example.com")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert "alice@example.com" in data["favorites"]
+
+    def test_remove_favorite(self, client):
+        c, _ = client
+        with (
+            patch("inbox_server.load_favorites", return_value={"alice@example.com"}),
+            patch("inbox_server.save_favorites"),
+        ):
+            resp = c.delete("/contacts/favorites/alice@example.com")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert "alice@example.com" not in data["favorites"]

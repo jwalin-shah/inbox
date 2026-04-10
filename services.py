@@ -2809,3 +2809,275 @@ def send_notification(title: str, body: str, source: str = "") -> bool:
     except Exception:
         _log_service_failure("send_notification", title=title, source=source)
         return False
+# ── Contacts search / profile ────────────────────────────────────────────────
+
+FAVORITES_FILE = Path.home() / ".config" / "inbox" / "favorites.json"
+
+
+def load_favorites() -> set[str]:
+    """Load favorited contact IDs from disk."""
+    try:
+        if FAVORITES_FILE.exists():
+            import json
+
+            return set(json.loads(FAVORITES_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+
+def save_favorites(ids: set[str]) -> None:
+    """Persist favorited contact IDs to disk."""
+    import json
+
+    FAVORITES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FAVORITES_FILE.write_text(json.dumps(sorted(ids)))
+
+
+def contacts_search(
+    gmail_services: dict[str, object],
+    q: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Search contacts by name, email, or phone across AddressBook + Gmail + iMessage senders."""
+    q_lower = q.lower().strip()
+    results: dict[str, dict] = {}  # keyed by normalized identifier
+
+    # 1. Search AddressBook
+    from contacts import _addressbook_paths, _phone_variants
+
+    for db_path in _addressbook_paths():
+        try:
+            import sqlite3 as _sqlite3
+
+            conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ZABCDRECORD'")
+            if not cur.fetchone():
+                conn.close()
+                continue
+            cur.execute("""
+                SELECT r.Z_PK, r.ZFIRSTNAME, r.ZLASTNAME, r.ZORGANIZATION,
+                    GROUP_CONCAT(DISTINCT p.ZFULLNUMBER) as phones,
+                    GROUP_CONCAT(DISTINCT e.ZADDRESS) as emails
+                FROM ZABCDRECORD r
+                LEFT JOIN ZABCDPHONENUMBER p ON p.ZOWNER = r.Z_PK
+                LEFT JOIN ZABCDEMAILADDRESS e ON e.ZOWNER = r.Z_PK
+                WHERE (r.ZFIRSTNAME IS NOT NULL OR r.ZLASTNAME IS NOT NULL OR r.ZORGANIZATION IS NOT NULL)
+                GROUP BY r.Z_PK
+            """)
+            for _pk, first, last, org, phones_raw, emails_raw in cur.fetchall():
+                parts = [p for p in (first, last) if p]
+                name = " ".join(parts) if parts else (org or "")
+                if not name:
+                    continue
+                emails = [e.strip() for e in (emails_raw or "").split(",") if e.strip()]
+                phones = [p.strip() for p in (phones_raw or "").split(",") if p.strip()]
+
+                # Check if matches query
+                searchable = name.lower() + " " + " ".join(emails).lower() + " " + " ".join(phones)
+                if q_lower and q_lower not in searchable:
+                    continue
+
+                # Use first email as key, fall back to first phone
+                key = emails[0].lower() if emails else (phones[0] if phones else name.lower())
+                if key not in results:
+                    results[key] = {
+                        "id": key,
+                        "name": name,
+                        "emails": emails,
+                        "phones": phones,
+                        "github_handle": "",
+                        "photo_url": "",
+                        "source_counts": {"imessage": 0, "gmail": 0, "calendar": 0},
+                    }
+            conn.close()
+        except Exception:
+            continue
+
+    # 2. Add Gmail senders
+    for account_email, svc in gmail_services.items():
+        try:
+            contacts = gmail_contacts(svc, account_email, limit=50)
+            for c in contacts:
+                addr = c.reply_to.lower()
+                if not addr:
+                    continue
+                if q_lower and q_lower not in (c.name.lower() + " " + addr):
+                    continue
+                if addr not in results:
+                    results[addr] = {
+                        "id": addr,
+                        "name": c.name,
+                        "emails": [c.reply_to],
+                        "phones": [],
+                        "github_handle": "",
+                        "photo_url": "",
+                        "source_counts": {"imessage": 0, "gmail": 0, "calendar": 0},
+                    }
+                results[addr]["source_counts"]["gmail"] += 1
+        except Exception:
+            continue
+
+    # 3. Add iMessage senders
+    try:
+        imsg_convs = imsg_contacts(limit=100)
+        for c in imsg_convs:
+            if not c.members:
+                continue
+            for member in c.members:
+                member_lower = member.lower()
+                if q_lower and q_lower not in (c.name.lower() + " " + member_lower):
+                    continue
+                # Try to find by email or phone variants
+                matched_key = None
+                for variant in _phone_variants(member):
+                    if variant.lower() in results:
+                        matched_key = variant.lower()
+                        break
+                if member_lower in results:
+                    matched_key = member_lower
+                if matched_key:
+                    results[matched_key]["source_counts"]["imessage"] += 1
+                else:
+                    # New entry from iMessage
+                    key = member_lower
+                    if key not in results:
+                        results[key] = {
+                            "id": key,
+                            "name": c.name if not c.is_group else member,
+                            "emails": [],
+                            "phones": [member] if "@" not in member else [],
+                            "github_handle": "",
+                            "photo_url": "",
+                            "source_counts": {"imessage": 1, "gmail": 0, "calendar": 0},
+                        }
+    except Exception:
+        pass
+
+    return list(results.values())[:limit]
+
+
+def contacts_profile(
+    contact_id: str,
+    gmail_services: dict[str, object],
+    cal_services: dict[str, object],
+) -> dict:
+    """Aggregate cross-source profile for a contact."""
+
+    # Find the contact via search
+    matches = contacts_search(gmail_services, contact_id, limit=50)
+    contact = next(
+        (m for m in matches if m["id"] == contact_id or contact_id in m["emails"]),
+        None,
+    )
+    if not contact:
+        # Minimal fallback
+        contact = {
+            "id": contact_id,
+            "name": contact_id,
+            "emails": [contact_id] if "@" in contact_id else [],
+            "phones": [contact_id] if "@" not in contact_id else [],
+            "github_handle": "",
+            "photo_url": "",
+            "source_counts": {"imessage": 0, "gmail": 0, "calendar": 0},
+        }
+
+    emails = set(e.lower() for e in contact.get("emails", []))
+    name_lower = contact.get("name", "").lower()
+
+    # iMessages — find matching chat
+    imsg_recent: list[dict] = []
+    try:
+        all_imsg = imsg_contacts(limit=200)
+        for c in all_imsg:
+            if any(m.lower() in emails or name_lower in m.lower() for m in c.members):
+                msgs = imsg_thread(c.id, limit=10)
+                for m in msgs[:10]:
+                    imsg_recent.append(
+                        {
+                            "source": "imessage",
+                            "sender": m.sender,
+                            "body": m.body[:200],
+                            "ts": m.ts.isoformat(),
+                            "is_me": m.is_me,
+                        }
+                    )
+                contact["source_counts"]["imessage"] += len(msgs)
+                break
+    except Exception:
+        pass
+
+    # Gmail threads
+    gmail_recent: list[dict] = []
+    for account_email, svc in gmail_services.items():
+        try:
+            convs = gmail_contacts(svc, account_email, limit=50)
+            for c in convs:
+                if c.reply_to.lower() in emails or name_lower in c.name.lower():
+                    gmail_recent.append(
+                        {
+                            "source": "gmail",
+                            "sender": c.name,
+                            "body": c.snippet[:200],
+                            "ts": c.last_ts.isoformat(),
+                            "thread_id": c.thread_id,
+                        }
+                    )
+                    contact["source_counts"]["gmail"] += 1
+                    if len(gmail_recent) >= 10:
+                        break
+        except Exception:
+            continue
+
+    # Calendar events (last 30 + next 30 days)
+    cal_events: list[dict] = []
+    if cal_services:
+        try:
+            now = datetime.now()
+            start_dt = now - timedelta(days=30)
+            end_dt = now + timedelta(days=30)
+            events = calendar_events(
+                cal_services,
+                start_date=start_dt,
+                end_date=end_dt,
+            )
+            for ev in events:
+                attendees = ev.attendees
+                if any(
+                    a.get("email", "").lower() in emails or name_lower in a.get("name", "").lower()
+                    for a in attendees
+                ):
+                    cal_events.append(
+                        {
+                            "source": "calendar",
+                            "summary": ev.summary,
+                            "start": ev.start.isoformat(),
+                            "end": ev.end.isoformat(),
+                            "location": ev.location,
+                        }
+                    )
+                    contact["source_counts"]["calendar"] += 1
+        except Exception:
+            pass
+
+    # Build unified timeline (reverse-chron)
+    timeline: list[dict] = []
+    for item in imsg_recent + gmail_recent + cal_events:
+        ts_str = item.get("ts") or item.get("start", "")
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except (ValueError, TypeError):
+            ts = datetime.min
+        timeline.append({**item, "_ts": ts.isoformat()})
+    timeline.sort(key=lambda x: x["_ts"], reverse=True)
+    for item in timeline:
+        item.pop("_ts", None)
+
+    return {
+        "contact": contact,
+        "imessages": imsg_recent,
+        "gmail_threads": gmail_recent,
+        "calendar_events": cal_events,
+        "timeline": timeline,
+    }

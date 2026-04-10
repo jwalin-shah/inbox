@@ -793,3 +793,44 @@ class TestTokenFileLocking:
             {"token": "first", "count": 1},
             {"token": "second", "count": 2},
         ]
+
+
+# ── Contacts favorites ───────────────────────────────────────────────────────
+
+
+def test_load_favorites_empty_when_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr("services.FAVORITES_FILE", tmp_path / "favorites.json")
+    from services import load_favorites
+
+    result = load_favorites()
+    assert result == set()
+
+
+def test_save_and_load_favorites_round_trip(tmp_path, monkeypatch):
+    fav_file = tmp_path / "favorites.json"
+    monkeypatch.setattr("services.FAVORITES_FILE", fav_file)
+    from services import load_favorites, save_favorites
+
+    ids = {"alice@example.com", "bob@example.com"}
+    save_favorites(ids)
+    loaded = load_favorites()
+    assert loaded == ids
+
+
+def test_save_favorites_creates_parent_dirs(tmp_path, monkeypatch):
+    fav_file = tmp_path / "config" / "inbox" / "favorites.json"
+    monkeypatch.setattr("services.FAVORITES_FILE", fav_file)
+    from services import save_favorites
+
+    save_favorites({"test@example.com"})
+    assert fav_file.exists()
+
+
+def test_load_favorites_handles_corrupt_file(tmp_path, monkeypatch):
+    fav_file = tmp_path / "favorites.json"
+    fav_file.write_text("NOT VALID JSON")
+    monkeypatch.setattr("services.FAVORITES_FILE", fav_file)
+    from services import load_favorites
+
+    result = load_favorites()
+    assert result == set()

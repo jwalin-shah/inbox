@@ -20,8 +20,9 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.reactive import reactive
+from textual.screen import Screen
 from textual.widgets import (
     Footer,
     Header,
@@ -71,6 +72,8 @@ class ConversationItem(ListItem):
         source_icon = "󰍦" if source == "imessage" else "󰊫"
         t = Text()
         t.append(f"{source_icon} ", style="dim")
+        if d.get("_favorite"):
+            t.append("⭐ ", style="bold yellow")
 
         if source == "gmail":
             snippet = d.get("snippet", "")
@@ -513,6 +516,93 @@ class DetailView(Static):
         yield Static(t)
 
 
+# ── Contact Profile Screen ───────────────────────────────────────────────────
+
+
+class ContactProfileScreen(Screen):
+    DEFAULT_CSS = """
+    ContactProfileScreen {
+        align: center middle;
+    }
+    #profile-container {
+        width: 70;
+        height: 35;
+        border: solid $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #profile-scroll {
+        height: 1fr;
+        overflow-y: auto;
+    }
+    """
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, profile: dict) -> None:
+        super().__init__()
+        self._profile = profile
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="profile-container"):
+            yield Static(self._render_header(), id="profile-header")
+            with ScrollableContainer(id="profile-scroll"):
+                yield Static(self._render_body(), id="profile-body")
+
+    def _render_header(self) -> Text:
+        contact = self._profile.get("contact", {})
+        t = Text()
+        name = contact.get("name", "Unknown")
+        t.append(f"  {name}\n", style="bold white")
+        t.append("─" * 40 + "\n", style="dim")
+        for email in contact.get("emails", []):
+            t.append(f"  {email}\n", style="cyan")
+        for phone in contact.get("phones", []):
+            t.append(f"  {phone}\n", style="green")
+        counts = contact.get("source_counts", {})
+        parts = []
+        if counts.get("imessage"):
+            parts.append(f"iMsg: {counts['imessage']}")
+        if counts.get("gmail"):
+            parts.append(f"Gmail: {counts['gmail']}")
+        if counts.get("calendar"):
+            parts.append(f"Cal: {counts['calendar']}")
+        if parts:
+            t.append("  " + "  ·  ".join(parts) + "\n", style="dim")
+        t.append("[dim]Esc: close[/]\n", style="dim")
+        return t
+
+    def _render_body(self) -> Text:
+        t = Text()
+        timeline = self._profile.get("timeline", [])
+        if not timeline:
+            t.append("No activity found.\n", style="dim")
+            return t
+        t.append("\nTimeline\n", style="bold yellow")
+        t.append("─" * 38 + "\n", style="dim")
+        for item in timeline[:20]:
+            src = item.get("source", "")
+            src_label = {"imessage": "[iMsg]", "gmail": "[Gmail]", "calendar": "[Cal]"}.get(
+                src, f"[{src}]"
+            )
+            ts_str = item.get("ts") or item.get("start", "")
+            try:
+                ts_label = datetime.fromisoformat(ts_str).strftime("%b %d %H:%M")
+            except (ValueError, TypeError):
+                ts_label = ""
+            t.append(f"{src_label} ", style="dim")
+            if ts_label:
+                t.append(f"{ts_label}  ", style="dim cyan")
+            body = item.get("body") or item.get("summary", "")
+            sender = item.get("sender", "")
+            if sender and not item.get("is_me"):
+                t.append(f"{sender}: ", style="dim italic")
+            t.append(f"{body[:80]}\n", style="white")
+        return t
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
+
+
 # ── Main App ─────────────────────────────────────────────────────────────────
 
 
@@ -627,6 +717,8 @@ class InboxApp(App):
         self._prev_github_unread: int = -1
         # Calendar event notification tracking: set of event_ids already notified
         self._notified_events: set[str] = set()
+        # Favorited contact IDs (persisted to ~/.config/inbox/favorites.json)
+        self._favorites: set[str] = set()
 
     def _update_github_badge(self) -> None:
         """Update the GitHub tab label with the unread count badge.
@@ -1041,10 +1133,25 @@ class InboxApp(App):
         else:
             shown = [c for c in self.conversations if c.get("source") == self._active_filter]
 
+        # Sort so favorites appear first
+        def _is_favorite(c: dict) -> bool:
+            cid = c.get("id", "")
+            name = c.get("name", "")
+            reply_to = c.get("reply_to", "")
+            return (
+                cid in self._favorites
+                or name.lower() in self._favorites
+                or reply_to.lower() in self._favorites
+            )
+
+        shown = sorted(shown, key=lambda c: 0 if _is_favorite(c) else 1)
+
         for c in shown:
             # Mark starred conversations for display
             if c.get("source") == "gmail" and c.get("id") in self._gmail_starred:
                 c["_starred"] = True
+            # Mark favorites for display
+            c["_favorite"] = _is_favorite(c)
             lv.append(ConversationItem(c))
 
         unread = sum(c.get("unread", 0) for c in shown)
@@ -1174,6 +1281,13 @@ class InboxApp(App):
 
     @work(thread=True, exit_on_error=False)
     def boot(self) -> None:
+        # Load persisted favorites before connecting
+        try:
+            from services import load_favorites as _load_favs
+
+            self._favorites = _load_favs()
+        except Exception:
+            pass
         try:
             self.client.ensure_server()
         except RuntimeError as e:
@@ -1471,6 +1585,37 @@ class InboxApp(App):
         """
         compose = self.query_one("#compose", Input)
         if compose.has_focus:
+            return
+
+        key = event.key
+        # Global: p = open contact profile for selected conversation
+        if (
+            key == "p"
+            and self.active_conv
+            and self._active_filter
+            in (
+                "all",
+                "imessage",
+                "gmail",
+            )
+        ):
+            event.prevent_default()
+            self.action_show_contact_profile()
+            return
+
+        # Global: f = toggle favorite for selected conversation
+        if (
+            key == "f"
+            and self.active_conv
+            and self._active_filter
+            in (
+                "all",
+                "imessage",
+                "gmail",
+            )
+        ):
+            event.prevent_default()
+            self.action_toggle_favorite()
             return
 
         if self._active_filter == "calendar":
@@ -2937,6 +3082,52 @@ class InboxApp(App):
                 compose = self.query_one("#compose", Input)
                 compose.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
                 self.query_one("#status", Static).update("[dim]Edit cancelled[/]")
+
+    # ── Contact profile / favorites ──────────────────────────────────────
+
+    def action_show_contact_profile(self) -> None:
+        if not self.active_conv:
+            return
+        self._bg_load_profile(self.active_conv)
+
+    @work(thread=True, exit_on_error=False)
+    def _bg_load_profile(self, conv: dict) -> None:
+        contact_id = conv.get("reply_to") or conv.get("name", "")
+        if not contact_id:
+            return
+        try:
+            profile = self.client.contacts_profile(contact_id)
+        except Exception:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Profile load failed[/]",
+            )
+            return
+        self.call_from_thread(self._open_profile_screen, profile)
+
+    def _open_profile_screen(self, profile: dict) -> None:
+        self.push_screen(ContactProfileScreen(profile))
+
+    def action_toggle_favorite(self) -> None:
+        if not self.active_conv:
+            return
+        contact_id = (self.active_conv.get("reply_to") or self.active_conv.get("name", "")).lower()
+        if not contact_id:
+            return
+        if contact_id in self._favorites:
+            self._favorites.discard(contact_id)
+            msg = f"[dim]Removed {contact_id} from favorites[/]"
+        else:
+            self._favorites.add(contact_id)
+            msg = f"[yellow]⭐ Added {contact_id} to favorites[/]"
+        try:
+            from services import save_favorites as _save_favs
+
+            _save_favs(self._favorites)
+        except Exception:
+            pass
+        self.query_one("#status", Static).update(msg)
+        self._render_sidebar()
 
     def _cleanup_resources(self) -> None:
         if self._poll_timer is not None:
