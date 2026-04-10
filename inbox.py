@@ -6,7 +6,9 @@ Auto-starts the server on launch.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import threading
 import time
 import webbrowser
 from datetime import date, datetime, timedelta
@@ -571,6 +573,9 @@ class InboxApp(App):
     # After this many consecutive poll errors, show a persistent outage message
     _SUSTAINED_OUTAGE_THRESHOLD = 3
 
+    # Bell indicator: reactive string shown in the header sub-title area
+    bell_indicator: reactive[str] = reactive("", recompose=False)
+
     def __init__(self) -> None:
         super().__init__()
         # Use longer timeout for first requests (data loading can be slow)
@@ -616,6 +621,12 @@ class InboxApp(App):
         self._gmail_labels: list[dict] = []
         # Gmail starred conversations (local cache for ★ display)
         self._gmail_starred: set[str] = set()
+        # Notification tracking: previous unread counts for change detection
+        self._prev_imsg_unread: int = -1
+        self._prev_gmail_unread: int = -1
+        self._prev_github_unread: int = -1
+        # Calendar event notification tracking: set of event_ids already notified
+        self._notified_events: set[str] = set()
 
     def _update_github_badge(self) -> None:
         """Update the GitHub tab label with the unread count badge.
@@ -633,6 +644,87 @@ class InboxApp(App):
                 gh_tab.label = label
         except Exception:
             pass
+
+    def _update_bell_indicator(self) -> None:
+        """Recompute total unread count and update the sub-title bell indicator."""
+        imsg_unread = sum(
+            c.get("unread", 0) for c in self.conversations if c.get("source") == "imessage"
+        )
+        gmail_unread = sum(
+            c.get("unread", 0) for c in self.conversations if c.get("source") == "gmail"
+        )
+        github_unread = sum(1 for n in self.github_data if n.get("unread"))
+        total = imsg_unread + gmail_unread + github_unread
+        self.bell_indicator = f"🔔 {total}" if total > 0 else ""
+        try:
+            header = self.query_one(Header)
+            header.sub_title = self.bell_indicator  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    def _check_and_fire_notifications(
+        self,
+        convos: list[dict],
+        github_data: list[dict],
+        events: list[dict],
+    ) -> None:
+        """Compare new data against prior counts and fire desktop notifications for changes."""
+        # iMessage: new unreads
+        imsg_unread = sum(c.get("unread", 0) for c in convos if c.get("source") == "imessage")
+        if self._prev_imsg_unread >= 0 and imsg_unread > self._prev_imsg_unread:
+            delta = imsg_unread - self._prev_imsg_unread
+            self._fire_notification(f"iMessage: {delta} new message(s)", "", "imessage")
+        self._prev_imsg_unread = imsg_unread
+
+        # Gmail: new unreads
+        gmail_unread = sum(c.get("unread", 0) for c in convos if c.get("source") == "gmail")
+        if self._prev_gmail_unread >= 0 and gmail_unread > self._prev_gmail_unread:
+            delta = gmail_unread - self._prev_gmail_unread
+            self._fire_notification(f"Gmail: {delta} new email(s)", "", "gmail")
+        self._prev_gmail_unread = gmail_unread
+
+        # GitHub: new @mentions
+        github_unread = sum(1 for n in github_data if n.get("unread"))
+        if self._prev_github_unread >= 0 and github_unread > self._prev_github_unread:
+            mentions = [n for n in github_data if n.get("unread") and n.get("reason") == "mention"]
+            if mentions:
+                title = mentions[0].get("title", "New mention")
+                repo = mentions[0].get("repo", "")
+                self._fire_notification(f"GitHub mention: {title}", repo, "github")
+            else:
+                delta = github_unread - self._prev_github_unread
+                self._fire_notification(f"GitHub: {delta} new notification(s)", "", "github")
+        self._prev_github_unread = github_unread
+
+        # Calendar: events starting within 15 minutes
+        now = datetime.now()
+        soon = now + timedelta(minutes=15)
+        for ev in events:
+            event_id = ev.get("event_id", "")
+            if not event_id or event_id in self._notified_events:
+                continue
+            try:
+                start = datetime.fromisoformat(ev["start"])
+                if now <= start <= soon:
+                    self._notified_events.add(event_id)
+                    summary = ev.get("summary", "Event")
+                    start_str = start.strftime("%H:%M")
+                    self._fire_notification(f"Starting at {start_str}: {summary}", "", "calendar")
+            except (ValueError, KeyError):
+                pass
+
+    def _fire_notification(self, title: str, body: str, source: str) -> None:
+        """Send a desktop notification in a background thread (non-blocking)."""
+
+        def _send() -> None:
+            with contextlib.suppress(Exception):
+                self.client._client.post(
+                    "/notifications/test",
+                    json={"title": title, "body": body or title},
+                    timeout=5,
+                )
+
+        threading.Thread(target=_send, daemon=True).start()
 
     def _notification_still_exists(self, notification: dict) -> bool:
         """Check whether a notification is still present in github_data.
@@ -1217,6 +1309,11 @@ class InboxApp(App):
         github_data: list[dict] | None = None,
         status_override: str | None = None,
     ) -> None:
+        # Check for notification-worthy changes before updating state
+        gh = github_data if github_data is not None else self.github_data
+        ev = events if events is not None else self.events
+        self._check_and_fire_notifications(convos, gh, ev)
+
         self.conversations = convos
         self.events = events
         self.notes_data = notes
@@ -1236,6 +1333,7 @@ class InboxApp(App):
                 self.active_notification = None
                 if self._active_filter == "github":
                     self.query_one("#detail-view", DetailView).detail = None
+        self._update_bell_indicator()
         self._render_sidebar()
         if status_override:
             self.query_one("#status", Static).update(status_override)

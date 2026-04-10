@@ -60,6 +60,7 @@ from services import (
     imsg_send,
     imsg_thread,
     init_contacts,
+    load_notification_config,
     note_body,
     notes_list,
     parse_quick_event,
@@ -71,6 +72,8 @@ from services import (
     reminder_edit,
     reminders_list,
     reminders_lists,
+    save_notification_config,
+    send_notification,
 )
 from services import (
     autocomplete as services_autocomplete,
@@ -221,6 +224,11 @@ class AutocompleteRequest(BaseModel):
     max_tokens: int = 32
     temperature: float = 0.5
     mode: str = "complete"
+
+
+class NotificationTestRequest(BaseModel):
+    title: str
+    body: str = ""
 
 
 class ComposeRequest(BaseModel):
@@ -1078,6 +1086,28 @@ async def reauth_account(req: AccountRequest):
     state.cal_services = cal
     state.drive_services = drive
     return {"email": email}
+
+
+# ── Notifications ────────────────────────────────────────────────────────────
+
+
+@app.get("/notifications/config")
+async def get_notification_config():
+    return await asyncio.to_thread(load_notification_config)
+
+
+@app.put("/notifications/config")
+async def put_notification_config(cfg: dict):  # type: ignore[type-arg]
+    ok = await asyncio.to_thread(save_notification_config, cfg)
+    if not ok:
+        raise HTTPException(500, "Failed to save notification config")
+    return {"ok": True}
+
+
+@app.post("/notifications/test")
+async def test_notification(req: NotificationTestRequest):
+    sent = await asyncio.to_thread(send_notification, req.title, req.body or "Test notification")
+    return {"ok": sent, "sent": sent}
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────

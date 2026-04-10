@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -2643,3 +2644,203 @@ def test_drive_key_handlers_ignored_when_compose_focused() -> None:
             client.drive_download.assert_not_called()
 
     asyncio.run(runner())
+
+
+# ── Bell indicator ────────────────────────────────────────────────────────────
+
+
+def test_bell_indicator_zero_when_no_unreads() -> None:
+    """Bell indicator is empty string when all sources have zero unread."""
+    app = _make_app(MagicMock())
+    app.conversations = [
+        {"id": "1", "source": "imessage", "unread": 0},
+        {"id": "2", "source": "gmail", "unread": 0},
+    ]
+    app.github_data = [{"id": "g1", "unread": False}]
+    app._update_bell_indicator()
+    assert app.bell_indicator == ""
+
+
+def test_bell_indicator_shows_imessage_unread() -> None:
+    """Bell shows total when iMessage has unreads."""
+    app = _make_app(MagicMock())
+    app.conversations = [
+        {"id": "1", "source": "imessage", "unread": 3},
+        {"id": "2", "source": "gmail", "unread": 0},
+    ]
+    app.github_data = []
+    app._update_bell_indicator()
+    assert "🔔" in app.bell_indicator
+    assert "3" in app.bell_indicator
+
+
+def test_bell_indicator_sums_all_sources() -> None:
+    """Bell total = iMessage + Gmail + GitHub unread."""
+    app = _make_app(MagicMock())
+    app.conversations = [
+        {"id": "1", "source": "imessage", "unread": 2},
+        {"id": "2", "source": "gmail", "unread": 5},
+    ]
+    app.github_data = [
+        {"id": "g1", "unread": True},
+        {"id": "g2", "unread": True},
+        {"id": "g3", "unread": False},
+    ]
+    app._update_bell_indicator()
+    # 2 + 5 + 2 = 9
+    assert "🔔" in app.bell_indicator
+    assert "9" in app.bell_indicator
+
+
+def test_bell_indicator_clears_when_all_read() -> None:
+    """Bell clears after previously shown unread count drops to zero."""
+    app = _make_app(MagicMock())
+    # Start with unreads
+    app.conversations = [{"id": "1", "source": "gmail", "unread": 4}]
+    app.github_data = []
+    app._update_bell_indicator()
+    assert "🔔" in app.bell_indicator
+
+    # All read now
+    app.conversations = [{"id": "1", "source": "gmail", "unread": 0}]
+    app._update_bell_indicator()
+    assert app.bell_indicator == ""
+
+
+def test_populate_calls_bell_update() -> None:
+    """_populate updates bell indicator after data is set."""
+    client = MagicMock()
+    client.github_notifications.return_value = []
+    app = _make_app(client)
+    app.conversations = []
+    app.github_data = []
+    app.events = []
+    app.notes_data = []
+    app.reminders_data = []
+    app.reminder_lists = []
+    # Inject unreads via the new convos list
+    new_convos = [{"id": "c1", "source": "imessage", "unread": 1}]
+
+    # _populate is normally called on the main thread from within run_test
+    # We call it directly here since HarnessInboxApp skips boot
+    async def runner() -> None:
+        async with app.run_test():
+            app._populate(new_convos, [], [], [], [], [])
+            await app.workers.wait_for_complete()
+            assert "🔔" in app.bell_indicator
+
+    asyncio.run(runner())
+
+
+def test_check_and_fire_notifications_no_fire_on_first_poll() -> None:
+    """No notification is fired on first poll (prev counts == -1)."""
+    client = MagicMock()
+    app = _make_app(client)
+    app._prev_imsg_unread = -1
+    app._prev_gmail_unread = -1
+    app._prev_github_unread = -1
+
+    convos = [{"id": "1", "source": "imessage", "unread": 5}]
+    app._check_and_fire_notifications(convos, [], [])
+    # No notification should be fired; just baseline established
+    assert app._prev_imsg_unread == 5
+    assert app._prev_gmail_unread == 0
+
+
+def test_check_and_fire_notifications_triggers_on_new_imessage() -> None:
+    """Notification fires when iMessage unread count increases."""
+    client = MagicMock()
+    app = _make_app(client)
+    app._prev_imsg_unread = 2
+    app._prev_gmail_unread = 0
+    app._prev_github_unread = 0
+
+    fired: list[tuple] = []
+    app._fire_notification = lambda title, body, source: fired.append((title, body, source))
+
+    convos = [{"id": "1", "source": "imessage", "unread": 4}]
+    app._check_and_fire_notifications(convos, [], [])
+    assert len(fired) == 1
+    assert "iMessage" in fired[0][0]
+    assert fired[0][2] == "imessage"
+
+
+def test_check_and_fire_notifications_triggers_on_github_mention() -> None:
+    """Notification fires for a GitHub @mention."""
+    client = MagicMock()
+    app = _make_app(client)
+    app._prev_imsg_unread = 0
+    app._prev_gmail_unread = 0
+    app._prev_github_unread = 0
+
+    fired: list[tuple] = []
+    app._fire_notification = lambda title, body, source: fired.append((title, body, source))
+
+    github_data = [
+        {
+            "id": "g1",
+            "unread": True,
+            "reason": "mention",
+            "title": "You were mentioned",
+            "repo": "owner/repo",
+        }
+    ]
+    app._check_and_fire_notifications([], github_data, [])
+    assert len(fired) == 1
+    assert "mention" in fired[0][0].lower() or "You were mentioned" in fired[0][0]
+    assert fired[0][2] == "github"
+
+
+def test_check_and_fire_notifications_calendar_upcoming() -> None:
+    """Notification fires for a calendar event starting within 15 minutes."""
+    client = MagicMock()
+    app = _make_app(client)
+    app._prev_imsg_unread = 0
+    app._prev_gmail_unread = 0
+    app._prev_github_unread = 0
+
+    fired: list[tuple] = []
+    app._fire_notification = lambda title, body, source: fired.append((title, body, source))
+
+    soon = datetime.now() + timedelta(minutes=10)
+    events = [
+        {
+            "event_id": "ev1",
+            "summary": "Team standup",
+            "start": soon.isoformat(),
+            "end": (soon + timedelta(hours=1)).isoformat(),
+        }
+    ]
+    app._check_and_fire_notifications([], [], events)
+    assert len(fired) == 1
+    assert (
+        "standup" in fired[0][0].lower()
+        or "standup" in fired[0][1].lower()
+        or "Team standup" in fired[0][0]
+    )
+    assert fired[0][2] == "calendar"
+
+
+def test_check_and_fire_notifications_no_duplicate_calendar() -> None:
+    """Calendar event is not notified twice."""
+    client = MagicMock()
+    app = _make_app(client)
+    app._prev_imsg_unread = 0
+    app._prev_gmail_unread = 0
+    app._prev_github_unread = 0
+
+    fired: list[tuple] = []
+    app._fire_notification = lambda title, body, source: fired.append((title, body, source))
+
+    soon = datetime.now() + timedelta(minutes=5)
+    events = [
+        {
+            "event_id": "ev-dup",
+            "summary": "Meeting",
+            "start": soon.isoformat(),
+            "end": (soon + timedelta(hours=1)).isoformat(),
+        }
+    ]
+    app._check_and_fire_notifications([], [], events)
+    app._check_and_fire_notifications([], [], events)
+    assert len(fired) == 1  # only fired once

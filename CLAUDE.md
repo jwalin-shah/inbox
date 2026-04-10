@@ -65,6 +65,9 @@ POST /llm/warmup
 GET  /accounts
 POST /accounts/add
 POST /accounts/reauth  {"email": "..."}
+GET  /notifications/config
+PUT  /notifications/config  {enabled, sources, quiet_hours}
+POST /notifications/test  {"title", "body"}
 ```
 
 ## Key bindings (TUI)
