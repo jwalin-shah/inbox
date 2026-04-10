@@ -207,7 +207,9 @@ class ServerState:
         self.drive_services: dict[str, object] = {}
         self.conv_cache: dict[str, Contact] = {}  # "source:id" -> Contact
         self.events_cache: list[CalendarEvent] = []
-        self.ambient: AmbientService = AmbientService(on_note=lambda raw, summary: None)
+        self.ambient: AmbientService = AmbientService(
+            on_note=lambda raw, summary: ambient_notes.save_note(raw, summary)
+        )
         self.dictation: DictationService = DictationService()
 
 

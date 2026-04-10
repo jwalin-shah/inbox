@@ -558,3 +558,42 @@ class TestAutocomplete:
         assert call_args[0][2] == 32
         assert call_args[0][3] == 0.5
         assert call_args[0][4] == "complete"
+
+
+# ── Ambient Note Callback Wiring ────────────────────────────────────────────
+
+
+class TestAmbientNoteCallback:
+    def test_server_state_ambient_callback_calls_save_note(self):
+        """Verify that ServerState wires AmbientService on_note to ambient_notes.save_note."""
+        with patch("inbox_server.ambient_notes.save_note") as mock_save:
+            import inbox_server
+
+            fresh_state = inbox_server.ServerState()
+            # Invoke the callback that AmbientService was initialized with
+            fresh_state.ambient._on_note("raw transcript text", "summary of note")
+            mock_save.assert_called_once_with("raw transcript text", "summary of note")
+
+    def test_server_state_ambient_callback_handles_none_summary(self):
+        """Verify callback works when summary is None."""
+        with patch("inbox_server.ambient_notes.save_note") as mock_save:
+            import inbox_server
+
+            fresh_state = inbox_server.ServerState()
+            fresh_state.ambient._on_note("raw transcript only", None)
+            mock_save.assert_called_once_with("raw transcript only", None)
+
+    def test_ambient_callback_is_not_noop(self):
+        """Verify the callback is not a no-op lambda."""
+        import inbox_server
+
+        fresh_state = inbox_server.ServerState()
+        # The old code had: on_note=lambda raw, summary: None
+        # A real callback should not just return None silently
+        callback = fresh_state.ambient._on_note
+        # Verify it's not a trivial lambda by checking it references save_note
+        assert callback is not None
+        # Call it with mock to ensure it actually does something
+        with patch("inbox_server.ambient_notes.save_note") as mock_save:
+            callback("test", "test summary")
+            assert mock_save.called
