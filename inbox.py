@@ -20,6 +20,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.widgets import (
     Footer,
     Header,
@@ -32,6 +33,7 @@ from textual.widgets import (
     Tabs,
 )
 
+from command_palette import CommandDict, build_commands, filter_commands, resolve_nlp
 from inbox_client import InboxClient
 
 DEFAULT_POLL_INTERVAL = 10.0
@@ -511,6 +513,125 @@ class DetailView(Static):
         yield Static(t)
 
 
+# ── Command Palette ───────────────────────────────────────────────────────────
+
+
+class CommandPaletteScreen(ModalScreen[CommandDict | None]):
+    """Modal overlay for the command palette (Ctrl+P)."""
+
+    DEFAULT_CSS = """
+    CommandPaletteScreen {
+        align: center middle;
+    }
+    #palette-container {
+        width: 60;
+        height: auto;
+        max-height: 24;
+        background: $surface;
+        border: solid $primary;
+        padding: 0;
+    }
+    #palette-input {
+        width: 1fr;
+        border-bottom: solid $primary-darken-2;
+    }
+    #palette-list {
+        height: auto;
+        max-height: 18;
+    }
+    #palette-footer {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, commands: list[CommandDict], llm_available: bool = False) -> None:
+        super().__init__()
+        self._commands = commands
+        self._filtered: list[CommandDict] = list(commands)
+        self._llm_available = llm_available
+        self._nlp_hint: str = ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="palette-container"):
+            yield Input(placeholder="Type a command…", id="palette-input")
+            yield ListView(id="palette-list")
+            yield Static(self._footer_text(), id="palette-footer")
+
+    def _footer_text(self) -> str:
+        if self._nlp_hint:
+            return self._nlp_hint
+        if not self._llm_available:
+            return "↑↓ navigate · Enter execute · Esc close · (LLM unavailable)"
+        return "↑↓ navigate · Enter execute · Esc close · NLP enabled"
+
+    def on_mount(self) -> None:
+        self._rebuild_list(self._commands)
+        self.query_one("#palette-input", Input).focus()
+
+    def _rebuild_list(self, cmds: list[CommandDict]) -> None:
+        lv = self.query_one("#palette-list", ListView)
+        lv.clear()
+        for cmd in cmds:
+            t = Text()
+            t.append(f"[{cmd['category']}] ", style="dim cyan")
+            t.append(cmd["name"], style="bold white")
+            if cmd["description"]:
+                t.append(f"  {cmd['description']}", style="dim")
+            item = ListItem(Static(t))
+            item.data = cmd  # type: ignore[attr-defined]
+            lv.append(item)
+        if cmds:
+            lv.index = 0
+
+    @on(Input.Changed, "#palette-input")
+    def on_query_changed(self, event: Input.Changed) -> None:
+        query = event.value
+        self._filtered = filter_commands(query, self._commands)
+        self._nlp_hint = ""
+        self._rebuild_list(self._filtered)
+        self.query_one("#palette-footer", Static).update(self._footer_text())
+
+    @on(Input.Submitted, "#palette-input")
+    def on_query_submitted(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+
+        # If there's a selected item in the list, run it
+        lv = self.query_one("#palette-list", ListView)
+        if lv.highlighted_child is not None:
+            item = lv.highlighted_child
+            cmd = getattr(item, "data", None)
+            if cmd is not None:
+                self.dismiss(cmd)
+                return
+
+        # If query matches nothing directly, try NLP
+        if query and not self._filtered:
+            self._try_nlp(query)
+        elif self._filtered:
+            self.dismiss(self._filtered[0])
+
+    def _try_nlp(self, query: str) -> None:
+        matched, msg = resolve_nlp(query, self._commands)
+        if matched is not None:
+            self.dismiss(matched)
+        else:
+            self._nlp_hint = msg
+            self.query_one("#palette-footer", Static).update(msg)
+
+    @on(ListView.Selected, "#palette-list")
+    def on_list_selected(self, event: ListView.Selected) -> None:
+        item = event.item
+        cmd = getattr(item, "data", None)
+        if cmd is not None:
+            self.dismiss(cmd)
+
+
 # ── Main App ─────────────────────────────────────────────────────────────────
 
 
@@ -548,6 +669,7 @@ class InboxApp(App):
 
     BINDINGS = [
         Binding("ctrl+r", "refresh", "Refresh"),
+        Binding("ctrl+p", "command_palette", "Commands"),
         Binding("ctrl+1", "filter_all", "All"),
         Binding("ctrl+2", "filter_imsg", "iMessage"),
         Binding("ctrl+3", "filter_gmail", "Gmail"),
@@ -1047,6 +1169,28 @@ class InboxApp(App):
 
     def action_filter_drv(self) -> None:
         self.query_one("#tabs", Tabs).active = "tab-drv"
+
+    # ── Command palette ──────────────────────────────────────────────────
+
+    def action_command_palette(self) -> None:
+        """Open the command palette (Ctrl+P)."""
+        try:
+            from services import llm_is_loaded
+
+            llm_avail = llm_is_loaded()
+        except Exception:
+            llm_avail = False
+        commands = build_commands(self)
+        self.push_screen(
+            CommandPaletteScreen(commands, llm_available=llm_avail), self._on_palette_result
+        )
+
+    def _on_palette_result(self, result: CommandDict | None) -> None:
+        if result is not None:
+            try:
+                result["action"]()
+            except Exception as exc:
+                self.query_one("#status", Static).update(f"[red]Command failed: {exc}[/]")
 
     def action_toggle_ambient(self) -> None:
         """Toggle ambient listening on/off."""

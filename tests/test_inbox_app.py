@@ -2643,3 +2643,89 @@ def test_drive_key_handlers_ignored_when_compose_focused() -> None:
             client.drive_download.assert_not_called()
 
     asyncio.run(runner())
+
+
+# ── Command palette integration (Textual Pilot) ─────────────────────────────
+
+
+def test_command_palette_ctrl_p_opens_screen() -> None:
+    from inbox import CommandPaletteScreen
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+p")
+            await pilot.pause(0.1)
+            screens = app.screen_stack
+            assert any(isinstance(s, CommandPaletteScreen) for s in screens)
+
+    asyncio.run(runner())
+
+
+def test_command_palette_escape_closes_screen() -> None:
+    from inbox import CommandPaletteScreen
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+p")
+            await pilot.pause(0.1)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            screens = app.screen_stack
+            assert not any(isinstance(s, CommandPaletteScreen) for s in screens)
+
+    asyncio.run(runner())
+
+
+def test_command_palette_typing_filters_list() -> None:
+    from textual.widgets import ListView
+
+    from inbox import CommandPaletteScreen
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+p")
+            await pilot.pause(0.1)
+            screens = app.screen_stack
+            palette = next((s for s in screens if isinstance(s, CommandPaletteScreen)), None)
+            assert palette is not None
+
+            await pilot.press("g", "i", "t", "h", "u", "b")
+            await pilot.pause(0.1)
+
+            lv = palette.query_one("#palette-list", ListView)
+            assert len(lv) >= 1
+
+    asyncio.run(runner())
+
+
+def test_command_palette_enter_with_match_closes_screen() -> None:
+    from inbox import CommandPaletteScreen
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+p")
+            await pilot.pause(0.1)
+            await pilot.press("r", "e", "f", "r", "e", "s", "h")
+            await pilot.pause(0.1)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            screens = app.screen_stack
+            assert not any(isinstance(s, CommandPaletteScreen) for s in screens)
+
+    asyncio.run(runner())
