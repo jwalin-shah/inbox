@@ -33,6 +33,28 @@ The Reminders tab is fully implemented in `inbox.py` with backend support in `in
 - `active_reminder: dict | None` — currently selected reminder
 - All preserved across tab switches
 
+### Tab State Preservation
+
+When switching between tabs, the TUI preserves per-tab state via `_tab_state: dict[str, dict]`:
+- **Messaging tabs** (all/imessage/gmail): saves `active_conv` and `messages` (cached message list)
+- **Calendar tab**: saves `active_event`
+- **Reminders tab**: saves `active_reminder` and `rem_list_filter`
+
+On tab switch:
+1. `_save_tab_state()` saves the current tab's state before switching
+2. `_render_sidebar()` rebuilds the sidebar for the new tab
+3. `_restore_tab_state()` restores the previously saved state (active selection, messages, detail)
+4. `_restore_sidebar_selection()` highlights the previously selected item in the ListView
+
+If a tab has no saved state (e.g., first visit), `_restore_tab_state` is a no-op — it doesn't clear existing content.
+
+### AppleScript Retry Logic
+
+All reminder mutations (`reminder_complete`, `reminder_create`, `reminder_edit`, `reminder_delete`) use `_run_applescript_with_retry()` which:
+- Retries up to `APPLESCRIPT_RETRIES` (2) times with `APPLESCRIPT_RETRY_DELAY` (1.0s) delay
+- Catches both AppleScript "fail" returns and subprocess exceptions
+- Logs debug messages on retry attempts and logs failures via `_log_service_failure` after all retries exhausted
+
 ### Empty State
 
 When no reminders exist (or filter yields empty), shows "All caught up! 🎉" message.
