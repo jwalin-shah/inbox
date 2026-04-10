@@ -47,7 +47,7 @@ GET  /github/notifications?all=false
 POST /github/notifications/{id}/read
 POST /github/notifications/read-all
 GET  /github/pulls?repo=owner/name
-GET  /drive/files?q=...&shared=false&limit=20&account=...
+GET  /drive/files?q=...&shared=false&limit=20&account=...&folder_id=...
 GET  /drive/files/{id}?account=...
 POST /drive/upload  (multipart: file + folder_id + account)
 POST /drive/folder  {"name", "parent_id", "account"}
@@ -69,12 +69,16 @@ POST /accounts/reauth  {"email": "..."}
 
 ## Key bindings (TUI)
 - **Ctrl+1-5** — switch tabs: All, iMessage, Gmail, Calendar, Notes
+- **Ctrl+6** — toggle ambient listening (start/stop)
+- **Ctrl+7** — switch to GitHub tab
 - **Ctrl+R** — refresh all data
 - **Ctrl+A** — add Google account (opens browser)
 - **Ctrl+Shift+A** — re-auth current account (new scopes)
 - **Ctrl+N** — new calendar event
 - **Ctrl+D** — delete selected event
-- **Ctrl+6** — toggle ambient listening (start/stop)
+- **r** — mark selected GitHub notification as read (GitHub tab only)
+- **Shift+R** — mark all GitHub notifications as read (GitHub tab only)
+- **o** — open notification URL in browser (GitHub tab only)
 - **Tab** — accept autocomplete suggestion (in compose input)
 - **Ctrl+Q** — quit
 
@@ -83,10 +87,11 @@ POST /accounts/reauth  {"email": "..."}
 - Upload files, create folders, list/search/delete files
 - Multi-account: queries all authed accounts, routes by `account` param
 - Delete = trash (recoverable), not permanent delete
+- Supports folder filtering via `folder_id` parameter
 
 ## GitHub
 - Personal access token in `github_token.txt` (needs `notifications` + `repo` scopes)
-- Notifications: list, mark-read individual or all
+- Notifications: displayed in TUI with type icons (🔀 PR review, 🐛 issue, 📦 release, 🔔 other) plus unread indicator; mark-read individual or all
 - Pull requests: searches for PRs requesting review from the authed user
 - Token file is gitignored
 
@@ -126,6 +131,7 @@ POST /accounts/reauth  {"email": "..."}
 - **Optimistic send** — message appears in TUI immediately, confirmed in background
 - **Notes via SQLite** for listing, AppleScript for full body (protobuf parsing is too complex)
 - **Flattened module structure** — LLM and audio logic integrated into main services rather than nested directories
+- **Tab state preservation** — switching between tabs preserves active conversation/event selection so returning to a tab shows the same context
 
 ## Data sources
 - **iMessage**: `~/Library/Messages/chat.db` (read-only SQLite)

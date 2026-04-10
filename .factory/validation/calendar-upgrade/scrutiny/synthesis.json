@@ -1,0 +1,19 @@
+{
+  "milestone": "calendar-upgrade",
+  "round": 1,
+  "status": "partial",
+  "validatorsRun": {
+    "test": {"passed": true, "command": "uv run pytest -x -q", "exitCode": 0},
+    "typecheck": {"passed": true, "command": "uv run pyright", "exitCode": 0},
+    "lint": {"passed": true, "command": "uv run ruff check .", "exitCode": 0}
+  },
+  "reviewsSummary": {"total": 1, "passed": 1, "failed": 0, "failedFeatures": []},
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null,
+  "notes": [
+    "Round 1 covers api-enhancements + jump-to-date only; remaining features queued for round 2."
+  ]
+}

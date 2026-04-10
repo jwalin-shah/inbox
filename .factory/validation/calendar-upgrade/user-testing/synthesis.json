@@ -1,0 +1,34 @@
+{
+  "milestone": "calendar-upgrade",
+  "round": 1,
+  "status": "partial",
+  "assertionsSummary": {
+    "total": 17,
+    "passed": 7,
+    "failed": 0,
+    "blocked": 10
+  },
+  "passedAssertions": [
+    "VAL-CAL-013", "VAL-CAL-014", "VAL-CAL-015",
+    "VAL-CAL-024", "VAL-CAL-026", "VAL-CAL-030",
+    "VAL-CAL-032-partial"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [
+    "VAL-CAL-001", "VAL-CAL-002", "VAL-CAL-003", "VAL-CAL-004",
+    "VAL-CAL-005", "VAL-CAL-006", "VAL-CAL-007", "VAL-CAL-008",
+    "VAL-CAL-009", "VAL-CAL-010", "VAL-CAL-011", "VAL-CAL-012"
+  ],
+  "validatorsRun": {
+    "test": {"passed": true, "command": "uv run pytest -x -q", "exitCode": 0, "observation": "523 passed"},
+    "typecheck": {"passed": true, "command": "uv run pyright", "exitCode": 0, "observation": "0 errors"},
+    "lint": {"passed": true, "command": "uv run ruff check .", "exitCode": 0, "observation": "All checks passed"}
+  },
+  "appliedUpdates": [],
+  "previousRound": null,
+  "notes": [
+    "Scope split: api-enhancements (range query + attendees) + jump-to-date (Ctrl+G) shipped in this round.",
+    "Remaining calendar-upgrade features (date-navigation arrows, week/agenda views, inline event editing, multiday events) deferred to round 2.",
+    "Tests in tests/test_calendar.py cover range query, attendees extraction, and jump-to-date parsing."
+  ]
+}

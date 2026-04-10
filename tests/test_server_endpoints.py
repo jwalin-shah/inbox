@@ -329,6 +329,59 @@ class TestDriveEndpoints:
         resp = c.get("/drive/files/f1")
         assert resp.status_code == 404
 
+    def test_list_files_with_folder_id(self, client):
+        c, state = client
+        from services import DriveFile
+
+        mock_svc = MagicMock()
+        state.drive_services = {"test@gmail.com": mock_svc}
+        mock_files = [
+            DriveFile(
+                id="f2",
+                name="readme.md",
+                mime_type="text/markdown",
+                modified=datetime(2026, 4, 9),
+                size=256,
+            )
+        ]
+        with patch("inbox_server.drive_files", return_value=mock_files) as mock_fn:
+            resp = c.get("/drive/files", params={"folder_id": "folder-abc"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "readme.md"
+        # Verify folder_id was passed through
+        mock_fn.assert_called_once()
+        call_kwargs = mock_fn.call_args
+        assert call_kwargs.kwargs.get("folder_id") == "folder-abc"
+
+    def test_download_file(self, client):
+        c, state = client
+        mock_svc = MagicMock()
+        state.drive_services = {"test@gmail.com": mock_svc}
+        with patch(
+            "inbox_server.drive_download",
+            return_value=(b"file content here", "application/pdf"),
+        ):
+            resp = c.get("/drive/files/f1/download")
+        assert resp.status_code == 200
+        assert resp.content == b"file content here"
+        assert resp.headers["content-type"] == "application/pdf"
+
+    def test_download_file_not_found(self, client):
+        c, state = client
+        mock_svc = MagicMock()
+        state.drive_services = {"test@gmail.com": mock_svc}
+        with patch("inbox_server.drive_download", return_value=None):
+            resp = c.get("/drive/files/f1/download")
+        assert resp.status_code == 404
+
+    def test_download_no_drive_account(self, client):
+        c, state = client
+        state.drive_services = {}
+        resp = c.get("/drive/files/f1/download")
+        assert resp.status_code == 404
+
 
 class TestHealthEndpoint:
     def test_health_includes_new_services(self, client):

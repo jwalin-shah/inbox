@@ -218,6 +218,35 @@ class TestClientDrive:
         client._client.delete.return_value = _mock_response({"ok": True})
         assert client.drive_delete("f1") is True
 
+    def test_drive_files_with_folder_id(self, client):
+        client._client.get.return_value = _mock_response([{"name": "child.txt"}])
+        result = client.drive_files(folder_id="folder-abc")
+        assert result[0]["name"] == "child.txt"
+        call_args = client._client.get.call_args
+        assert call_args[1]["params"]["folder_id"] == "folder-abc"
+
+    def test_drive_download(self, client):
+        resp = MagicMock(spec=httpx.Response)
+        resp.content = b"binary file data"
+        resp.raise_for_status = MagicMock()
+        client._client.get.return_value = resp
+        result = client.drive_download("f1")
+        assert result == b"binary file data"
+        client._client.get.assert_called_once_with(
+            "/drive/files/f1/download",
+            params={"account": ""},
+            timeout=120,
+        )
+
+    def test_drive_download_with_account(self, client):
+        resp = MagicMock(spec=httpx.Response)
+        resp.content = b"data"
+        resp.raise_for_status = MagicMock()
+        client._client.get.return_value = resp
+        client.drive_download("f1", account="user@gmail.com")
+        call_args = client._client.get.call_args
+        assert call_args[1]["params"]["account"] == "user@gmail.com"
+
 
 # ── Ambient / Dictation / LLM ──────────────────────────────────────────────
 

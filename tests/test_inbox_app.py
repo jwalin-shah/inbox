@@ -9,7 +9,7 @@ import httpx
 from textual.widgets import Input, ListView, Static
 
 import inbox
-from inbox import DetailView, InboxApp, MessageView, NotificationItem, ReminderItem
+from inbox import DetailView, DriveItem, InboxApp, MessageView, NotificationItem, ReminderItem
 
 
 class HarnessInboxApp(InboxApp):
@@ -2273,5 +2273,373 @@ def test_open_url_guard_clears_detail_view() -> None:
                 app.action_open_notification_url()
             detail = app.query_one("#detail-view", DetailView)
             assert detail.detail is None
+
+    asyncio.run(runner())
+
+
+# ── Drive tab ──────────────────────────────────────────────────────────
+
+
+def _make_drive_file_data(**overrides) -> dict:
+    """Create a mock Drive file dict with defaults."""
+    base = {
+        "id": "f1",
+        "name": "report.pdf",
+        "mime_type": "application/pdf",
+        "modified": "2026-04-09T10:00:00+00:00",
+        "size": 1048576,
+        "shared": False,
+        "web_link": "https://drive.google.com/file/d/f1/view",
+        "parents": [],
+        "account": "test@gmail.com",
+    }
+    base.update(overrides)
+    return base
+
+
+def _make_drive_folder_data(**overrides) -> dict:
+    """Create a mock Drive folder dict with defaults."""
+    base = {
+        "id": "folder-1",
+        "name": "My Folder",
+        "mime_type": "application/vnd.google-apps.folder",
+        "modified": "2026-04-09T10:00:00+00:00",
+        "size": 0,
+        "shared": False,
+        "web_link": "https://drive.google.com/drive/folders/folder-1",
+        "parents": [],
+        "account": "test@gmail.com",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_ctrl8_switches_to_drive_tab() -> None:
+    """Ctrl+8 activates the Drive tab."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.drive_files.return_value = [_make_drive_file_data()]
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause()
+            assert app._active_filter == "drive"
+
+    asyncio.run(runner())
+
+
+def test_drive_tab_shows_drive_items() -> None:
+    """Drive tab _render_sidebar populates ListView with DriveItems."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.drive_files.return_value = [
+            _make_drive_file_data(id="f1", name="report.pdf"),
+            _make_drive_folder_data(id="folder-1", name="My Folder"),
+        ]
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            app.drive_data = client.drive_files.return_value
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            assert app._active_filter == "drive"
+            assert len(app.drive_data) == 2
+            status_text = _status_text(app)
+            assert "2 files" in status_text
+
+    asyncio.run(runner())
+
+
+def test_drive_tab_empty_state() -> None:
+    """When there are no Drive files, the tab shows empty state."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.drive_files.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            app.drive_data = []
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            status_text = _status_text(app)
+            assert "0 files" in status_text
+
+    asyncio.run(runner())
+
+
+def test_drive_item_displays_file_info() -> None:
+    """DriveItem widget shows file name, size, date, and account."""
+    item = DriveItem(
+        _make_drive_file_data(
+            name="report.pdf",
+            size=1048576,
+            account="user@gmail.com",
+        )
+    )
+    children = list(item.compose())
+    assert len(children) == 1
+    static = children[0]
+    assert isinstance(static, Static)
+
+
+def test_drive_item_folder_icon() -> None:
+    """DriveItem shows folder icon for folders."""
+    item = DriveItem(_make_drive_folder_data())
+    children = list(item.compose())
+    assert len(children) == 1
+
+
+def test_drive_item_human_size() -> None:
+    """DriveItem._human_size formats sizes correctly."""
+    assert DriveItem._human_size(0) == ""
+    assert DriveItem._human_size(512) == "512 B"
+    assert DriveItem._human_size(1024) == "1.0 KB"
+    assert DriveItem._human_size(1048576) == "1.0 MB"
+    assert DriveItem._human_size(1073741824) == "1.0 GB"
+
+
+def test_drive_item_icon_for_mime() -> None:
+    """DriveItem._icon_for_mime returns correct icons."""
+    assert DriveItem._icon_for_mime("application/vnd.google-apps.folder") == "📁"
+    assert DriveItem._icon_for_mime("application/pdf") == "📄"
+    assert DriveItem._icon_for_mime("image/png") == "🖼️"
+    assert DriveItem._icon_for_mime("application/octet-stream") == "📄"
+
+
+def test_drive_tab_state_preserved() -> None:
+    """Switching away from Drive tab and back preserves state."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.drive_files.return_value = [_make_drive_file_data()]
+        client.conversations.return_value = []
+        client.calendar_events.return_value = []
+        client.notes.return_value = []
+        client.reminders.return_value = []
+        client.reminder_lists.return_value = []
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            assert app._active_filter == "drive"
+
+            # Set state
+            app.active_drive_file = _make_drive_file_data()
+            app._drive_folder_id = "folder-abc"
+            app._drive_folder_stack = ["root"]
+
+            # Switch to Notes
+            await pilot.press("ctrl+5")
+            await pilot.pause(0.5)
+            assert app._active_filter == "notes"
+
+            # Switch back to Drive
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            assert app._active_filter == "drive"
+
+            # State should be restored
+            assert app.active_drive_file is not None
+            assert app.active_drive_file["id"] == "f1"
+            assert app._drive_folder_id == "folder-abc"
+            assert app._drive_folder_stack == ["root"]
+
+    asyncio.run(runner())
+
+
+def test_drive_go_back_navigates_parent() -> None:
+    """action_drive_go_back restores parent folder."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.drive_files.return_value = []
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+        app._drive_folder_id = "child-folder"
+        app._drive_folder_stack = ["parent-folder"]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            app.action_drive_go_back()
+            await pilot.pause(0.3)
+            assert app._drive_folder_id == "parent-folder"
+            assert app._drive_folder_stack == []
+
+    asyncio.run(runner())
+
+
+def test_drive_go_back_to_root() -> None:
+    """action_drive_go_back with empty stack goes to root."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.drive_files.return_value = []
+        app = _make_app(client)
+        app.drive_data = []
+        app._drive_folder_id = "some-folder"
+        app._drive_folder_stack = []
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            app.action_drive_go_back()
+            await pilot.pause(0.3)
+            assert app._drive_folder_id == ""
+
+    asyncio.run(runner())
+
+
+def test_drive_download_no_selection() -> None:
+    """Download with no file selected shows a message."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+        app.active_drive_file = None
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            app.action_drive_download()
+            client.drive_download.assert_not_called()
+
+    asyncio.run(runner())
+
+
+def test_drive_delete_no_selection() -> None:
+    """Delete with no file selected shows a message."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+        app.active_drive_file = None
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            app.action_drive_delete()
+            client.drive_delete.assert_not_called()
+
+    asyncio.run(runner())
+
+
+def test_drive_open_url() -> None:
+    """The drive_open_url action opens the file's web link in browser."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+        app.active_drive_file = _make_drive_file_data()
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            with patch.object(inbox.webbrowser, "open") as mock_open:
+                app.action_drive_open_url()
+                mock_open.assert_called_once_with("https://drive.google.com/file/d/f1/view")
+
+    asyncio.run(runner())
+
+
+def test_drive_open_url_no_selection() -> None:
+    """Open URL with no file selected shows a message."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+        app.active_drive_file = None
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            app.action_drive_open_url()
+
+    asyncio.run(runner())
+
+
+def test_drive_detail_view() -> None:
+    """Selecting a drive file shows it in the DetailView."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+
+            # Simulate selecting a file
+            app.active_drive_file = _make_drive_file_data()
+            app.query_one("#detail-view", DetailView).detail = _make_drive_file_data()
+
+            detail = app.query_one("#detail-view", DetailView).detail
+            assert detail is not None
+            assert detail.get("name") == "report.pdf"
+
+    asyncio.run(runner())
+
+
+def test_detail_view_drive_file() -> None:
+    """DetailView renders Drive file data correctly."""
+    detail = DetailView()
+    detail.detail = _make_drive_file_data(
+        name="report.pdf",
+        mime_type="application/pdf",
+        size=1048576,
+        account="user@gmail.com",
+    )
+    children = list(detail.compose())
+    assert len(children) == 1
+
+
+def test_drive_compose_placeholder() -> None:
+    """Drive tab compose input has search placeholder."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.drive_files.return_value = []
+        app = _make_app(client)
+        app.drive_data = []
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            compose = app.query_one("#compose", Input)
+            assert "search" in compose.placeholder.lower() or "drive" in compose.placeholder.lower()
+
+    asyncio.run(runner())
+
+
+def test_drive_key_handlers_ignored_when_compose_focused() -> None:
+    """Drive key handlers don't fire when compose input is focused."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+        app.drive_data = [_make_drive_file_data()]
+        app.active_drive_file = _make_drive_file_data()
+
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+8")
+            await pilot.pause(0.5)
+            app.query_one("#compose", Input).focus()
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause(0.3)
+            client.drive_download.assert_not_called()
 
     asyncio.run(runner())

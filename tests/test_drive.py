@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from services import drive_create_folder, drive_delete, drive_files, drive_get, drive_upload
+from services import (
+    drive_create_folder,
+    drive_delete,
+    drive_download,
+    drive_files,
+    drive_get,
+    drive_upload,
+)
 
 
 def _mock_file_item(**overrides):
@@ -164,3 +171,65 @@ class TestDriveGet:
         svc.files().get().execute.side_effect = Exception("not found")
 
         assert drive_get(svc, "bad-id") is None
+
+
+class TestDriveFilesWithFolderId:
+    def test_passes_folder_id_to_query(self, mock_drive_service):
+        svc = mock_drive_service
+        svc.files().list().execute.return_value = {"files": [_mock_file_item()]}
+
+        files = drive_files(svc, folder_id="folder-abc")
+        assert len(files) == 1
+        svc.files().list.assert_called()
+
+    def test_folder_id_empty_does_not_filter(self, mock_drive_service):
+        svc = mock_drive_service
+        svc.files().list().execute.return_value = {"files": []}
+
+        drive_files(svc, folder_id="")
+        svc.files().list.assert_called()
+
+
+class TestDriveDownload:
+    def test_downloads_regular_file(self, mock_drive_service):
+        svc = mock_drive_service
+        svc.files().get().execute.return_value = {
+            "mimeType": "application/pdf",
+            "name": "report.pdf",
+        }
+        # Mock get_media to return a request object
+        mock_request = MagicMock()
+        svc.files().get_media.return_value = mock_request
+
+        with patch("googleapiclient.http.MediaIoBaseDownload") as mock_dl:
+            instance = mock_dl.return_value
+            instance.next_chunk.return_value = (None, True)
+            result = drive_download(svc, "file-123")
+
+        assert result is not None
+        content, mime = result
+        assert mime == "application/pdf"
+
+    def test_exports_google_doc_as_pdf(self, mock_drive_service):
+        svc = mock_drive_service
+        svc.files().get().execute.return_value = {
+            "mimeType": "application/vnd.google-apps.document",
+            "name": "My Doc",
+        }
+        mock_request = MagicMock()
+        svc.files().export_media.return_value = mock_request
+
+        with patch("googleapiclient.http.MediaIoBaseDownload") as mock_dl:
+            instance = mock_dl.return_value
+            instance.next_chunk.return_value = (None, True)
+            result = drive_download(svc, "doc-123")
+
+        assert result is not None
+        _, mime = result
+        assert mime == "application/pdf"
+
+    def test_returns_none_on_error(self, mock_drive_service):
+        svc = mock_drive_service
+        svc.files().get().execute.side_effect = Exception("not found")
+
+        assert drive_download(svc, "bad-id") is None
