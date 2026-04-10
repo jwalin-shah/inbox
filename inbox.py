@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import time
 import webbrowser
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import httpx
 from rich.align import Align
@@ -72,6 +72,8 @@ class ConversationItem(ListItem):
 
         if source == "gmail":
             snippet = d.get("snippet", "")
+            if d.get("_starred"):
+                t.append("★ ", style="bold yellow")
             if d.get("unread"):
                 t.append(snippet[:40] or "(no subject)", style="bold white")
                 t.append(" ●", style="bold yellow")
@@ -192,6 +194,71 @@ class ReminderItem(ListItem):
         yield Static(t)
 
 
+class DriveItem(ListItem):
+    """Widget for a Google Drive file/folder in the sidebar."""
+
+    _MIME_ICONS: dict[str, str] = {
+        "application/vnd.google-apps.folder": "📁",
+        "application/vnd.google-apps.document": "📝",
+        "application/vnd.google-apps.spreadsheet": "📊",
+        "application/vnd.google-apps.presentation": "📽️",
+        "application/pdf": "📄",
+        "image/": "🖼️",
+        "video/": "🎬",
+        "audio/": "🎵",
+        "text/": "📄",
+    }
+
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+
+    @staticmethod
+    def _icon_for_mime(mime: str) -> str:
+        if mime in DriveItem._MIME_ICONS:
+            return DriveItem._MIME_ICONS[mime]
+        for prefix, icon in DriveItem._MIME_ICONS.items():
+            if "/" in prefix and mime.startswith(prefix):
+                return icon
+        return "📄"
+
+    @staticmethod
+    def _human_size(size: int) -> str:
+        if size <= 0:
+            return ""
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024:
+                return f"{size:.1f} {unit}" if unit != "B" else f"{size} {unit}"
+            size /= 1024  # type: ignore[assignment]
+        return f"{size:.1f} TB"
+
+    def compose(self) -> ComposeResult:
+        d = self.data
+        mime = d.get("mime_type", "")
+        t = Text()
+        t.append(f"{self._icon_for_mime(mime)} ", style="dim")
+        t.append(d.get("name", "Untitled"), style="bold white")
+
+        line2_parts: list[str] = []
+        mod = d.get("modified", "")
+        if mod:
+            try:
+                dt = datetime.fromisoformat(mod)
+                line2_parts.append(dt.strftime("%b %d %H:%M"))
+            except (ValueError, TypeError):
+                pass
+        size = d.get("size", 0)
+        human = self._human_size(size)
+        if human:
+            line2_parts.append(human)
+        acct = d.get("account", "")
+        if acct:
+            line2_parts.append(acct.split("@")[0])
+        if line2_parts:
+            t.append(f"\n  {' · '.join(line2_parts)}", style="dim")
+        yield Static(t)
+
+
 class NotificationItem(ListItem):
     def __init__(self, data: dict) -> None:
         super().__init__()
@@ -269,6 +336,22 @@ class MessageView(Static):
                 ts = datetime.fromisoformat(msg["ts"]).strftime("%H:%M")
             except (ValueError, KeyError):
                 ts = ""
+            # Append attachment metadata if present
+            atts = msg.get("attachments", [])
+            if atts:
+                att_parts = []
+                for att in atts:
+                    fname = att.get("filename", "file")
+                    size = att.get("size", 0)
+                    if size >= 1024 * 1024:
+                        size_str = f"{size / (1024 * 1024):.1f} MB"
+                    elif size >= 1024:
+                        size_str = f"{size / 1024:.1f} KB"
+                    else:
+                        size_str = f"{size} B"
+                    att_parts.append(f"📎 {fname} ({size_str})")
+                body = body + "\n" + "\n".join(att_parts)
+
             body_text = Text(body)
             is_me = msg.get("is_me", False)
             if is_me:
@@ -331,6 +414,24 @@ class DetailView(Static):
                 t.append(f"\n📍 {d['location']}\n", style="green")
             if d.get("description"):
                 t.append(f"\n{d['description']}\n", style="white")
+            # Attendees
+            attendees = d.get("attendees", [])
+            if attendees:
+                t.append("\n👥 Attendees\n", style="bold")
+                for att in attendees:
+                    name = att.get("name") or att.get("email", "?")
+                    email = att.get("email", "")
+                    status = att.get("responseStatus", "")
+                    icon = {
+                        "accepted": "✅",
+                        "declined": "❌",
+                        "tentative": "❓",
+                        "needsAction": "⏳",
+                    }.get(status, "•")
+                    label = name
+                    if email and email != name:
+                        label += f" ({email})"
+                    t.append(f"  {icon} {label}\n", style="white")
             if d.get("account"):
                 t.append(f"\n[{d['account']}]", style="dim italic")
 
@@ -460,6 +561,7 @@ class InboxApp(App):
         Binding("ctrl+shift+a", "reauth_account", "Re-auth"),
         Binding("ctrl+n", "new_event", "New Event"),
         Binding("ctrl+d", "delete_event", "Delete Event"),
+        Binding("ctrl+g", "jump_to_date", "Go to Date"),
         Binding("escape", "clear_compose", "Clear"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
@@ -479,20 +581,41 @@ class InboxApp(App):
         self.reminders_data: list[dict] = []
         self.reminder_lists: list[dict] = []
         self.github_data: list[dict] = []
+        self.drive_data: list[dict] = []
         self.active_conv: dict | None = None
         self.active_event: dict | None = None
         self.active_reminder: dict | None = None
         self.active_notification: dict | None = None
+        self.active_drive_file: dict | None = None
         self._active_filter: str = "all"
         self._rem_list_filter: str = ""  # "" = all lists
         self._editing_reminder: dict | None = None
+        self._drive_folder_id: str = ""
+        self._drive_folder_stack: list[str] = []
+        self._drive_upload_mode: bool = False
+        self._drive_new_folder_mode: bool = False
+        self._editing_event: dict | None = None
+        self._editing_event_field: str = ""  # current field being edited
         self._poll_timer = None
         self._client_closed = False
         self._poll_had_error = False
         self._consecutive_errors = 0
+        # Calendar state
+        self._calendar_date: date = date.today()
+        self._calendar_view_mode: str = "day"  # "day" | "week" | "agenda"
+        self._jump_to_date_mode: bool = False
         # Per-tab state: stores selected conversation, messages, detail, etc.
         # keyed by filter name ("all", "imessage", "gmail", "calendar", etc.)
         self._tab_state: dict[str, dict] = {}
+        # Gmail compose state
+        self._gmail_compose_mode: str = ""  # "" | "to" | "subject" | "body"
+        self._gmail_compose_to: str = ""
+        self._gmail_compose_subject: str = ""
+        # Gmail label browsing
+        self._gmail_label_filter: str = "INBOX"
+        self._gmail_labels: list[dict] = []
+        # Gmail starred conversations (local cache for ★ display)
+        self._gmail_starred: set[str] = set()
 
     def _update_github_badge(self) -> None:
         """Update the GitHub tab label with the unread count badge.
@@ -561,6 +684,8 @@ class InboxApp(App):
             state["messages"] = list(msg_view.messages) if msg_view.messages else []
         elif tab_name == "calendar":
             state["active_event"] = self.active_event
+            state["calendar_date"] = self._calendar_date
+            state["calendar_view_mode"] = self._calendar_view_mode
             state["active_conv"] = None
         elif tab_name == "notes":
             # Note detail is in DetailView, already handled via detail reactive
@@ -571,6 +696,11 @@ class InboxApp(App):
             state["active_conv"] = None
         elif tab_name == "github":
             state["active_notification"] = self.active_notification
+            state["active_conv"] = None
+        elif tab_name == "drive":
+            state["active_drive_file"] = self.active_drive_file
+            state["drive_folder_id"] = self._drive_folder_id
+            state["drive_folder_stack"] = list(self._drive_folder_stack)
             state["active_conv"] = None
         self._tab_state[tab_name] = state
 
@@ -598,6 +728,8 @@ class InboxApp(App):
                 msg_view.messages = []
         elif tab_name == "calendar":
             self.active_event = state.get("active_event")
+            self._calendar_date = state.get("calendar_date", date.today())
+            self._calendar_view_mode = state.get("calendar_view_mode", "day")
             self.active_conv = None
             self.active_reminder = None
             if self.active_event:
@@ -616,6 +748,16 @@ class InboxApp(App):
             self.active_reminder = None
             if self.active_notification:
                 self.query_one("#detail-view", DetailView).detail = self.active_notification
+        elif tab_name == "drive":
+            self.active_drive_file = state.get("active_drive_file")
+            self._drive_folder_id = state.get("drive_folder_id", "")
+            self._drive_folder_stack = state.get("drive_folder_stack", [])
+            self.active_conv = None
+            self.active_event = None
+            self.active_reminder = None
+            self.active_notification = None
+            if self.active_drive_file:
+                self.query_one("#detail-view", DetailView).detail = self.active_drive_file
         else:
             # For tabs without saved state, just clear active selections
             self.active_conv = None
@@ -645,6 +787,9 @@ class InboxApp(App):
         self._restore_tab_state(new_filter)
         # Re-highlight the selected item in the sidebar
         self._restore_sidebar_selection()
+        # Auto-load drive files when switching to Drive tab
+        if new_filter == "drive" and not self.drive_data:
+            self._load_drive_files()
 
     def _toggle_views(self) -> None:
         is_detail = self._active_filter in (
@@ -665,6 +810,8 @@ class InboxApp(App):
                 compose_input.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
             elif self._active_filter == "reminders":
                 compose_input.placeholder = "New reminder (Enter to create)"
+            elif self._active_filter == "drive":
+                compose_input.placeholder = "Search Drive files… (Enter)"
             else:
                 compose_input.placeholder = ""
         else:
@@ -677,14 +824,68 @@ class InboxApp(App):
         lv.clear()
 
         if self._active_filter == "calendar":
-            for e in self.events:
-                lv.append(EventItem(e))
+            mode = self._calendar_view_mode
+            if mode == "day":
+                for e in self.events:
+                    lv.append(EventItem(e))
+            elif mode in ("week", "agenda"):
+                # Group events by date
+                events_by_date: dict[str, list[dict]] = {}
+                for e in self.events:
+                    try:
+                        edate = datetime.fromisoformat(e["start"]).date()
+                    except (ValueError, KeyError):
+                        edate = self._calendar_date
+                    key = edate.isoformat()
+                    events_by_date.setdefault(key, []).append(e)
+
+                if mode == "week":
+                    weekday = self._calendar_date.weekday()
+                    monday = self._calendar_date - timedelta(days=weekday)
+                    days = [monday + timedelta(days=i) for i in range(7)]
+                else:  # agenda
+                    days = [self._calendar_date + timedelta(days=i) for i in range(14)]
+
+                for d in days:
+                    day_events = events_by_date.get(d.isoformat(), [])
+                    # Also include multi-day all-day events
+                    for e in self.events:
+                        if e.get("all_day"):
+                            try:
+                                estart = datetime.fromisoformat(e["start"]).date()
+                                eend = datetime.fromisoformat(e["end"]).date()
+                                if estart < d < eend and e not in day_events:
+                                    day_events.append(e)
+                            except (ValueError, KeyError):
+                                pass
+                    is_today = d == date.today()
+                    day_label = d.strftime("%a %b %d")
+                    if is_today:
+                        day_label = f"● {day_label} (today)"
+                    header_style = "bold cyan" if is_today else "bold"
+                    lv.append(ListItem(Static(Text(f"── {day_label} ──", style=header_style))))
+                    if day_events:
+                        for e in day_events:
+                            lv.append(EventItem(e))
+                    else:
+                        lv.append(ListItem(Static(Text("  No events", style="dim"))))
+
+            # Build status bar
             n_accts = len(set(e.get("account", "") for e in self.events if e.get("account")))
-            status = f"[cyan]{len(self.events)} events today[/]"
-            if n_accts:
-                status += f"  [dim]{n_accts} account{'s' if n_accts > 1 else ''}[/]"
-            elif not self.events:
-                status += "  [yellow]ctrl+a to add account[/]"
+            date_label = self._calendar_date_label()
+            mode_indicator = {
+                "day": "📅 Day",
+                "week": "📆 Week",
+                "agenda": "📋 Agenda",
+            }.get(mode, "")
+            status = f"[cyan]{date_label}[/]  {mode_indicator}"
+            if not self.events:
+                status += "  [dim]No events[/]"
+            else:
+                status += f"  [dim]{len(self.events)} events[/]"
+            if n_accts > 1:
+                status += f"  [dim]{n_accts} accounts[/]"
+            status += "  [dim]v: view · ←→: nav · g: go to date · e: edit[/]"
             self.query_one("#status", Static).update(status)
             return
 
@@ -729,7 +930,18 @@ class InboxApp(App):
             return
 
         if self._active_filter == "drive":
-            self.query_one("#status", Static).update("[dim]Google Drive[/]")
+            if not self.drive_data:
+                folder_msg = "This folder is empty" if self._drive_folder_id else "No files"
+                lv.append(ListItem(Static(Text(f"  {folder_msg}", style="dim green"))))
+            else:
+                for f in self.drive_data:
+                    lv.append(DriveItem(f))
+            folder_tag = " (subfolder)" if self._drive_folder_id else ""
+            status = f"[blue]{len(self.drive_data)} files{folder_tag}[/]"
+            status += "  [dim]d: download · u: upload · n: new folder · x: delete[/]"
+            if self._drive_folder_id:
+                status += "  [dim]Bksp: back[/]"
+            self.query_one("#status", Static).update(status)
             return
 
         if self._active_filter == "all":
@@ -738,6 +950,9 @@ class InboxApp(App):
             shown = [c for c in self.conversations if c.get("source") == self._active_filter]
 
         for c in shown:
+            # Mark starred conversations for display
+            if c.get("source") == "gmail" and c.get("id") in self._gmail_starred:
+                c["_starred"] = True
             lv.append(ConversationItem(c))
 
         unread = sum(c.get("unread", 0) for c in shown)
@@ -749,7 +964,14 @@ class InboxApp(App):
         status = f"[green]{len(shown)} conversations[/]"
         if unread:
             status += f"  [yellow]{unread} unread[/]"
-        status += f"  [dim]{tab_label}[/]"
+        if self._active_filter == "gmail":
+            label_display = self._gmail_label_filter
+            status += f"  [cyan]{label_display}[/]"
+            status += (
+                "  [dim]a:archive d:delete s:star r:read u:unread c:compose l:label D:download[/]"
+            )
+        else:
+            status += f"  [dim]{tab_label}[/]"
         self.query_one("#status", Static).update(status)
 
     def _restore_sidebar_selection(self) -> None:
@@ -788,6 +1010,12 @@ class InboxApp(App):
             notif_id = self.active_notification.get("id")
             for i, child in enumerate(lv.children):
                 if isinstance(child, NotificationItem) and child.data.get("id") == notif_id:
+                    target_index = i
+                    break
+        elif self._active_filter == "drive" and self.active_drive_file:
+            file_id = self.active_drive_file.get("id")
+            for i, child in enumerate(lv.children):
+                if isinstance(child, DriveItem) and child.data.get("id") == file_id:
                     target_index = i
                     break
 
@@ -1029,7 +1257,7 @@ class InboxApp(App):
         errors: list[str] = []
 
         try:
-            events = self.client.calendar_events()
+            events = self._fetch_calendar_for_view()
         except Exception as exc:
             errors.append(_format_request_error("Calendar refresh", exc))
 
@@ -1147,7 +1375,25 @@ class InboxApp(App):
         if compose.has_focus:
             return
 
-        if self._active_filter == "reminders":
+        if self._active_filter == "calendar":
+            key = event.key
+            if key == "right":
+                event.prevent_default()
+                self._calendar_navigate(1)
+            elif key == "left":
+                event.prevent_default()
+                self._calendar_navigate(-1)
+            elif key == "v":
+                event.prevent_default()
+                self._cycle_calendar_view()
+            elif key == "g":
+                event.prevent_default()
+                self._enter_jump_to_date()
+            elif key == "e":
+                event.prevent_default()
+                self._enter_edit_event()
+
+        elif self._active_filter == "reminders":
             key = event.key
             if key == "c":
                 event.prevent_default()
@@ -1162,6 +1408,33 @@ class InboxApp(App):
                 event.prevent_default()
                 self.action_filter_reminder_list()
 
+        elif self._active_filter == "gmail":
+            key = event.key
+            if key == "a":
+                event.prevent_default()
+                self.action_gmail_archive()
+            elif key == "d":
+                event.prevent_default()
+                self.action_gmail_delete()
+            elif key == "s":
+                event.prevent_default()
+                self.action_gmail_toggle_star()
+            elif key == "r":
+                event.prevent_default()
+                self.action_gmail_mark_read()
+            elif key == "u":
+                event.prevent_default()
+                self.action_gmail_mark_unread()
+            elif key == "c":
+                event.prevent_default()
+                self.action_gmail_compose()
+            elif key == "l":
+                event.prevent_default()
+                self.action_gmail_cycle_label()
+            elif key == "shift+d":
+                event.prevent_default()
+                self.action_gmail_download_attachment()
+
         elif self._active_filter == "github":
             key = event.key
             if key == "r":
@@ -1174,11 +1447,56 @@ class InboxApp(App):
                 event.prevent_default()
                 self.action_open_notification_url()
 
+        elif self._active_filter == "drive":
+            key = event.key
+            if key == "d":
+                event.prevent_default()
+                self.action_drive_download()
+            elif key == "u":
+                event.prevent_default()
+                self.action_drive_upload()
+            elif key == "n":
+                event.prevent_default()
+                self.action_drive_new_folder()
+            elif key == "x":
+                event.prevent_default()
+                self.action_drive_delete()
+            elif key == "o":
+                event.prevent_default()
+                self.action_drive_open_url()
+            elif key in ("backspace", "escape"):
+                if self._drive_folder_id:
+                    event.prevent_default()
+                    self.action_drive_go_back()
+
     # ── Selection ────────────────────────────────────────────────────────
 
     @on(ListView.Selected, "#contact-list")
     def on_item_selected(self, event: ListView.Selected) -> None:
         item = event.item
+
+        if isinstance(item, DriveItem):
+            d = item.data
+            mime = d.get("mime_type", "")
+            # If it's a folder, navigate into it
+            if mime == "application/vnd.google-apps.folder":
+                self._drive_folder_stack.append(self._drive_folder_id)
+                self._drive_folder_id = d.get("id", "")
+                self.active_drive_file = None
+                self.query_one("#detail-view", DetailView).detail = None
+                self._load_drive_files()
+                return
+            self.active_drive_file = d
+            self.active_event = None
+            self.active_reminder = None
+            self.active_notification = None
+            self.active_conv = None
+            self.query_one("#detail-view", DetailView).detail = d
+            name = d.get("name", "?")
+            acct = d.get("account", "")
+            tag = f" · {acct.split(chr(64))[0]}" if acct else ""
+            self.query_one("#status", Static).update(f"[bold]{name}[/]  [dim]drive{tag}[/]")
+            return
 
         if isinstance(item, NotificationItem):
             self.active_notification = item.data
@@ -1278,7 +1596,35 @@ class InboxApp(App):
             return
         self.query_one("#compose", Input).clear()
 
+        # Handle Gmail compose flow
+        if self._gmail_compose_mode:
+            self._handle_gmail_compose_submit(text)
+            return
+
         if self._active_filter == "calendar":
+            # Handle jump-to-date mode
+            if self._jump_to_date_mode:
+                self._jump_to_date_mode = False
+                compose = self.query_one("#compose", Input)
+                compose.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
+                parsed = self._parse_user_date(text)
+                if parsed:
+                    self._calendar_date = parsed
+                    self._refresh_calendar_events()
+                else:
+                    self.query_one("#status", Static).update(
+                        f"[red]Invalid date: '{text}' — try YYYY-MM-DD or 'May 1'[/]"
+                    )
+                return
+            # Handle event editing mode
+            if self._editing_event is not None:
+                edit_target = self._editing_event
+                self._editing_event = None
+                self._editing_event_field = ""
+                compose = self.query_one("#compose", Input)
+                compose.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
+                self._do_update_event(edit_target, summary=text)
+                return
             self._create_quick_event(text)
             return
 
@@ -1289,6 +1635,22 @@ class InboxApp(App):
                 self._editing_reminder = None
                 return
             self._create_reminder(text)
+            return
+
+        if self._active_filter == "drive":
+            if getattr(self, "_drive_upload_mode", False):
+                self._drive_upload_mode = False
+                compose = self.query_one("#compose", Input)
+                compose.placeholder = "Search Drive files… (Enter)"
+                self._do_drive_upload(text)
+                return
+            if getattr(self, "_drive_new_folder_mode", False):
+                self._drive_new_folder_mode = False
+                compose = self.query_one("#compose", Input)
+                compose.placeholder = "Search Drive files… (Enter)"
+                self._do_drive_create_folder(text)
+                return
+            self._search_drive(text)
             return
 
         if not self.active_conv:
@@ -1414,6 +1776,159 @@ class InboxApp(App):
                 self.query_one("#status", Static).update,
                 status_override or "[red]Failed to delete[/]",
             )
+
+    # ── Calendar navigation & views ─────────────────────────────────────
+
+    def _calendar_date_label(self) -> str:
+        """Format the calendar date for the status bar."""
+        d = self._calendar_date
+        label = d.strftime("%a, %b %d, %Y")
+        if d == date.today():
+            label = f"Today · {label}"
+        return label
+
+    def _calendar_navigate(self, delta: int) -> None:
+        """Navigate calendar by delta days (or weeks in week mode)."""
+        if self._calendar_view_mode == "week":
+            self._calendar_date += timedelta(days=7 * delta)
+        else:
+            self._calendar_date += timedelta(days=delta)
+        self._refresh_calendar_events()
+
+    def _cycle_calendar_view(self) -> None:
+        """Cycle day → week → agenda → day."""
+        modes = ["day", "week", "agenda"]
+        idx = modes.index(self._calendar_view_mode)
+        self._calendar_view_mode = modes[(idx + 1) % len(modes)]
+        self._refresh_calendar_events()
+
+    def _enter_jump_to_date(self) -> None:
+        """Activate jump-to-date input mode."""
+        if self._active_filter != "calendar":
+            return
+        self._jump_to_date_mode = True
+        compose = self.query_one("#compose", Input)
+        compose.placeholder = "Go to date: YYYY-MM-DD or 'May 1' (Enter to go, Esc to cancel)"
+        compose.clear()
+        compose.focus()
+        self.query_one("#status", Static).update("[yellow]Type a date and press Enter[/]")
+
+    def action_jump_to_date(self) -> None:
+        """Ctrl+G handler for jump-to-date."""
+        if self._active_filter != "calendar":
+            return
+        self._enter_jump_to_date()
+
+    def _parse_user_date(self, text: str) -> date | None:
+        """Try to parse a user-entered date string into a date object."""
+        text = text.strip()
+        if not text:
+            return None
+        # Try ISO format first: YYYY-MM-DD
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            pass
+        # Try common formats
+        for fmt in ("%B %d", "%b %d", "%B %d, %Y", "%b %d, %Y", "%m/%d/%Y", "%m/%d"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                if parsed.year == 1900:
+                    parsed = parsed.replace(year=date.today().year)
+                return parsed.date()
+            except ValueError:
+                continue
+        return None
+
+    def _enter_edit_event(self) -> None:
+        """Start editing the selected calendar event."""
+        if self._active_filter != "calendar":
+            return
+        if not self.active_event or not self.active_event.get("event_id"):
+            self.query_one("#status", Static).update("[yellow]No event selected[/]")
+            return
+        self._editing_event = self.active_event
+        self._editing_event_field = "summary"
+        compose = self.query_one("#compose", Input)
+        compose.value = self.active_event.get("summary", "")
+        compose.placeholder = "Edit title (Enter to save, Esc to cancel)"
+        compose.focus()
+        self.query_one("#status", Static).update(
+            "[yellow]Editing event title — Enter to save, Esc to cancel[/]"
+        )
+
+    @work(thread=True, exit_on_error=False)
+    def _do_update_event(self, event: dict, **fields: str | None) -> None:
+        status_override = None
+        try:
+            ok = self.client.update_event(
+                event_id=event["event_id"],
+                calendar_id=event.get("calendar_id", "primary"),
+                account=event.get("account", ""),
+                **fields,
+            )
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Update event', exc)}[/]"
+            ok = False
+
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[green]Event updated[/]",
+            )
+            self._do_refresh_calendar()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                status_override or "[red]Failed to update event[/]",
+            )
+
+    @work(thread=True, exit_on_error=False)
+    def _refresh_calendar_events(self) -> None:
+        """Fetch events for the current calendar view and update sidebar."""
+        try:
+            events = self._fetch_calendar_for_view()
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Calendar refresh', exc)}[/]",
+            )
+            return
+        self.call_from_thread(self._apply_calendar_events, events)
+
+    def _fetch_calendar_for_view(self) -> list[dict]:
+        """Fetch events from the server based on current view mode."""
+        if self._calendar_view_mode == "day":
+            return self.client.calendar_events(date=self._calendar_date.isoformat())
+        elif self._calendar_view_mode == "week":
+            # Compute Monday of the current week
+            weekday = self._calendar_date.weekday()  # 0=Monday
+            monday = self._calendar_date - timedelta(days=weekday)
+            sunday = monday + timedelta(days=6)
+            return self.client.calendar_events_range(monday.isoformat(), sunday.isoformat())
+        else:  # agenda
+            end_d = self._calendar_date + timedelta(days=13)
+            return self.client.calendar_events_range(
+                self._calendar_date.isoformat(), end_d.isoformat()
+            )
+
+    def _apply_calendar_events(self, events: list[dict]) -> None:
+        """Apply fetched calendar events to the UI."""
+        self.events = events
+        self._render_sidebar()
+
+    @work(thread=True, exit_on_error=False)
+    def _do_refresh_calendar(self) -> None:
+        """Refresh calendar data and full sidebar from worker thread."""
+        try:
+            events = self._fetch_calendar_for_view()
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Calendar refresh', exc)}[/]",
+            )
+            return
+        self.call_from_thread(self._apply_calendar_events, events)
 
     # ── Reminder actions ────────────────────────────────────────────────
 
@@ -1678,6 +2193,549 @@ class InboxApp(App):
             f"[green]Opened {self.active_notification.get('title', 'notification')} in browser[/]"
         )
 
+    # ── Drive actions ────────────────────────────────────────────────────
+
+    @work(thread=True, exit_on_error=False)
+    def _load_drive_files(self, query: str = "") -> None:
+        """Fetch drive files for the current folder or search query."""
+        try:
+            files = self.client.drive_files(
+                query=query,
+                folder_id=self._drive_folder_id,
+            )
+        except Exception as e:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Drive load', e)}[/]",
+            )
+            return
+        self.call_from_thread(self._show_drive_files, files)
+
+    def _show_drive_files(self, files: list[dict]) -> None:
+        self.drive_data = files
+        self._render_sidebar()
+
+    @work(thread=True, exit_on_error=False)
+    def _search_drive(self, query: str) -> None:
+        """Search Drive files by name query."""
+        try:
+            files = self.client.drive_files(
+                query=query,
+                folder_id=self._drive_folder_id,
+            )
+        except Exception as e:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Drive search', e)}[/]",
+            )
+            return
+        self.call_from_thread(self._show_drive_files, files)
+
+    def action_drive_go_back(self) -> None:
+        """Navigate to parent folder."""
+        if self._drive_folder_stack:
+            self._drive_folder_id = self._drive_folder_stack.pop()
+        else:
+            self._drive_folder_id = ""
+        self.active_drive_file = None
+        self.query_one("#detail-view", DetailView).detail = None
+        self._load_drive_files()
+
+    def action_drive_download(self) -> None:
+        """Download the selected Drive file to ~/Downloads/."""
+        if self._active_filter != "drive":
+            return
+        if not self.active_drive_file or not self.active_drive_file.get("id"):
+            self.query_one("#status", Static).update("[yellow]No file selected[/]")
+            return
+        name = self.active_drive_file.get("name", "file")
+        self.query_one("#status", Static).update(f"[yellow]Downloading '{name}'...[/]")
+        self._do_drive_download(self.active_drive_file)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_drive_download(self, file_data: dict) -> None:
+        from pathlib import Path as P
+
+        try:
+            content = self.client.drive_download(
+                file_id=file_data["id"],
+                account=file_data.get("account", ""),
+            )
+            downloads = P.home() / "Downloads"
+            downloads.mkdir(exist_ok=True)
+            dest = downloads / file_data.get("name", "download")
+            dest.write_bytes(content)
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Downloaded to {dest}[/]",
+            )
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Download', exc)}[/]",
+            )
+
+    def action_drive_upload(self) -> None:
+        """Upload a file to the current Drive folder."""
+        if self._active_filter != "drive":
+            return
+        compose = self.query_one("#compose", Input)
+        compose.placeholder = "Enter file path to upload (Enter to confirm)"
+        compose.focus()
+        self._drive_upload_mode = True
+        self.query_one("#status", Static).update(
+            "[yellow]Type file path and press Enter to upload, Escape to cancel[/]"
+        )
+
+    def action_drive_new_folder(self) -> None:
+        """Create a new folder in the current Drive folder."""
+        if self._active_filter != "drive":
+            return
+        compose = self.query_one("#compose", Input)
+        compose.placeholder = "Enter folder name (Enter to create)"
+        compose.focus()
+        self._drive_new_folder_mode = True
+        self.query_one("#status", Static).update(
+            "[yellow]Type folder name and press Enter, Escape to cancel[/]"
+        )
+
+    def action_drive_delete(self) -> None:
+        """Delete (trash) the selected Drive file."""
+        if self._active_filter != "drive":
+            return
+        if not self.active_drive_file or not self.active_drive_file.get("id"):
+            self.query_one("#status", Static).update("[yellow]No file selected[/]")
+            return
+        name = self.active_drive_file.get("name", "?")
+        self.query_one("#status", Static).update(f"[yellow]Trashing '{name}'...[/]")
+        self._do_drive_delete(self.active_drive_file)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_drive_delete(self, file_data: dict) -> None:
+        status_override = None
+        try:
+            ok = self.client.drive_delete(
+                file_id=file_data["id"],
+                account=file_data.get("account", ""),
+            )
+        except Exception as exc:
+            status_override = f"[red]{_format_request_error('Delete', exc)}[/]"
+            ok = False
+
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Trashed '{file_data.get('name')}'[/]",
+            )
+            self.call_from_thread(self._clear_drive_selection)
+            self._load_drive_files()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                status_override or "[red]Failed to delete[/]",
+            )
+
+    def action_drive_open_url(self) -> None:
+        """Open the selected Drive file's web link in the browser."""
+        if self._active_filter != "drive":
+            return
+        if not self.active_drive_file:
+            self.query_one("#status", Static).update("[yellow]No file selected[/]")
+            return
+        url = self.active_drive_file.get("web_link", "")
+        if not url:
+            self.query_one("#status", Static).update("[yellow]No URL for this file[/]")
+            return
+        webbrowser.open(url)
+        self.query_one("#status", Static).update(
+            f"[green]Opened {self.active_drive_file.get('name', 'file')} in browser[/]"
+        )
+
+    def _clear_drive_selection(self) -> None:
+        self.active_drive_file = None
+        self.query_one("#detail-view", DetailView).detail = None
+
+    @work(thread=True, exit_on_error=False)
+    def _do_drive_upload(self, file_path: str) -> None:
+        try:
+            result = self.client.drive_upload(
+                file_path=file_path,
+                folder_id=self._drive_folder_id,
+            )
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Uploaded '{result.get('name', file_path)}'[/]",
+            )
+            self._load_drive_files()
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Upload', exc)}[/]",
+            )
+
+    @work(thread=True, exit_on_error=False)
+    def _do_drive_create_folder(self, name: str) -> None:
+        try:
+            result = self.client.drive_create_folder(
+                name=name,
+                parent_id=self._drive_folder_id,
+            )
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Created folder '{result.get('name', name)}'[/]",
+            )
+            self._load_drive_files()
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Create folder', exc)}[/]",
+            )
+
+    # ── Gmail actions ────────────────────────────────────────────────────
+
+    def _get_active_gmail_conv(self) -> dict | None:
+        """Get the currently selected Gmail conversation, or None."""
+        if not self.active_conv:
+            return None
+        if self.active_conv.get("source") != "gmail":
+            return None
+        return self.active_conv
+
+    def action_gmail_archive(self) -> None:
+        conv = self._get_active_gmail_conv()
+        if not conv:
+            self.query_one("#status", Static).update("[yellow]No Gmail email selected[/]")
+            return
+        self.query_one("#status", Static).update("[yellow]Archiving...[/]")
+        self._do_gmail_archive(conv)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_gmail_archive(self, conv: dict) -> None:
+        try:
+            ok = self.client.gmail_archive(conv["id"])
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Archive', exc)}[/]",
+            )
+            return
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[green]Archived[/]",
+            )
+            self._do_refresh()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Failed to archive[/]",
+            )
+
+    def action_gmail_delete(self) -> None:
+        conv = self._get_active_gmail_conv()
+        if not conv:
+            self.query_one("#status", Static).update("[yellow]No Gmail email selected[/]")
+            return
+        self.query_one("#status", Static).update("[yellow]Deleting...[/]")
+        self._do_gmail_delete(conv)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_gmail_delete(self, conv: dict) -> None:
+        try:
+            ok = self.client.gmail_delete(conv["id"])
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Delete', exc)}[/]",
+            )
+            return
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[green]Deleted[/]",
+            )
+            self._do_refresh()
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Failed to delete[/]",
+            )
+
+    def action_gmail_toggle_star(self) -> None:
+        conv = self._get_active_gmail_conv()
+        if not conv:
+            self.query_one("#status", Static).update("[yellow]No Gmail email selected[/]")
+            return
+        msg_id = conv["id"]
+        is_starred = msg_id in self._gmail_starred
+        if is_starred:
+            self.query_one("#status", Static).update("[yellow]Unstarring...[/]")
+        else:
+            self.query_one("#status", Static).update("[yellow]Starring...[/]")
+        self._do_gmail_toggle_star(conv, is_starred)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_gmail_toggle_star(self, conv: dict, was_starred: bool) -> None:
+        try:
+            if was_starred:
+                ok = self.client.gmail_unstar(conv["id"])
+            else:
+                ok = self.client.gmail_star(conv["id"])
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Star toggle', exc)}[/]",
+            )
+            return
+        if ok:
+            msg_id = conv["id"]
+            if was_starred:
+                self._gmail_starred.discard(msg_id)
+                label = "Unstarred"
+            else:
+                self._gmail_starred.add(msg_id)
+                label = "Starred ★"
+            # Update the conversation data for immediate UI feedback
+            conv["_starred"] = not was_starred
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]{label}[/]",
+            )
+            self.call_from_thread(self._render_sidebar)
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Failed to toggle star[/]",
+            )
+
+    def action_gmail_mark_read(self) -> None:
+        conv = self._get_active_gmail_conv()
+        if not conv:
+            self.query_one("#status", Static).update("[yellow]No Gmail email selected[/]")
+            return
+        self.query_one("#status", Static).update("[yellow]Marking as read...[/]")
+        self._do_gmail_mark_read(conv)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_gmail_mark_read(self, conv: dict) -> None:
+        try:
+            ok = self.client.gmail_mark_read(conv["id"])
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Mark read', exc)}[/]",
+            )
+            return
+        if ok:
+            conv["unread"] = 0
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[green]Marked as read[/]",
+            )
+            self.call_from_thread(self._render_sidebar)
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Failed to mark as read[/]",
+            )
+
+    def action_gmail_mark_unread(self) -> None:
+        conv = self._get_active_gmail_conv()
+        if not conv:
+            self.query_one("#status", Static).update("[yellow]No Gmail email selected[/]")
+            return
+        self.query_one("#status", Static).update("[yellow]Marking as unread...[/]")
+        self._do_gmail_mark_unread(conv)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_gmail_mark_unread(self, conv: dict) -> None:
+        try:
+            ok = self.client.gmail_mark_unread(conv["id"])
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Mark unread', exc)}[/]",
+            )
+            return
+        if ok:
+            conv["unread"] = 1
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[green]Marked as unread[/]",
+            )
+            self.call_from_thread(self._render_sidebar)
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Failed to mark as unread[/]",
+            )
+
+    def action_gmail_compose(self) -> None:
+        """Start the multi-step compose flow for a new email."""
+        self._gmail_compose_mode = "to"
+        self._gmail_compose_to = ""
+        self._gmail_compose_subject = ""
+        compose = self.query_one("#compose", Input)
+        compose.placeholder = "To: (email address)"
+        compose.clear()
+        compose.focus()
+        self.query_one("#status", Static).update(
+            "[cyan]Compose: Enter recipient email (Escape to cancel)[/]"
+        )
+
+    def _handle_gmail_compose_submit(self, text: str) -> None:
+        """Handle compose flow steps: to -> subject -> body -> send."""
+        compose = self.query_one("#compose", Input)
+
+        if self._gmail_compose_mode == "to":
+            if not text or "@" not in text:
+                self.query_one("#status", Static).update("[red]Invalid email — must contain @[/]")
+                return
+            self._gmail_compose_to = text
+            self._gmail_compose_mode = "subject"
+            compose.placeholder = "Subject:"
+            compose.clear()
+            self.query_one("#status", Static).update(f"[cyan]To: {text} — Enter subject[/]")
+        elif self._gmail_compose_mode == "subject":
+            self._gmail_compose_subject = text
+            self._gmail_compose_mode = "body"
+            compose.placeholder = "Body: (Enter to send)"
+            compose.clear()
+            self.query_one("#status", Static).update(
+                f"[cyan]To: {self._gmail_compose_to} · Subject: {text} — Enter body[/]"
+            )
+        elif self._gmail_compose_mode == "body":
+            self._gmail_compose_mode = ""
+            compose.placeholder = "Reply… (Enter to send)"
+            compose.clear()
+            self.query_one("#status", Static).update("[yellow]Sending...[/]")
+            self._do_gmail_compose_send(self._gmail_compose_to, self._gmail_compose_subject, text)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_gmail_compose_send(self, to: str, subject: str, body: str) -> None:
+        try:
+            ok = self.client.gmail_compose(to, subject, body)
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Compose send', exc)}[/]",
+            )
+            return
+        if ok:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Sent to {to}[/]",
+            )
+        else:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Failed to send email[/]",
+            )
+
+    def action_gmail_cycle_label(self) -> None:
+        """Cycle through Gmail labels to filter the conversation list."""
+        self._do_gmail_cycle_label()
+
+    @work(thread=True, exit_on_error=False)
+    def _do_gmail_cycle_label(self) -> None:
+        # Fetch labels if we haven't yet
+        if not self._gmail_labels:
+            try:
+                self._gmail_labels = self.client.gmail_labels()
+            except Exception:
+                self._gmail_labels = []
+
+        # Build label cycle: common labels + custom user labels
+        common = ["INBOX", "SENT", "STARRED", "DRAFT"]
+        custom = [
+            lbl["id"] for lbl in self._gmail_labels if lbl.get("type") == "user" and lbl.get("id")
+        ]
+        cycle = common + custom
+
+        # Find current and advance
+        try:
+            idx = cycle.index(self._gmail_label_filter)
+            self._gmail_label_filter = cycle[(idx + 1) % len(cycle)]
+        except ValueError:
+            self._gmail_label_filter = cycle[0]
+
+        label_name = self._gmail_label_filter
+        # Resolve label name for display
+        for lbl in self._gmail_labels:
+            if lbl.get("id") == self._gmail_label_filter:
+                label_name = lbl.get("name", label_name)
+                break
+
+        # Fetch conversations for this label
+        try:
+            convos = self.client.gmail_conversations_by_label(
+                label=self._gmail_label_filter, limit=50
+            )
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Label filter', exc)}[/]",
+            )
+            return
+
+        # Update conversations with label-filtered results
+        # Remove existing gmail convos and add the label-filtered ones
+        non_gmail = [c for c in self.conversations if c.get("source") != "gmail"]
+        self.conversations = non_gmail + convos
+        self.call_from_thread(self._render_sidebar)
+        self.call_from_thread(
+            self.query_one("#status", Static).update,
+            f"[cyan]Gmail label: {label_name}[/]  [dim]l: next label[/]",
+        )
+
+    def action_gmail_download_attachment(self) -> None:
+        """Download the first attachment from the currently viewed thread."""
+        mv = self.query_one("#messages", MessageView)
+        if not mv.messages:
+            self.query_one("#status", Static).update("[yellow]No messages loaded[/]")
+            return
+        # Find the first message with attachments
+        for msg in mv.messages:
+            atts = msg.get("attachments", [])
+            if atts:
+                att = atts[0]
+                self.query_one("#status", Static).update(
+                    f"[yellow]Downloading {att.get('filename', 'file')}...[/]"
+                )
+                self._do_gmail_download_attachment(att)
+                return
+        self.query_one("#status", Static).update("[yellow]No attachments in this thread[/]")
+
+    @work(thread=True, exit_on_error=False)
+    def _do_gmail_download_attachment(self, att: dict) -> None:
+        import base64
+        from pathlib import Path
+
+        try:
+            result = self.client.gmail_attachment(
+                att.get("messageId", ""), att.get("attachmentId", "")
+            )
+            data_b64 = result.get("data", "")
+            if not data_b64:
+                self.call_from_thread(
+                    self.query_one("#status", Static).update,
+                    "[red]Empty attachment data[/]",
+                )
+                return
+            raw = base64.urlsafe_b64decode(data_b64)
+            filename = att.get("filename", "download")
+            dest = Path.home() / "Downloads" / filename
+            dest.write_bytes(raw)
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[green]Downloaded to ~/Downloads/{filename}[/]",
+            )
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]{_format_request_error('Download', exc)}[/]",
+            )
+
     # ── Account actions ──────────────────────────────────────────────────
 
     def action_add_account(self) -> None:
@@ -1744,10 +2802,42 @@ class InboxApp(App):
 
     def action_clear_compose(self) -> None:
         self.query_one("#compose", Input).clear()
+        # Cancel Gmail compose flow
+        if self._gmail_compose_mode:
+            self._gmail_compose_mode = ""
+            self._gmail_compose_to = ""
+            self._gmail_compose_subject = ""
+            compose = self.query_one("#compose", Input)
+            compose.placeholder = "Reply… (Enter to send)"
+            self.query_one("#status", Static).update("[dim]Compose cancelled[/]")
         # Cancel any in-progress reminder edit
         if hasattr(self, "_editing_reminder") and self._editing_reminder is not None:
             self._editing_reminder = None
             if self._active_filter == "reminders":
+                self.query_one("#status", Static).update("[dim]Edit cancelled[/]")
+        # Cancel drive upload/folder modes
+        if getattr(self, "_drive_upload_mode", False):
+            self._drive_upload_mode = False
+            if self._active_filter == "drive":
+                self.query_one("#compose", Input).placeholder = "Search Drive files… (Enter)"
+                self.query_one("#status", Static).update("[dim]Upload cancelled[/]")
+        if getattr(self, "_drive_new_folder_mode", False):
+            self._drive_new_folder_mode = False
+            if self._active_filter == "drive":
+                self.query_one("#compose", Input).placeholder = "Search Drive files… (Enter)"
+                self.query_one("#status", Static).update("[dim]Folder creation cancelled[/]")
+        # Cancel calendar editing/jump-to-date modes
+        if self._active_filter == "calendar":
+            if self._jump_to_date_mode:
+                self._jump_to_date_mode = False
+                compose = self.query_one("#compose", Input)
+                compose.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
+                self.query_one("#status", Static).update("[dim]Jump cancelled[/]")
+            if self._editing_event is not None:
+                self._editing_event = None
+                self._editing_event_field = ""
+                compose = self.query_one("#compose", Input)
+                compose.placeholder = "New event: Title 2pm-3pm @ Location (Enter)"
                 self.query_one("#status", Static).update("[dim]Edit cancelled[/]")
 
     def _cleanup_resources(self) -> None:
