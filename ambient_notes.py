@@ -6,7 +6,10 @@ Daily notes go to {vault}/daily/YYYY-MM-DD.md, ambient captures to {vault}/ambie
 from __future__ import annotations
 
 import datetime
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 VAULT_PATH = Path.home() / "vault"
 DAILY_DIR = VAULT_PATH / "daily"
@@ -67,6 +70,11 @@ def save_note(
 
     append_to_daily("\n".join(parts))
 
+    # Log the capture so user sees activity
+    preview = (summary or raw_transcript)[:60]
+    logger.info(f"[ambient] Captured: {preview}...")
+    print(f"[ambient] Captured: {preview}...")
+
 
 def list_daily_notes(limit: int = 30) -> list[dict]:
     """List recent daily notes. Returns [{date, path, size}]."""
@@ -88,3 +96,33 @@ def read_daily_note(date: str) -> str | None:
     if path.exists():
         return path.read_text()
     return None
+
+
+def get_recent_captures(limit: int = 10) -> list[dict]:
+    """Parse today's daily note and return recent captures with timestamps."""
+    path = _today_file()
+    if not path.exists():
+        return []
+
+    content = path.read_text()
+    captures = []
+
+    # Parse sections starting with "## HH:MM"
+    import re
+
+    pattern = r"^## (\d{2}:\d{2})\n((?:(?!^## ).*\n?)*)"
+    matches = re.finditer(pattern, content, re.MULTILINE)
+
+    for match in matches:
+        timestamp = match.group(1)
+        body = match.group(2).strip()
+
+        # Extract first line (summary) and strip markdown formatting
+        lines = body.split("\n")
+        summary = lines[0] if lines else ""
+        summary = re.sub(r"[#*`\[\]!-]", "", summary)[:80].strip()
+
+        if summary:
+            captures.append({"timestamp": timestamp, "summary": summary})
+
+    return list(reversed(captures))[-limit:]

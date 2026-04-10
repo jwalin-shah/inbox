@@ -1,6 +1,6 @@
 """
-Data access layer for Inbox — iMessage, Gmail, Calendar, Notes.
-All data fetching, auth, and mutation logic lives here.
+Data access layer for Inbox — iMessage, Gmail, Calendar, Notes, Audio, LLM.
+All data fetching, auth, mutation, audio, and LLM logic lives here.
 """
 
 from __future__ import annotations
@@ -11,10 +11,17 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel as PydanticBaseModel
 
 import httpx
 from google.auth.transport.requests import Request
@@ -1391,3 +1398,409 @@ def drive_get(drive_service, file_id: str) -> DriveFile | None:
         )
     except Exception:
         return None
+
+
+# ── Whisper / Audio Config ──────────────────────────────────────────────────
+
+# MLX Whisper for chunk-based ambient transcription
+MLX_WHISPER_MODEL = "mlx-community/whisper-base.en-mlx"
+
+# whisper-stream C++ binary for real-time dictation
+WHISPER_STREAM_BIN = "/opt/homebrew/bin/whisper-stream"
+WHISPER_STREAM_MODEL = (
+    "/opt/homebrew/Cellar/whisper-cpp/1.8.4/share/whisper-cpp/ggml-base.en-q8_0.bin"
+)
+
+# Audio settings
+SAMPLE_RATE = 16000
+CHUNK_SECS = 5  # ambient: transcribe every N seconds
+SILENCE_RMS_THRESHOLD = 0.01  # skip chunks below this RMS
+
+# Vocabulary prompt — biases whisper toward these technical terms
+VOCAB_PROMPT = (
+    "Claude Code, mlx-lm, mlx-whisper, Outlines, Qwen, Textual, "
+    "Ghostty, Raycast, AeroSpace, sketchybar, FastAPI, inbox"
+)
+
+
+def whisper_stream_available() -> bool:
+    """Check if the whisper-stream binary and model are available."""
+    return Path(WHISPER_STREAM_BIN).exists() and Path(WHISPER_STREAM_MODEL).exists()
+
+
+# ── Ambient Service ─────────────────────────────────────────────────────────
+
+MIN_CHUNK_WORDS = 10
+FLUSH_INTERVAL = 60  # seconds between extraction passes
+
+
+class AmbientService:
+    """Background ambient transcription service."""
+
+    def __init__(self, on_note: Callable[[str, str | None], None]):
+        self._on_note = on_note
+        self._buffer: list[str] = []
+        self._buffer_lock = threading.Lock()
+        self._running = False
+        self._capture_thread: threading.Thread | None = None
+        self._flush_thread: threading.Thread | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._capture_thread.start()
+        self._flush_thread.start()
+
+    def stop(self) -> None:
+        if not self._running:
+            return
+        self._running = False
+        self._process_buffer()
+
+    def _capture_loop(self) -> None:
+        import mlx_whisper
+        import numpy as np
+        import sounddevice as sd
+
+        while self._running:
+            try:
+                audio = sd.rec(
+                    int(CHUNK_SECS * SAMPLE_RATE),
+                    samplerate=SAMPLE_RATE,
+                    channels=1,
+                    dtype="float32",
+                )
+                sd.wait()
+
+                if not self._running:
+                    break
+
+                audio_flat = audio.flatten()
+                rms = float(np.sqrt(np.mean(audio_flat**2)))
+                if rms < SILENCE_RMS_THRESHOLD:
+                    continue
+
+                result = mlx_whisper.transcribe(
+                    audio_flat, path_or_hf_repo=MLX_WHISPER_MODEL, language="en"
+                )
+                text = result.get("text", "").strip()
+                if text:
+                    with self._buffer_lock:
+                        self._buffer.append(text)
+
+            except Exception:
+                time.sleep(1)
+
+    def _flush_loop(self) -> None:
+        while self._running:
+            time.sleep(FLUSH_INTERVAL)
+            if self._running:
+                self._process_buffer()
+
+    def _process_buffer(self) -> None:
+        with self._buffer_lock:
+            if not self._buffer:
+                return
+            chunk = " ".join(self._buffer)
+            self._buffer.clear()
+
+        if len(chunk.split()) < MIN_CHUNK_WORDS:
+            return
+
+        import contextlib
+
+        summary = None
+        with contextlib.suppress(Exception):
+            summary = extract_summary(chunk)
+
+        self._on_note(chunk, summary)
+
+
+# ── Dictation Service ───────────────────────────────────────────────────────
+
+
+def _type_text(text: str) -> None:
+    """Inject text at current cursor position via macOS CGEvent."""
+    import Quartz
+
+    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    for char in text:
+        down = Quartz.CGEventCreateKeyboardEvent(src, 0, True)
+        up = Quartz.CGEventCreateKeyboardEvent(src, 0, False)
+        Quartz.CGEventKeyboardSetUnicodeString(down, 1, char)
+        Quartz.CGEventKeyboardSetUnicodeString(up, 1, char)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+        time.sleep(0.001)
+
+
+def _clean_line(line: str) -> str:
+    """Strip whisper-stream ANSI codes and timestamp markers."""
+    line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+    line = re.sub(r"\[\d+:\d+:\d+\.\d+ --> \d+:\d+:\d+\.\d+\s*\]", "", line)
+    return line.strip()
+
+
+class DictationService:
+    """Background dictation service — streams ASR to keyboard."""
+
+    def __init__(self) -> None:
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self._last_text = ""
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def available(self) -> bool:
+        return whisper_stream_available()
+
+    def start(self) -> None:
+        if self._running:
+            return
+        if not self.available:
+            raise RuntimeError(f"whisper-stream not found at {WHISPER_STREAM_BIN}")
+        self._running = True
+        self._last_text = ""
+        self._thread = threading.Thread(target=self._stream_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if not self._running:
+            return
+        self._running = False
+        if self._proc:
+            self._proc.terminate()
+            self._proc = None
+
+    def _stream_loop(self) -> None:
+        self._proc = subprocess.Popen(
+            [
+                WHISPER_STREAM_BIN,
+                "-m",
+                WHISPER_STREAM_MODEL,
+                "--language",
+                "en",
+                "--step",
+                "500",
+                "--length",
+                "5000",
+                "--keep",
+                "200",
+                "--prompt",
+                VOCAB_PROMPT,
+                "--no-timestamps",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+
+        try:
+            assert self._proc.stdout is not None
+            for raw_line in self._proc.stdout:
+                if not self._running:
+                    break
+
+                text = _clean_line(raw_line)
+                if not text:
+                    continue
+
+                if text.startswith(self._last_text):
+                    new_part = text[len(self._last_text) :].lstrip()
+                elif self._last_text and self._last_text in text:
+                    new_part = text[text.index(self._last_text) + len(self._last_text) :].lstrip()
+                else:
+                    new_part = text
+
+                if new_part:
+                    _type_text(new_part + " ")
+
+                self._last_text = text
+
+        except Exception:
+            pass
+        finally:
+            if self._proc:
+                self._proc.terminate()
+                self._proc = None
+            self._running = False
+
+
+# ── LLM Engine ──────────────────────────────────────────────────────────────
+
+MLX_MODEL = "mlx-community/Qwen3.5-0.8B-MLX-4bit"
+
+_llm_lock = threading.Lock()
+_llm_model: object | None = None
+_llm_tokenizer: object | None = None
+
+
+def _ensure_llm_loaded() -> None:
+    """Load model + tokenizer once. Thread-safe."""
+    global _llm_model, _llm_tokenizer
+    if _llm_model is not None:
+        return
+    with _llm_lock:
+        if _llm_model is not None:
+            return
+        import mlx_lm
+
+        _llm_model, _llm_tokenizer = mlx_lm.load(MLX_MODEL)
+
+
+def get_outlines_model() -> object:
+    """Return an Outlines-wrapped model for constrained generation."""
+    _ensure_llm_loaded()
+    import outlines
+
+    return outlines.models.mlxlm(MLX_MODEL)
+
+
+def llm_complete(prompt: str, max_tokens: int = 64, temperature: float = 0.7) -> str:
+    """Free-form text completion. Used for autocomplete suggestions."""
+    _ensure_llm_loaded()
+    import mlx_lm
+    from mlx_lm.sample_utils import make_sampler
+
+    return mlx_lm.generate(
+        _llm_model,
+        _llm_tokenizer,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        sampler=make_sampler(temp=temperature),
+    )
+
+
+def generate_json(prompt: str, schema: type[PydanticBaseModel]) -> PydanticBaseModel:
+    """Generate constrained JSON matching a Pydantic schema. Used for extraction."""
+    import outlines
+
+    model = get_outlines_model()
+    generator = outlines.generate.json(model, schema)
+    return generator(prompt)
+
+
+def llm_is_loaded() -> bool:
+    """Check if the LLM model is loaded."""
+    return _llm_model is not None
+
+
+def llm_warmup() -> None:
+    """Pre-load the model."""
+    _ensure_llm_loaded()
+
+
+# ── LLM Extraction ─────────────────────────────────────────────────────────
+
+try:
+    from pydantic import BaseModel as _PydanticBase
+except ImportError:
+    _PydanticBase = object  # type: ignore[assignment, misc]
+
+EXTRACT_PROMPT = (
+    "Extract structured information from this spoken note. "
+    "key_points: main ideas stated. action_items: things to do. topics: subjects mentioned. "
+    "Use empty lists if nothing relevant.\n\nText: {text}"
+)
+
+
+class Extraction(_PydanticBase):
+    key_points: list[str]
+    action_items: list[str]
+    topics: list[str]
+
+
+def extract(text: str) -> Extraction:
+    """Extract key points, action items, and topics from transcript text."""
+    return generate_json(EXTRACT_PROMPT.format(text=text), Extraction)  # type: ignore[return-value]
+
+
+def extract_summary(text: str) -> str | None:
+    """Extract and format as a single-line summary. Returns None if nothing useful."""
+    result = extract(text)
+    parts = []
+    if result.key_points:
+        parts.append("; ".join(result.key_points))
+    if result.action_items:
+        parts.append("\u2192 " + "; ".join(result.action_items))
+    return " | ".join(parts) if parts else None
+
+
+# ── LLM Autocomplete ───────────────────────────────────────────────────────
+
+AUTOCOMPLETE_PROMPT = """\
+Complete the user's reply naturally. Output ONLY the completion text, nothing else.
+
+Recent messages:
+{context}
+
+User is typing: {draft}"""
+
+REPLY_PROMPT = """\
+Suggest a brief reply to the last message. Output ONLY the reply text, nothing else.
+
+Conversation:
+{context}
+
+Received: {last_message}
+
+Reply:"""
+
+
+def build_context(messages: list[dict], max_messages: int = 6) -> str:  # type: ignore[type-arg]
+    """Format recent messages into context string."""
+    recent = messages[-max_messages:]
+    lines = []
+    for msg in recent:
+        sender = msg.get("sender", "?")
+        body = msg.get("body", "").strip()
+        if len(body) > 200:
+            body = body[:200] + "..."
+        lines.append(f"{sender}: {body}")
+    return "\n".join(lines)
+
+
+def autocomplete(
+    draft: str = "",
+    messages: list[dict] | None = None,  # type: ignore[type-arg]
+    max_tokens: int = 32,
+    temperature: float = 0.5,
+    mode: str = "complete",
+) -> str | None:
+    """Suggest a completion or reply for the draft text."""
+    if mode not in ("complete", "reply"):
+        raise ValueError(f"Invalid mode: {mode!r}. Must be 'complete' or 'reply'.")
+
+    if mode == "complete":
+        if len(draft.strip()) < 3:
+            return None
+        context = build_context(messages) if messages else ""
+        prompt = AUTOCOMPLETE_PROMPT.format(context=context, draft=draft)
+        result = llm_complete(prompt, max_tokens=max_tokens, temperature=temperature)
+        result = result.strip()
+        return result if result else None
+
+    # reply mode
+    if not messages:
+        return None
+    last = messages[-1]
+    last_body = last.get("body", "").strip()
+    if not last_body:
+        return None
+    context = build_context(messages[:-1]) if len(messages) > 1 else ""
+    prompt = REPLY_PROMPT.format(context=context, last_message=last_body)
+    result = llm_complete(prompt, max_tokens=max_tokens, temperature=temperature)
+    result = result.strip()
+    return result if result else None

@@ -28,6 +28,12 @@ class InboxClient:
     def health(self) -> dict:
         return self._client.get("/health").json()
 
+    def health_check(self) -> dict:
+        """Check if server is responding. Raises if not."""
+        r = self._client.get("/health", timeout=2)
+        r.raise_for_status()
+        return r.json()
+
     def is_server_running(self) -> bool:
         try:
             self._client.get("/health", timeout=2)
@@ -299,24 +305,7 @@ class InboxClient:
         r.raise_for_status()
         return r.json().get("ok", False)
 
-    # ── Accounts ─────────────────────────────────────────────────────────
-
-    def accounts(self) -> dict:
-        r = self._client.get("/accounts")
-        r.raise_for_status()
-        return r.json()
-
-    def add_account(self) -> dict:
-        r = self._client.post("/accounts/add", timeout=120)
-        r.raise_for_status()
-        return r.json()
-
-    def reauth_account(self, email: str) -> dict:
-        r = self._client.post("/accounts/reauth", json={"email": email}, timeout=120)
-        r.raise_for_status()
-        return r.json()
-
-    # ── Ambient ─────────────────────────────────────────────────────────
+    # ── Ambient / Dictation / LLM ──────────────────────────────────────
 
     def ambient_start(self) -> dict:
         r = self._client.post("/ambient/start")
@@ -333,8 +322,8 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
-    def ambient_notes(self, limit: int = 30) -> list[dict]:
-        r = self._client.get("/ambient/notes", params={"limit": limit})
+    def ambient_notes(self, limit: int = 50, q: str = "") -> list[dict]:
+        r = self._client.get("/ambient/notes", params={"limit": limit, "q": q})
         r.raise_for_status()
         return r.json()
 
@@ -342,8 +331,6 @@ class InboxClient:
         r = self._client.get(f"/ambient/notes/{date}")
         r.raise_for_status()
         return r.json()
-
-    # ── Dictation ───────────────────────────────────────────────────────
 
     def dictation_start(self) -> dict:
         r = self._client.post("/dictation/start")
@@ -355,20 +342,10 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
-    # ── Autocomplete ────────────────────────────────────────────────────
-
-    def autocomplete(
-        self, draft: str, messages: list[dict] | None = None, max_tokens: int = 32
-    ) -> str | None:
-        r = self._client.post(
-            "/autocomplete",
-            json={"draft": draft, "messages": messages or [], "max_tokens": max_tokens},
-            timeout=10,
-        )
+    def autocomplete(self, draft: str, **kwargs) -> str | None:  # type: ignore[type-arg]
+        r = self._client.post("/autocomplete", json={"draft": draft, **kwargs})
         r.raise_for_status()
         return r.json().get("completion")
-
-    # ── LLM ─────────────────────────────────────────────────────────────
 
     def llm_status(self) -> dict:
         r = self._client.get("/llm/status")
@@ -376,6 +353,23 @@ class InboxClient:
         return r.json()
 
     def llm_warmup(self) -> dict:
-        r = self._client.post("/llm/warmup", timeout=120)
+        r = self._client.post("/llm/warmup")
+        r.raise_for_status()
+        return r.json()
+
+    # ── Accounts ─────────────────────────────────────────────────────────
+
+    def accounts(self) -> dict:
+        r = self._client.get("/accounts")
+        r.raise_for_status()
+        return r.json()
+
+    def add_account(self) -> dict:
+        r = self._client.post("/accounts/add", timeout=120)
+        r.raise_for_status()
+        return r.json()
+
+    def reauth_account(self, email: str) -> dict:
+        r = self._client.post("/accounts/reauth", json={"email": email}, timeout=120)
         r.raise_for_status()
         return r.json()

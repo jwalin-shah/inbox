@@ -1,0 +1,309 @@
+"""Tests for services.py — pure helper functions (no external dependencies)."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from services import (
+    _build_event_body,
+    _clean_body,
+    _clean_email_body,
+    _html_to_text,
+    _parse_email_address,
+    _parse_time,
+    parse_quick_event,
+)
+
+# ── _clean_body ─────────────────────────────────────────────────────────────
+
+
+class TestCleanBody:
+    def test_none_returns_empty(self):
+        assert _clean_body(None) == ""
+
+    def test_empty_string(self):
+        assert _clean_body("") == ""
+
+    def test_strips_whitespace(self):
+        assert _clean_body("  hello  ") == "hello"
+
+    def test_replaces_attachment_placeholder(self):
+        result = _clean_body("Check this \ufffc out")
+        assert "(attachment)" in result
+        assert "\ufffc" not in result
+
+    def test_normal_text_unchanged(self):
+        assert _clean_body("Hello, world!") == "Hello, world!"
+
+
+# ── _parse_email_address ────────────────────────────────────────────────────
+
+
+class TestParseEmailAddress:
+    def test_name_and_email(self):
+        name, email = _parse_email_address("Alice Smith <alice@example.com>")
+        assert name == "Alice Smith"
+        assert email == "alice@example.com"
+
+    def test_quoted_name(self):
+        name, email = _parse_email_address('"Alice Smith" <alice@example.com>')
+        assert name == "Alice Smith"
+        assert email == "alice@example.com"
+
+    def test_email_only_angle_brackets(self):
+        name, email = _parse_email_address("<alice@example.com>")
+        assert name == "alice@example.com"
+        assert email == "alice@example.com"
+
+    def test_bare_email(self):
+        name, email = _parse_email_address("alice@example.com")
+        assert name == "alice@example.com"
+        assert email == "alice@example.com"
+
+    def test_whitespace_handling(self):
+        name, email = _parse_email_address("  Alice Smith  <alice@example.com>  ")
+        assert name == "Alice Smith"
+        assert email == "alice@example.com"
+
+
+# ── _html_to_text ──────────────────────────────────────────────────────────
+
+
+class TestHtmlToText:
+    def test_strips_tags(self):
+        assert "hello" in _html_to_text("<p>hello</p>")
+
+    def test_br_to_newline(self):
+        result = _html_to_text("line1<br>line2")
+        assert "line1\nline2" in result
+
+    def test_strips_style_tags(self):
+        result = _html_to_text("<style>body{color:red}</style>visible")
+        assert "color:red" not in result
+        assert "visible" in result
+
+    def test_strips_script_tags(self):
+        result = _html_to_text("<script>alert('x')</script>visible")
+        assert "alert" not in result
+        assert "visible" in result
+
+    def test_list_items(self):
+        result = _html_to_text("<ul><li>one</li><li>two</li></ul>")
+        assert "one" in result
+        assert "two" in result
+
+    def test_link_extraction(self):
+        html = '<a href="https://example.com">Click here</a>'
+        result = _html_to_text(html)
+        assert "Click here" in result
+        assert "https://example.com" in result
+
+    def test_entity_decoding(self):
+        assert "&" in _html_to_text("&amp;")
+        assert "<" in _html_to_text("&lt;")
+        assert ">" in _html_to_text("&gt;")
+        assert '"' in _html_to_text("&quot;")
+        assert "'" in _html_to_text("&#39;")
+        assert " " in _html_to_text("&nbsp;")
+
+
+# ── _clean_email_body ──────────────────────────────────────────────────────
+
+
+class TestCleanEmailBody:
+    def test_strips_quoted_replies(self):
+        body = "Thanks!\n> Previous message\n> More quoting"
+        result = _clean_email_body(body)
+        assert "Thanks!" in result
+        assert "Previous message" not in result
+
+    def test_strips_on_wrote_line(self):
+        body = "Sounds good\nOn Mon, Jan 1, 2025 Alice wrote:\nOld stuff"
+        result = _clean_email_body(body)
+        assert "Sounds good" in result
+        assert "Old stuff" not in result
+
+    def test_strips_signature_dashes(self):
+        body = "Main content\n--\nSignature here"
+        result = _clean_email_body(body)
+        assert "Main content" in result
+        assert "Signature here" not in result
+
+    def test_strips_triple_dashes(self):
+        body = "Main content\n---\nFooter"
+        result = _clean_email_body(body)
+        assert "Main content" in result
+        assert "Footer" not in result
+
+    def test_strips_unsubscribe(self):
+        body = "Content here\nunsubscribe from this list"
+        result = _clean_email_body(body)
+        assert "Content here" in result
+        assert "unsubscribe" not in result.lower()
+
+    def test_strips_tracking_urls(self):
+        body = "Content\nhttps://click.example.com/track/123"
+        result = _clean_email_body(body)
+        assert "Content" in result
+        assert "track" not in result
+
+    def test_collapses_excessive_newlines(self):
+        body = "Line1\n\n\n\n\nLine2"
+        result = _clean_email_body(body)
+        assert "\n\n\n" not in result
+        assert "Line1" in result
+        assert "Line2" in result
+
+    def test_normal_body_preserved(self):
+        body = "Hey, just wanted to check in.\nLet me know!"
+        result = _clean_email_body(body)
+        assert "Hey, just wanted to check in." in result
+        assert "Let me know!" in result
+
+
+# ── _parse_time ─────────────────────────────────────────────────────────────
+
+
+class TestParseTime:
+    def test_24h_format(self):
+        result = _parse_time("14:30")
+        assert result is not None
+        assert result.hour == 14
+        assert result.minute == 30
+
+    def test_12h_pm(self):
+        result = _parse_time("2pm")
+        assert result is not None
+        assert result.hour == 14
+        assert result.minute == 0
+
+    def test_12h_am(self):
+        result = _parse_time("9am")
+        assert result is not None
+        assert result.hour == 9
+
+    def test_12h_with_minutes(self):
+        result = _parse_time("2:30pm")
+        assert result is not None
+        assert result.hour == 14
+        assert result.minute == 30
+
+    def test_12pm_is_noon(self):
+        result = _parse_time("12pm")
+        assert result is not None
+        assert result.hour == 12
+
+    def test_12am_is_midnight(self):
+        result = _parse_time("12am")
+        assert result is not None
+        assert result.hour == 0
+
+    def test_invalid_returns_none(self):
+        assert _parse_time("not a time") is None
+        assert _parse_time("") is None
+
+    def test_case_insensitive(self):
+        result = _parse_time("3PM")
+        assert result is not None
+        assert result.hour == 15
+
+    def test_with_whitespace(self):
+        result = _parse_time("  3pm  ")
+        assert result is not None
+        assert result.hour == 15
+
+
+# ── parse_quick_event ───────────────────────────────────────────────────────
+
+
+class TestParseQuickEvent:
+    def test_basic_time_range(self):
+        result = parse_quick_event("Meeting 2pm-3pm")
+        assert result["summary"] == "Meeting"
+        assert result["start"].hour == 14
+        assert result["end"].hour == 15
+        assert result["all_day"] is False
+
+    def test_24h_time_range(self):
+        result = parse_quick_event("Standup 09:00-09:30")
+        assert result["summary"] == "Standup"
+        assert result["start"].hour == 9
+        assert result["start"].minute == 0
+        assert result["end"].hour == 9
+        assert result["end"].minute == 30
+
+    def test_with_location(self):
+        result = parse_quick_event("Lunch 12pm-1pm @ Cafe Roma")
+        assert result["summary"] == "Lunch"
+        assert result["location"] == "Cafe Roma"
+
+    def test_all_day_event(self):
+        result = parse_quick_event("all day: Team Offsite")
+        assert result["summary"] == "Team Offsite"
+        assert result["all_day"] is True
+
+    def test_all_day_with_location(self):
+        result = parse_quick_event("all day: Conference @ Convention Center")
+        assert result["summary"] == "Conference"
+        assert result["location"] == "Convention Center"
+        assert result["all_day"] is True
+
+    def test_no_time_falls_back(self):
+        result = parse_quick_event("Quick sync")
+        assert result["summary"] == "Quick sync"
+        # Should default to now → now+1h
+        assert result["all_day"] is False
+        diff = result["end"] - result["start"]
+        assert diff == timedelta(hours=1)
+
+    def test_en_dash_separator(self):
+        result = parse_quick_event("Meeting 2pm\u20133pm")
+        assert result["summary"] == "Meeting"
+        assert result["start"].hour == 14
+        assert result["end"].hour == 15
+
+    def test_12h_with_minutes_range(self):
+        result = parse_quick_event("Call 2:30pm-3:45pm")
+        assert result["start"].hour == 14
+        assert result["start"].minute == 30
+        assert result["end"].hour == 15
+        assert result["end"].minute == 45
+
+
+# ── _build_event_body ──────────────────────────────────────────────────────
+
+
+class TestBuildEventBody:
+    def test_all_day_event(self):
+        start = datetime(2025, 6, 15)
+        end = datetime(2025, 6, 16)
+        body = _build_event_body("Day Off", start, end, all_day=True)
+        assert body["summary"] == "Day Off"
+        assert body["start"] == {"date": "2025-06-15"}
+        assert body["end"] == {"date": "2025-06-16"}
+
+    def test_timed_event(self):
+        start = datetime(2025, 6, 15, 14, 0).astimezone()
+        end = datetime(2025, 6, 15, 15, 0).astimezone()
+        body = _build_event_body("Meeting", start, end)
+        assert body["summary"] == "Meeting"
+        assert "dateTime" in body["start"]
+        assert "dateTime" in body["end"]
+
+    def test_with_location(self):
+        start = datetime(2025, 6, 15)
+        end = datetime(2025, 6, 16)
+        body = _build_event_body("Event", start, end, location="Room 5", all_day=True)
+        assert body["location"] == "Room 5"
+
+    def test_with_description(self):
+        start = datetime(2025, 6, 15)
+        end = datetime(2025, 6, 16)
+        body = _build_event_body("Event", start, end, description="Notes here", all_day=True)
+        assert body["description"] == "Notes here"
+
+    def test_no_location_omitted(self):
+        start = datetime(2025, 6, 15)
+        end = datetime(2025, 6, 16)
+        body = _build_event_body("Event", start, end, all_day=True)
+        assert "location" not in body

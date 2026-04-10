@@ -12,20 +12,13 @@ uv run python inbox_server.py   # server only (for agent access)
 
 ## Architecture
 ```
-services.py       — data access layer (iMessage, Gmail, Calendar, Notes, Reminders, GitHub, Drive, auth)
+services.py       — data access layer (iMessage, Gmail, Calendar, Notes, Reminders, GitHub, Drive, auth, LLM, audio)
 inbox_server.py   — FastAPI server wrapping services.py (port 9849)
 inbox_client.py   — sync HTTP client for the server API
 inbox.py          — Textual TUI (thin client, auto-starts server)
 contacts.py       — reads macOS AddressBook SQLite DBs, resolves phone→name
 ambient_notes.py  — writes ambient captures to Obsidian vault (~/vault/daily/)
-llm/
-  engine.py       — singleton Qwen3.5-0.8B loader (mlx-lm + Outlines)
-  extract.py      — structured extraction from transcripts → JSON
-  autocomplete.py — inline text completion for compose mode
-audio/
-  whisper.py      — shared whisper config (MLX + C++ paths, audio settings)
-  ambient.py      — background mic → whisper → extraction → notes service
-  dictate.py      — real-time mic → whisper-stream → keyboard injection
+ambient_daemon.py — background daemon for audio capture → ASR → extraction → notes
 tokens/           — per-account Google OAuth tokens (auto-created)
 credentials.json  — Google OAuth client secret (never commit)
 github_token.txt  — GitHub personal access token (never commit)
@@ -64,7 +57,7 @@ GET  /ambient/notes?limit=50&q=search
 GET  /ambient/notes/{id}
 POST /dictation/start
 POST /dictation/stop
-POST /autocomplete  {"draft", "messages", "max_tokens"}
+POST /autocomplete  {"draft", "messages", "max_tokens", "temperature", "mode"}
 GET  /llm/status
 POST /llm/warmup
 GET  /accounts
@@ -111,11 +104,13 @@ POST /accounts/reauth  {"email": "..."}
 
 ## LLM + Audio stack
 - **LLM**: Qwen3.5-0.8B-MLX-4bit (~500MB) — shared singleton for extraction + autocomplete
+- **Outlines model**: Cached singleton wrapping the base model — reused for all constrained generation calls
 - **Constrained gen**: Outlines with mlx-lm backend — FSM token masking for valid JSON
 - **Ambient ASR**: mlx-whisper (whisper-base.en-mlx) — chunk-based, MLX-native
 - **Dictation ASR**: whisper-stream C++ binary — streaming 500ms step, low latency
-- **Ambient notes**: Written to Obsidian vault at `~/vault/daily/` as markdown
+- **Ambient notes**: Written to Obsidian vault at `~/vault/daily/` as markdown; captures logged with preview
 - **Keyboard injection**: pyobjc CGEvent (dictation mode, needs Accessibility permission)
+- **Ambient auto-start**: Ambient listening starts automatically on server startup (gracefully fails if dependencies unavailable)
 
 ## Key design decisions
 - **Client-server split** — server handles data, TUI and agents are both clients
@@ -128,6 +123,7 @@ POST /accounts/reauth  {"email": "..."}
 - **Gmail HTML→text** — strips HTML tags, quoted replies, signatures, tracking URLs
 - **Optimistic send** — message appears in TUI immediately, confirmed in background
 - **Notes via SQLite** for listing, AppleScript for full body (protobuf parsing is too complex)
+- **Flattened module structure** — LLM and audio logic integrated into main services rather than nested directories
 
 ## Data sources
 - **iMessage**: `~/Library/Messages/chat.db` (read-only SQLite)
@@ -137,9 +133,14 @@ POST /accounts/reauth  {"email": "..."}
 - **Gmail/Calendar/Drive**: Google API via OAuth tokens in `tokens/`
 - **GitHub**: REST API via personal access token in `github_token.txt`
 
+## Testing
+- Comprehensive test suite in `tests/` covers services, server, client, audio, LLM, contacts, ambient notes
+- `conftest.py` stubs heavy ML/hardware dependencies (`mlx_lm`, `mlx_whisper`, `sounddevice`, `Quartz`, `outlines`) so tests run in CI without full deps installed
+- Fixtures for temp reminders DB, vault paths, mock services
+
 ## Dev commands
 ```bash
 uv run ruff check --fix .   # lint
 uv run pyright              # type check
-uv run pytest               # tests (none yet)
+uv run pytest               # unit tests
 ```

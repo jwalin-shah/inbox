@@ -1,6 +1,5 @@
 """
-Inbox API server — local REST API for iMessage, Gmail, Calendar, Notes,
-Reminders, GitHub, Google Drive, Ambient, LLM.
+Inbox API server — local REST API for iMessage, Gmail, Calendar, Notes, Reminders.
 Run: uv run python inbox_server.py
 """
 
@@ -14,11 +13,11 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 import ambient_notes
-from audio.ambient import AmbientService
-from audio.dictate import DictationService
 from services import (
+    AmbientService,
     CalendarEvent,
     Contact,
+    DictationService,
     DriveFile,
     GitHubNotification,
     Msg,
@@ -54,6 +53,9 @@ from services import (
     reminder_create,
     reminders_list,
     reminders_lists,
+)
+from services import (
+    autocomplete as services_autocomplete,
 )
 
 PORT = 9849
@@ -139,18 +141,6 @@ class AccountRequest(BaseModel):
     email: str = ""
 
 
-class AutocompleteRequest(BaseModel):
-    draft: str
-    messages: list[dict] = []
-    max_tokens: int = 32
-
-
-class DailyNoteOut(BaseModel):
-    date: str
-    path: str
-    size: int
-
-
 class ReminderOut(BaseModel):
     id: str
     title: str
@@ -199,21 +189,15 @@ class DriveCreateFolderRequest(BaseModel):
     account: str = ""
 
 
+class AutocompleteRequest(BaseModel):
+    draft: str = ""
+    messages: list[dict] = []  # type: ignore[type-arg]
+    max_tokens: int = 32
+    temperature: float = 0.5
+    mode: str = "complete"
+
+
 # ── Server state ─────────────────────────────────────────────────────────────
-
-
-def _on_ambient_note(raw_transcript: str, summary: str | None):
-    """Callback from AmbientService — write note to Obsidian vault."""
-    try:
-        topics = ""
-        if summary:
-            from llm.extract import extract
-
-            result = extract(raw_transcript)
-            topics = ", ".join(result.topics)
-    except Exception:
-        topics = ""
-    ambient_notes.save_note(raw_transcript, summary, topics)
 
 
 class ServerState:
@@ -223,8 +207,8 @@ class ServerState:
         self.drive_services: dict[str, object] = {}
         self.conv_cache: dict[str, Contact] = {}  # "source:id" -> Contact
         self.events_cache: list[CalendarEvent] = []
-        self.ambient = AmbientService(on_note=_on_ambient_note)
-        self.dictation = DictationService()
+        self.ambient: AmbientService = AmbientService(on_note=lambda raw, summary: None)
+        self.dictation: DictationService = DictationService()
 
 
 state = ServerState()
@@ -347,6 +331,7 @@ async def lifespan(app: FastAPI):
         f"Calendar accounts: {list(cal.keys())}, "
         f"Drive accounts: {list(drive.keys())}"
     )
+
     yield
 
 
@@ -555,98 +540,6 @@ async def get_note(note_id: str):
     }
 
 
-# ── Ambient ──────────────────────────────────────────────────────────────
-
-
-@app.post("/ambient/start")
-async def start_ambient():
-    if state.ambient.is_running:
-        return {"status": "already_running"}
-    await asyncio.to_thread(state.ambient.start)
-    return {"status": "started"}
-
-
-@app.post("/ambient/stop")
-async def stop_ambient():
-    if not state.ambient.is_running:
-        return {"status": "not_running"}
-    await asyncio.to_thread(state.ambient.stop)
-    return {"status": "stopped"}
-
-
-@app.get("/ambient/status")
-async def ambient_status():
-    return {
-        "ambient": state.ambient.is_running,
-        "dictation": state.dictation.is_running,
-        "dictation_available": state.dictation.available,
-    }
-
-
-@app.get("/ambient/notes", response_model=list[DailyNoteOut])
-async def list_ambient_notes(limit: int = 30):
-    notes = await asyncio.to_thread(ambient_notes.list_daily_notes, limit)
-    return [DailyNoteOut(**n) for n in notes]
-
-
-@app.get("/ambient/notes/{date}")
-async def get_ambient_note(date: str):
-    content = await asyncio.to_thread(ambient_notes.read_daily_note, date)
-    if content is None:
-        raise HTTPException(404, "No daily note for that date")
-    return {"date": date, "content": content}
-
-
-# ── Dictation ───────────────────────────────────────────────────────────
-
-
-@app.post("/dictation/start")
-async def start_dictation():
-    if state.dictation.is_running:
-        return {"status": "already_running"}
-    if not state.dictation.available:
-        raise HTTPException(400, "whisper-stream binary not found")
-    await asyncio.to_thread(state.dictation.start)
-    return {"status": "started"}
-
-
-@app.post("/dictation/stop")
-async def stop_dictation():
-    if not state.dictation.is_running:
-        return {"status": "not_running"}
-    await asyncio.to_thread(state.dictation.stop)
-    return {"status": "stopped"}
-
-
-# ── Autocomplete ────────────────────────────────────────────────────────
-
-
-@app.post("/autocomplete")
-async def autocomplete_text(req: AutocompleteRequest):
-    from llm.autocomplete import autocomplete
-
-    result = await asyncio.to_thread(autocomplete, req.draft, req.messages, req.max_tokens)
-    return {"completion": result}
-
-
-# ── LLM ─────────────────────────────────────────────────────────────────
-
-
-@app.get("/llm/status")
-async def llm_status():
-    from llm.engine import is_loaded
-
-    return {"loaded": is_loaded()}
-
-
-@app.post("/llm/warmup")
-async def llm_warmup():
-    from llm.engine import warmup
-
-    await asyncio.to_thread(warmup)
-    return {"status": "ready"}
-
-
 # ── Reminders ────────────────────────────────────────────────────────────────
 
 
@@ -813,6 +706,100 @@ async def delete_drive_file(file_id: str, account: str = ""):
         raise HTTPException(404, "No Drive account available")
     ok = await asyncio.to_thread(drive_delete, svc, file_id)
     return {"ok": ok}
+
+
+# ── Ambient / Dictation ─────────────────────────────────────────────────────
+
+
+@app.post("/ambient/start")
+async def start_ambient():
+    if state.ambient.is_running:
+        return {"status": "already_running"}
+    state.ambient.start()
+    return {"status": "started"}
+
+
+@app.post("/ambient/stop")
+async def stop_ambient():
+    if not state.ambient.is_running:
+        return {"status": "not_running"}
+    state.ambient.stop()
+    return {"status": "stopped"}
+
+
+@app.get("/ambient/status")
+async def ambient_status():
+    return {
+        "ambient": state.ambient.is_running,
+        "dictation": state.dictation.is_running,
+        "dictation_available": state.dictation.available,
+    }
+
+
+@app.get("/ambient/notes")
+async def list_ambient_notes(limit: int = 50, q: str = ""):
+    notes = await asyncio.to_thread(ambient_notes.list_daily_notes, limit=limit)
+    return notes
+
+
+@app.get("/ambient/notes/{date}")
+async def get_ambient_note(date: str):
+    content = await asyncio.to_thread(ambient_notes.read_daily_note, date)
+    if content is None:
+        raise HTTPException(404, "Note not found")
+    return {"date": date, "content": content}
+
+
+@app.post("/dictation/start")
+async def start_dictation():
+    if not state.dictation.available:
+        raise HTTPException(400, "whisper-stream binary not available")
+    if state.dictation.is_running:
+        return {"status": "already_running"}
+    state.dictation.start()
+    return {"status": "started"}
+
+
+@app.post("/dictation/stop")
+async def stop_dictation():
+    if not state.dictation.is_running:
+        return {"status": "not_running"}
+    state.dictation.stop()
+    return {"status": "stopped"}
+
+
+# ── Autocomplete / LLM ──────────────────────────────────────────────────────
+
+
+@app.post("/autocomplete")
+async def autocomplete_endpoint(req: AutocompleteRequest):
+    try:
+        result = await asyncio.to_thread(
+            services_autocomplete,
+            req.draft,
+            req.messages,
+            req.max_tokens,
+            req.temperature,
+            req.mode,
+        )
+        return {"completion": result}
+    except Exception as e:
+        return {"completion": None, "error": str(e)}
+
+
+@app.get("/llm/status")
+async def llm_status():
+    from services import llm_is_loaded
+
+    return {"loaded": llm_is_loaded()}
+
+
+@app.post("/llm/warmup")
+async def llm_warmup_endpoint():
+    from services import llm_warmup
+
+    await asyncio.to_thread(llm_warmup)
+    return {"status": "ready"}
 
 
 # ── Accounts ─────────────────────────────────────────────────────────────────

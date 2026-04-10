@@ -1,11 +1,12 @@
 """
 Unified inbox TUI — iMessage + Gmail + Calendar + Notes
 Thin client that connects to inbox_server.py via HTTP.
+Auto-starts the server on launch.
 """
 
 from __future__ import annotations
 
-import asyncio
+import time
 from datetime import datetime
 
 from rich.align import Align
@@ -16,7 +17,6 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.suggester import Suggester
 from textual.widgets import (
     Footer,
     Header,
@@ -30,31 +30,6 @@ from textual.widgets import (
 )
 
 from inbox_client import InboxClient
-
-
-class AutocompleteSuggester(Suggester):
-    """Ghost-text autocomplete powered by the LLM autocomplete API."""
-
-    def __init__(self, app_ref: InboxApp) -> None:
-        super().__init__(use_cache=False)
-        self._app_ref = app_ref
-
-    async def get_suggestion(self, value: str) -> str | None:
-        if len(value.strip()) < 3:
-            return None
-        # Don't autocomplete on calendar tab (it's a quick-event input)
-        if self._app_ref._active_filter == "calendar":
-            return None
-        try:
-            mv = self._app_ref.query_one("#messages", MessageView)
-            messages = mv.messages
-            completion = await asyncio.to_thread(self._app_ref.client.autocomplete, value, messages)
-            if completion:
-                return value + completion
-        except Exception:
-            pass
-        return None
-
 
 # ── UI Widgets ───────────────────────────────────────────────────────────────
 
@@ -308,7 +283,6 @@ class InboxApp(App):
         Binding("ctrl+shift+a", "reauth_account", "Re-auth"),
         Binding("ctrl+n", "new_event", "New Event"),
         Binding("ctrl+d", "delete_event", "Delete Event"),
-        Binding("ctrl+6", "toggle_ambient", "Ambient"),
         Binding("escape", "clear_compose", "Clear"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
@@ -317,7 +291,8 @@ class InboxApp(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self.client = InboxClient()
+        # Use longer timeout for first requests (data loading can be slow)
+        self.client = InboxClient(timeout=60)
         self.conversations: list[dict] = []
         self.events: list[dict] = []
         self.notes_data: list[dict] = []
@@ -345,9 +320,8 @@ class InboxApp(App):
                 yield DetailView(id="detail-view", classes="hidden")
                 with Horizontal(id="compose-area"):
                     yield Input(
-                        placeholder="Reply… (Enter to send, Tab to accept suggestion)",
+                        placeholder="Reply… (Enter to send)",
                         id="compose",
-                        suggester=AutocompleteSuggester(self),
                     )
         yield Footer()
 
@@ -653,7 +627,6 @@ class InboxApp(App):
 
     def _reload_after_send(self, conv: dict, sent_text: str) -> None:
         """Retry thread reload until the sent message appears in the DB."""
-        import time
 
         for delay in (1.0, 2.0, 3.0):
             time.sleep(delay)
@@ -792,34 +765,6 @@ class InboxApp(App):
             self.call_from_thread(
                 self.query_one("#status").update,
                 f"[red]Re-auth failed: {e}[/]",
-            )
-
-    # ── Ambient ──────────────────────────────────────────────────────────
-
-    def action_toggle_ambient(self) -> None:
-        self.query_one("#status").update("[yellow]Toggling ambient...[/]")
-        self._do_toggle_ambient()
-
-    @work(thread=True)
-    def _do_toggle_ambient(self) -> None:
-        try:
-            status = self.client.ambient_status()
-            if status.get("running"):
-                self.client.ambient_stop()
-                self.call_from_thread(
-                    self.query_one("#status").update,
-                    "[dim]Ambient stopped[/]",
-                )
-            else:
-                self.client.ambient_start()
-                self.call_from_thread(
-                    self.query_one("#status").update,
-                    "[green]Ambient listening…[/]",
-                )
-        except Exception as e:
-            self.call_from_thread(
-                self.query_one("#status").update,
-                f"[red]Ambient error: {e}[/]",
             )
 
     # ── Misc ─────────────────────────────────────────────────────────────
