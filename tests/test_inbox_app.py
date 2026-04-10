@@ -145,3 +145,179 @@ def test_imessage_send_flow_keeps_optimistic_update_and_reload() -> None:
             app._do_send.assert_called_once_with(app.active_conv, "hello there")
 
     asyncio.run(runner())
+
+
+# ── Client cleanup on exit ─────────────────────────────────────────────────
+
+
+def test_on_unmount_closes_client() -> None:
+    async def runner() -> None:
+        client = MagicMock()
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            # Simulate a running poll timer
+            app._poll_timer = MagicMock()
+            await pilot.pause()
+
+        # After run_test exits, on_unmount fires, calling _cleanup_resources
+        client.close.assert_called_once()
+
+    asyncio.run(runner())
+
+
+def test_cleanup_resources_stops_poll_timer() -> None:
+    client = MagicMock()
+    app = _make_app(client)
+    mock_timer = MagicMock()
+    app._poll_timer = mock_timer
+    app._client_closed = False
+
+    app._cleanup_resources()
+
+    mock_timer.stop.assert_called_once()
+    assert app._poll_timer is None
+    client.close.assert_called_once()
+    assert app._client_closed is True
+
+
+def test_cleanup_resources_idempotent() -> None:
+    client = MagicMock()
+    app = _make_app(client)
+    app._poll_timer = None
+    app._client_closed = False
+
+    app._cleanup_resources()
+    assert app._client_closed is True
+    client.close.assert_called_once()
+
+    # Second call should be a no-op for client.close
+    app._cleanup_resources()
+    client.close.assert_called_once()  # still only one call
+
+
+# ── Error formatting ────────────────────────────────────────────────────────
+
+
+def test_format_request_error_server_unreachable() -> None:
+    exc = httpx.ConnectError("refused", request=httpx.Request("GET", "http://test/"))
+    msg = inbox._format_request_error("Refresh", exc)
+    assert msg == "Server unreachable — press Ctrl+R to retry"
+
+
+def test_format_request_error_http_status() -> None:
+    request = httpx.Request("GET", "http://test/conversations")
+    response = httpx.Response(503, request=request)
+    exc = httpx.HTTPStatusError("unavailable", request=request, response=response)
+    msg = inbox._format_request_error("Refresh", exc)
+    assert msg == "Refresh failed (HTTP 503)"
+
+
+def test_format_request_error_timeout() -> None:
+    exc = httpx.TimeoutException("timed out", request=httpx.Request("GET", "http://test/"))
+    msg = inbox._format_request_error("Refresh", exc)
+    assert msg == "Server unreachable — press Ctrl+R to retry"
+
+
+def test_format_request_error_generic_exception() -> None:
+    exc = ValueError("bad data")
+    msg = inbox._format_request_error("Load", exc)
+    assert msg == "Load failed: bad data"
+
+
+# ── Poll error recovery ─────────────────────────────────────────────────────
+
+
+def test_poll_had_error_resets_after_successful_poll() -> None:
+    client = MagicMock()
+    # First call: server unreachable
+    client.conversations.side_effect = [
+        httpx.ConnectError("refused", request=httpx.Request("GET", "http://test/")),
+        [{"id": "c1", "source": "imessage", "unread": 0}],  # Second call: success
+    ]
+    client.calendar_events.return_value = [{"summary": "Standup"}]
+    client.notes.return_value = [{"id": "n1"}]
+
+    app = _make_app(client)
+    app.conversations = []
+    app.events = []
+    app.notes_data = []
+    app._poll_had_error = False
+
+    # First poll fails
+    convos, events, notes, status, changed = app._collect_poll_data()
+    assert status is not None
+    assert "unreachable" in status
+    assert changed is False
+
+    # Simulate that the error was shown (flag set by _bg_poll)
+    app._poll_had_error = True
+
+    # Second poll succeeds — conversations changed so changed=True
+    convos2, events2, notes2, status2, changed2 = app._collect_poll_data()
+    assert changed2 is True
+    assert status2 is None
+
+
+def test_collect_poll_data_succeeds_with_changed_data() -> None:
+    client = MagicMock()
+    client.conversations.return_value = [
+        {"id": "c1", "source": "imessage", "unread": 1},
+        {"id": "c2", "source": "gmail", "unread": 0},
+    ]
+    client.calendar_events.return_value = [{"summary": "Standup"}]
+    client.notes.return_value = [{"id": "n1"}]
+
+    app = _make_app(client)
+    app.conversations = [{"id": "c1", "source": "imessage", "unread": 0}]
+    app.events = []
+    app.notes_data = []
+
+    convos, events, notes, status, changed = app._collect_poll_data()
+
+    assert changed is True
+    assert len(convos) == 2
+    assert len(events) == 1
+    assert len(notes) == 1
+    assert status is None
+
+
+def test_collect_refresh_data_all_succeed() -> None:
+    client = MagicMock()
+    client.conversations.return_value = [{"id": "c1", "source": "imessage", "unread": 0}]
+    client.calendar_events.return_value = [{"summary": "Meeting"}]
+    client.notes.return_value = [{"id": "n1", "title": "My Note"}]
+
+    app = _make_app(client)
+    convos, events, notes, status = app._collect_refresh_data()
+
+    assert convos == [{"id": "c1", "source": "imessage", "unread": 0}]
+    assert events == [{"summary": "Meeting"}]
+    assert notes == [{"id": "n1", "title": "My Note"}]
+    assert status is None
+
+
+def test_collect_refresh_data_conversations_fails_preserves_old() -> None:
+    client = MagicMock()
+    client.conversations.side_effect = httpx.ConnectError(
+        "refused", request=httpx.Request("GET", "http://test/")
+    )
+    client.calendar_events.return_value = [{"summary": "Meeting"}]
+    client.notes.return_value = [{"id": "n1"}]
+
+    app = _make_app(client)
+    app.conversations = [{"id": "old", "source": "imessage", "unread": 0}]
+
+    convos, events, notes, status = app._collect_refresh_data()
+
+    # Conversations preserved from old data
+    assert convos == [{"id": "old", "source": "imessage", "unread": 0}]
+    assert events == [{"summary": "Meeting"}]
+    assert notes == [{"id": "n1"}]
+    assert status is not None
+    assert "unreachable" in status
+
+
+def test_poll_interval_env_not_set_uses_default(monkeypatch) -> None:
+    monkeypatch.delenv("INBOX_POLL_INTERVAL", raising=False)
+    assert inbox._poll_interval_from_env() == inbox.DEFAULT_POLL_INTERVAL
