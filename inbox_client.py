@@ -456,6 +456,26 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def dictation_status(self) -> dict:
+        r = self._client.get("/dictation/status")
+        r.raise_for_status()
+        return r.json()
+
+    def ambient_transcript(self, limit: int = 50) -> dict:
+        r = self._client.get("/ambient/transcript", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
+    def voice_config(self) -> dict:
+        r = self._client.get("/voice/config")
+        r.raise_for_status()
+        return r.json()
+
+    def voice_config_update(self, **kwargs) -> dict:  # type: ignore[type-arg]
+        r = self._client.put("/voice/config", json=kwargs)
+        r.raise_for_status()
+        return r.json()
+
     def autocomplete(self, draft: str, **kwargs) -> str | None:  # type: ignore[type-arg]
         r = self._client.post("/autocomplete", json={"draft": draft, **kwargs})
         r.raise_for_status()

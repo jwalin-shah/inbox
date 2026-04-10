@@ -27,6 +27,7 @@ from services import (
     Note,
     Reminder,
     add_google_account,
+    ambient_available,
     calendar_create_event,
     calendar_delete_event,
     calendar_events,
@@ -60,6 +61,7 @@ from services import (
     imsg_send,
     imsg_thread,
     init_contacts,
+    load_voice_config,
     note_body,
     notes_list,
     parse_quick_event,
@@ -71,6 +73,7 @@ from services import (
     reminder_edit,
     reminders_list,
     reminders_lists,
+    save_voice_config,
 )
 from services import (
     autocomplete as services_autocomplete,
@@ -221,6 +224,12 @@ class AutocompleteRequest(BaseModel):
     max_tokens: int = 32
     temperature: float = 0.5
     mode: str = "complete"
+
+
+class VoiceConfigRequest(BaseModel):
+    ambient_autostart: bool | None = None
+    dictation_hotkey: str | None = None
+    vault_dir: str | None = None
 
 
 class ComposeRequest(BaseModel):
@@ -379,6 +388,19 @@ async def lifespan(app: FastAPI):
             print(f"Pre-warmed {len(state.conv_cache)} conversations")
         except Exception:
             logger.warning("Pre-warm conversations failed (non-fatal)")
+
+    # Ambient autostart — respects voice config, graceful on missing deps
+    try:
+        voice_cfg = load_voice_config()
+        if voice_cfg.get("ambient_autostart", True):
+            avail, reason = ambient_available()
+            if avail:
+                state.ambient.start()
+                print("[ambient] Auto-started ambient listening")
+            else:
+                print(f"[ambient] Autostart skipped: {reason}")
+    except Exception:
+        logger.warning("Ambient autostart failed (non-fatal)")
 
     try:
         yield
@@ -965,16 +987,28 @@ async def stop_ambient():
 
 @app.get("/ambient/status")
 async def ambient_status():
+    avail, reason = ambient_available()
     return {
         "ambient": state.ambient.is_running,
+        "available": avail,
+        "reason": reason,
         "dictation": state.dictation.is_running,
         "dictation_available": state.dictation.available,
     }
 
 
+@app.get("/ambient/transcript")
+async def get_ambient_transcript(limit: int = 50):
+    segments = state.ambient.get_transcript(max_segments=limit)
+    return {"segments": segments, "count": len(segments)}
+
+
 @app.get("/ambient/notes")
 async def list_ambient_notes(limit: int = 50, q: str = ""):
     notes = await asyncio.to_thread(ambient_notes.list_daily_notes, limit=limit)
+    if q:
+        q_lower = q.lower()
+        notes = [n for n in notes if q_lower in n.get("date", "").lower()]
     return notes
 
 
@@ -1002,6 +1036,31 @@ async def stop_dictation():
         return {"status": "not_running"}
     state.dictation.stop()
     return {"status": "stopped"}
+
+
+@app.get("/dictation/status")
+async def dictation_status():
+    return {
+        "running": state.dictation.is_running,
+        "available": state.dictation.available,
+    }
+
+
+# ── Voice Config ─────────────────────────────────────────────────────────────
+
+
+@app.get("/voice/config")
+async def get_voice_config():
+    return await asyncio.to_thread(load_voice_config)
+
+
+@app.put("/voice/config")
+async def put_voice_config(req: VoiceConfigRequest):
+    current = await asyncio.to_thread(load_voice_config)
+    updates = req.model_dump(exclude_none=True)
+    merged = {**current, **updates}
+    await asyncio.to_thread(save_voice_config, merged)
+    return merged
 
 
 # ── Autocomplete / LLM ──────────────────────────────────────────────────────

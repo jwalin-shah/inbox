@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import json as _json
 import mimetypes
 import os
 import re
@@ -2282,10 +2283,40 @@ def whisper_stream_available() -> bool:
     return Path(WHISPER_STREAM_BIN).exists() and Path(WHISPER_STREAM_MODEL).exists()
 
 
+def mlx_whisper_available() -> bool:
+    """Check if mlx_whisper is importable."""
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("mlx_whisper") is not None
+    except Exception:
+        return False
+
+
+def sounddevice_available() -> bool:
+    """Check if sounddevice is importable."""
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("sounddevice") is not None
+    except Exception:
+        return False
+
+
+def ambient_available() -> tuple[bool, str]:
+    """Return (available, reason). Reason is empty when available=True."""
+    if not sounddevice_available():
+        return False, "sounddevice not installed"
+    if not mlx_whisper_available():
+        return False, "mlx_whisper not installed"
+    return True, ""
+
+
 # ── Ambient Service ─────────────────────────────────────────────────────────
 
 MIN_CHUNK_WORDS = 10
 FLUSH_INTERVAL = 60  # seconds between extraction passes
+TRANSCRIPT_MAXLEN = 200  # max segments kept in rolling transcript
 
 
 class AmbientService:
@@ -2295,6 +2326,8 @@ class AmbientService:
         self._on_note = on_note
         self._buffer: list[str] = []
         self._buffer_lock = threading.Lock()
+        self._transcript: list[str] = []  # rolling transcript segments
+        self._transcript_lock = threading.Lock()
         self._running = False
         self._capture_thread: threading.Thread | None = None
         self._flush_thread: threading.Thread | None = None
@@ -2306,6 +2339,11 @@ class AmbientService:
     @is_running.setter
     def is_running(self, value: bool) -> None:
         self._running = value
+
+    def get_transcript(self, max_segments: int = 50) -> list[str]:
+        """Return recent transcript segments (newest last)."""
+        with self._transcript_lock:
+            return list(self._transcript[-max_segments:])
 
     def start(self) -> None:
         if self._running:
@@ -2352,6 +2390,10 @@ class AmbientService:
                 if text:
                     with self._buffer_lock:
                         self._buffer.append(text)
+                    with self._transcript_lock:
+                        self._transcript.append(text)
+                        if len(self._transcript) > TRANSCRIPT_MAXLEN:
+                            self._transcript = self._transcript[-TRANSCRIPT_MAXLEN:]
 
             except Exception:  # logged below
                 _log_service_failure(
@@ -2683,3 +2725,53 @@ def autocomplete(
     result = llm_complete(prompt, max_tokens=max_tokens, temperature=temperature)
     result = result.strip()
     return result if result else None
+
+
+# ── Voice Config ────────────────────────────────────────────────────────────
+
+VOICE_CONFIG_PATH = Path.home() / ".config" / "inbox" / "voice.json"
+
+_VOICE_CONFIG_DEFAULTS: dict[str, object] = {
+    "ambient_autostart": True,
+    "dictation_hotkey": "f5",
+    "vault_dir": str(Path.home() / "vault"),
+}
+
+
+def load_voice_config() -> dict[str, object]:  # type: ignore[type-arg]
+    """Load voice config from disk, merging missing keys with defaults."""
+    if VOICE_CONFIG_PATH.exists():
+        try:
+            data = _json.loads(VOICE_CONFIG_PATH.read_text())
+            return {**_VOICE_CONFIG_DEFAULTS, **data}
+        except Exception:
+            pass
+    return dict(_VOICE_CONFIG_DEFAULTS)
+
+
+def save_voice_config(config: dict[str, object]) -> None:  # type: ignore[type-arg]
+    """Persist voice config to disk."""
+    VOICE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    merged = {**_VOICE_CONFIG_DEFAULTS, **config}
+    VOICE_CONFIG_PATH.write_text(_json.dumps(merged, indent=2))
+
+
+# ── Voice Command Routing ───────────────────────────────────────────────────
+
+_voice_command_handlers: list[Callable[[str], bool]] = []
+
+
+def register_voice_command_handler(handler: Callable[[str], bool]) -> None:
+    """Register a handler that receives voice text and returns True if handled."""
+    _voice_command_handlers.append(handler)
+
+
+def route_voice_command(text: str) -> bool:
+    """Dispatch voice text to registered handlers. Returns True if handled."""
+    for handler in _voice_command_handlers:
+        try:
+            if handler(text):
+                return True
+        except Exception:
+            pass
+    return False

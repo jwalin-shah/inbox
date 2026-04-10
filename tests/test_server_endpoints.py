@@ -15,12 +15,17 @@ def client():
     with (
         patch("inbox_server.init_contacts", return_value=0),
         patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
+        patch("inbox_server.load_voice_config", return_value={"ambient_autostart": False}),
     ):
         from inbox_server import app, state
+        from services import AmbientService, DictationService
 
         state.gmail_services = {}
         state.cal_services = {}
         state.drive_services = {}
+        # Reset ambient/dictation to real instances so tests can inspect internals
+        state.ambient = AmbientService(on_note=lambda r, s: None)
+        state.dictation = DictationService()
         with TestClient(app) as c:
             yield c, state
 
@@ -271,6 +276,81 @@ class TestDriveEndpoints:
         assert len(data) == 1
         assert data[0]["name"] == "doc.pdf"
         assert data[0]["account"] == "test@gmail.com"
+
+
+class TestVoicePipelineEndpoints:
+    def test_ambient_status_includes_available(self, client):
+        c, _ = client
+        with patch("inbox_server.ambient_available", return_value=(True, "")):
+            resp = c.get("/ambient/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "available" in data
+        assert "reason" in data
+
+    def test_ambient_transcript_empty(self, client):
+        c, state = client
+        resp = c.get("/ambient/transcript")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["segments"] == []
+        assert data["count"] == 0
+
+    def test_dictation_status(self, client):
+        c, _ = client
+        resp = c.get("/dictation/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "running" in data
+        assert "available" in data
+
+    def test_voice_config_get(self, client):
+        c, _ = client
+        fake_cfg = {"ambient_autostart": True, "dictation_hotkey": "f5", "vault_dir": "/tmp"}
+        with patch("inbox_server.load_voice_config", return_value=fake_cfg):
+            resp = c.get("/voice/config")
+        assert resp.status_code == 200
+        assert resp.json()["dictation_hotkey"] == "f5"
+
+    def test_voice_config_put(self, client):
+        c, _ = client
+        fake_cfg = {"ambient_autostart": True, "dictation_hotkey": "f5", "vault_dir": "/tmp"}
+        with (
+            patch("inbox_server.load_voice_config", return_value=fake_cfg),
+            patch("inbox_server.save_voice_config") as mock_save,
+        ):
+            resp = c.put("/voice/config", json={"ambient_autostart": False})
+        assert resp.status_code == 200
+        assert resp.json()["ambient_autostart"] is False
+        mock_save.assert_called_once()
+
+    def test_ambient_notes_filter(self, client):
+        c, _ = client
+        notes = [
+            {"date": "2026-04-10", "path": "/a", "size": 1},
+            {"date": "2026-03-01", "path": "/b", "size": 2},
+        ]
+        with patch("inbox_server.ambient_notes.list_daily_notes", return_value=notes):
+            resp = c.get("/ambient/notes?q=2026-04")
+        assert resp.status_code == 200
+        assert len(resp.json()) == 1
+
+    def test_ambient_start_stop(self, client):
+        c, state = client
+        # mock start/stop to avoid spawning real threads
+        with (
+            patch.object(state.ambient, "start"),
+            patch.object(state.ambient, "stop"),
+        ):
+            state.ambient._running = False
+            resp = c.post("/ambient/start")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "started"
+            # fake that it's running now
+            state.ambient._running = True
+            resp = c.post("/ambient/stop")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "stopped"
 
     def test_get_file(self, client):
         c, state = client

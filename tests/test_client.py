@@ -280,6 +280,30 @@ class TestClientAmbient:
         client._client.post.return_value = _mock_response({"status": "stopped"})
         assert client.dictation_stop()["status"] == "stopped"
 
+    def test_dictation_status(self, client):
+        client._client.get.return_value = _mock_response({"running": False, "available": True})
+        result = client.dictation_status()
+        assert result["running"] is False
+        assert result["available"] is True
+
+    def test_ambient_transcript(self, client):
+        client._client.get.return_value = _mock_response({"segments": ["hello"], "count": 1})
+        result = client.ambient_transcript()
+        assert result["segments"] == ["hello"]
+        assert result["count"] == 1
+
+    def test_voice_config(self, client):
+        cfg = {"ambient_autostart": True, "dictation_hotkey": "f5", "vault_dir": "/tmp"}
+        client._client.get.return_value = _mock_response(cfg)
+        result = client.voice_config()
+        assert result["dictation_hotkey"] == "f5"
+
+    def test_voice_config_update(self, client):
+        updated = {"ambient_autostart": False, "dictation_hotkey": "ctrl+d", "vault_dir": "/tmp"}
+        client._client.put.return_value = _mock_response(updated)
+        result = client.voice_config_update(ambient_autostart=False, dictation_hotkey="ctrl+d")
+        assert result["ambient_autostart"] is False
+
     def test_autocomplete(self, client):
         client._client.post.return_value = _mock_response({"completion": "world"})
         assert client.autocomplete("hello ") == "world"
