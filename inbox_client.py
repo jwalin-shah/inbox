@@ -483,6 +483,26 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def dictation_status(self) -> dict:
+        r = self._client.get("/dictation/status")
+        r.raise_for_status()
+        return r.json()
+
+    def ambient_transcript(self, limit: int = 50) -> dict:
+        r = self._client.get("/ambient/transcript", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
+    def voice_config(self) -> dict:
+        r = self._client.get("/voice/config")
+        r.raise_for_status()
+        return r.json()
+
+    def voice_config_update(self, **kwargs) -> dict:  # type: ignore[type-arg]
+        r = self._client.put("/voice/config", json=kwargs)
+        r.raise_for_status()
+        return r.json()
+
     # ── Search ───────────────────────────────────────────────────────────
 
     def search(self, q: str, sources: list[str] | None = None, limit: int = 50) -> dict:
