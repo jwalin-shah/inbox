@@ -723,6 +723,148 @@ class CommandPaletteScreen(ModalScreen[CommandDict | None]):
             self.dismiss(cmd)
 
 
+# ── Search Overlay ───────────────────────────────────────────────────────────
+
+_SOURCE_ICONS: dict[str, str] = {
+    "imessage": "󰍦",
+    "gmail": "󰊫",
+    "notes": "󰎞",
+    "reminders": "☐",
+    "calendar": "󰃮",
+}
+
+
+class SearchResultItem(ListItem):
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+
+    def compose(self) -> ComposeResult:
+        d = self.data
+        source = d.get("source", "")
+        icon = _SOURCE_ICONS.get(source, "●")
+        t = Text()
+        t.append(f"{icon} ", style="dim")
+        t.append(d.get("title", "?"), style="bold white")
+        ts = d.get("timestamp", "")
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts)
+                t.append(f"  {dt.strftime('%b %d %H:%M')}", style="dim")
+            except (ValueError, TypeError):
+                pass
+        snippet = d.get("snippet", "")
+        if snippet:
+            t.append(f"\n  {snippet[:80]}", style="dim italic")
+        t.append(f"\n  [{source}]", style="dim cyan")
+        yield Static(t)
+
+
+class SearchScreen(ModalScreen):
+    DEFAULT_CSS = """
+    SearchScreen {
+        align: center middle;
+    }
+    SearchScreen > Vertical {
+        width: 80;
+        height: 30;
+        border: solid $primary;
+        background: $background;
+        padding: 0;
+    }
+    SearchScreen #search-input {
+        width: 1fr;
+        height: 3;
+        border: none;
+    }
+    SearchScreen #search-status {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    SearchScreen #search-results {
+        height: 1fr;
+        border-top: solid $primary-darken-2;
+    }
+    """
+
+    def __init__(self, client) -> None:
+        super().__init__()
+        self._client = client
+        self._search_results: list[dict] = []
+        self._debounce_timer = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Input(placeholder="Search… (Esc to close)", id="search-input")
+            yield Static("", id="search-status")
+            yield ListView(id="search-results")
+
+    def on_mount(self) -> None:
+        self.query_one("#search-input", Input).focus()
+
+    @on(Input.Changed, "#search-input")
+    def on_search_changed(self, event: Input.Changed) -> None:
+        q = event.value.strip()
+        if self._debounce_timer is not None:
+            self._debounce_timer.stop()
+        if not q:
+            self.query_one("#search-results", ListView).clear()
+            self.query_one("#search-status", Static).update("")
+            return
+        self._debounce_timer = self.set_timer(0.3, lambda: self._do_search(q))
+
+    def _do_search(self, q: str) -> None:
+        self.query_one("#search-status", Static).update("[dim]Searching…[/]")
+        self._run_search(q)
+
+    @work(thread=True, exit_on_error=False)
+    def _run_search(self, q: str) -> None:
+        try:
+            result = self._client.search(q, sources=["all"], limit=50)
+        except Exception:
+            self.app.call_from_thread(  # type: ignore[attr-defined]
+                self.query_one("#search-status", Static).update,
+                "[red]Search failed[/]",
+            )
+            return
+        self.app.call_from_thread(self._show_results, result)  # type: ignore[attr-defined]
+
+    def _show_results(self, result: dict) -> None:
+        self._search_results = result.get("results", [])
+        lv = self.query_one("#search-results", ListView)
+        lv.clear()
+        for r in self._search_results:
+            lv.append(SearchResultItem(r))
+        total = result.get("total", 0)
+        source_counts: dict[str, int] = {}
+        for r in self._search_results:
+            s = r.get("source", "?")
+            source_counts[s] = source_counts.get(s, 0) + 1
+        count_str = "  ".join(f"{s}:{n}" for s, n in source_counts.items())
+        status = f"[green]{total} results[/]"
+        if count_str:
+            status += f"  [dim]{count_str}[/]"
+        self.query_one("#search-status", Static).update(status)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            self.dismiss(None)
+        elif event.key == "enter":
+            lv = self.query_one("#search-results", ListView)
+            idx = lv.index
+            if idx is not None and 0 <= idx < len(self._search_results):
+                event.prevent_default()
+                self.dismiss(self._search_results[idx])
+
+    @on(ListView.Selected, "#search-results")
+    def on_result_selected(self, event: ListView.Selected) -> None:
+        item = event.item
+        if isinstance(item, SearchResultItem):
+            self.dismiss(item.data)
+
+
 # ── Main App ─────────────────────────────────────────────────────────────────
 
 
@@ -761,6 +903,7 @@ class InboxApp(App):
     BINDINGS = [
         Binding("ctrl+r", "refresh", "Refresh"),
         Binding("ctrl+p", "command_palette", "Commands"),
+        Binding("ctrl+backslash", "search", "Search"),
         Binding("ctrl+1", "filter_all", "All"),
         Binding("ctrl+2", "filter_imsg", "iMessage"),
         Binding("ctrl+3", "filter_gmail", "Gmail"),
@@ -1389,6 +1532,86 @@ class InboxApp(App):
                 result["action"]()
             except Exception as exc:
                 self.query_one("#status", Static).update(f"[red]Command failed: {exc}[/]")
+
+    # ── Search overlay ───────────────────────────────────────────────────
+
+    def action_search(self) -> None:
+        """Open the search overlay (Ctrl+\\)."""
+        self.push_screen(SearchScreen(self.client), self._on_search_result)
+
+    def _on_search_result(self, result: dict | None) -> None:
+        """Called when search overlay is dismissed with a selected result."""
+        if result is None:
+            return
+        source = result.get("source", "")
+        item_id = result.get("id", "")
+        metadata = result.get("metadata", {})
+
+        # Switch to the appropriate tab
+        tab_map = {
+            "imessage": "tab-imsg",
+            "gmail": "tab-gmail",
+            "notes": "tab-notes",
+            "reminders": "tab-rem",
+            "calendar": "tab-cal",
+        }
+        tab_id = tab_map.get(source)
+        if not tab_id:
+            self.notify(f"Cannot navigate to source: {source}", severity="warning")
+            return
+
+        self.query_one("#tabs", Tabs).active = tab_id
+
+        # After tab switch, attempt to select the item
+        self.call_after_refresh(self._select_search_result, source, item_id, metadata)
+
+    def _select_search_result(self, source: str, item_id: str, metadata: dict) -> None:
+        """Select the jumped-to item in the sidebar after tab switch."""
+        lv = self.query_one("#contact-list", ListView)
+
+        if source == "imessage":
+            for i, child in enumerate(lv.children):
+                if isinstance(child, ConversationItem) and child.data.get("id") == item_id:
+                    lv.index = i
+                    self.active_conv = child.data
+                    self._load_thread(child.data)
+                    return
+            self.notify("Conversation not found — it may have changed", severity="warning")
+
+        elif source == "gmail":
+            for i, child in enumerate(lv.children):
+                if isinstance(child, ConversationItem) and child.data.get("id") == item_id:
+                    lv.index = i
+                    self.active_conv = child.data
+                    self._load_thread(child.data)
+                    return
+            self.notify("Email not found — it may have changed", severity="warning")
+
+        elif source == "notes":
+            for i, child in enumerate(lv.children):
+                if isinstance(child, NoteItem) and child.data.get("id") == item_id:
+                    lv.index = i
+                    self._load_note(child.data)
+                    return
+            self.notify("Note not found — it may have changed", severity="warning")
+
+        elif source == "reminders":
+            for i, child in enumerate(lv.children):
+                if isinstance(child, ReminderItem) and child.data.get("id") == item_id:
+                    lv.index = i
+                    self.active_reminder = child.data
+                    self.query_one("#detail-view", DetailView).detail = child.data
+                    return
+            self.notify("Reminder not found — it may have changed", severity="warning")
+
+        elif source == "calendar":
+            for i, child in enumerate(lv.children):
+                if isinstance(child, EventItem) and child.data.get("event_id") == item_id:
+                    lv.index = i
+                    self.active_event = child.data
+                    self.query_one("#detail-view", DetailView).detail = child.data
+                    return
+            self.notify("Event not found — it may have changed", severity="warning")
 
     def action_toggle_ambient(self) -> None:
         """Toggle ambient listening on/off."""

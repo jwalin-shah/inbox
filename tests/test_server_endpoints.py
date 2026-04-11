@@ -494,3 +494,68 @@ class TestContactsEndpoints:
         data = resp.json()
         assert data["ok"] is True
         assert "alice@example.com" not in data["favorites"]
+
+
+class TestSearchEndpoint:
+    def test_search_returns_expected_shape(self, client):
+        c, _ = client
+        mock_result = {
+            "query": "standup",
+            "total": 1,
+            "results": [
+                {
+                    "source": "calendar",
+                    "id": "evt1",
+                    "title": "Team standup",
+                    "snippet": "standup call",
+                    "timestamp": "2026-04-10T10:00:00",
+                    "metadata": {"calendar_id": "primary"},
+                }
+            ],
+        }
+        with patch("inbox_server.search_all", return_value=mock_result):
+            resp = c.post("/search", json={"q": "standup"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["query"] == "standup"
+        assert data["total"] == 1
+        assert len(data["results"]) == 1
+        r = data["results"][0]
+        assert r["source"] == "calendar"
+        assert r["id"] == "evt1"
+        assert "title" in r
+        assert "snippet" in r
+        assert "timestamp" in r
+        assert "metadata" in r
+
+    def test_search_empty_query_returns_zero(self, client):
+        c, _ = client
+        with patch(
+            "inbox_server.search_all", return_value={"query": "", "total": 0, "results": []}
+        ):
+            resp = c.post("/search", json={"q": ""})
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 0
+
+    def test_search_source_filter_passed_through(self, client):
+        c, _ = client
+        with patch(
+            "inbox_server.search_all", return_value={"query": "x", "total": 0, "results": []}
+        ) as mock_sa:
+            resp = c.post("/search", json={"q": "x", "sources": ["imessage", "notes"], "limit": 20})
+        assert resp.status_code == 200
+        mock_sa.assert_called_once()
+        call_kwargs = mock_sa.call_args
+        assert call_kwargs.kwargs.get("sources") == ["imessage", "notes"]
+        assert call_kwargs.kwargs.get("limit") == 20
+
+    def test_search_default_sources(self, client):
+        c, _ = client
+        with patch(
+            "inbox_server.search_all", return_value={"query": "x", "total": 0, "results": []}
+        ) as mock_sa:
+            resp = c.post("/search", json={"q": "x"})
+        assert resp.status_code == 200
+        call_kwargs = mock_sa.call_args
+        assert call_kwargs.kwargs.get("sources") == ["all"]

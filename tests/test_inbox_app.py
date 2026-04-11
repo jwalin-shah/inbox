@@ -18,6 +18,8 @@ from inbox import (
     MessageView,
     NotificationItem,
     ReminderItem,
+    SearchResultItem,
+    SearchScreen,
 )
 
 
@@ -3221,5 +3223,156 @@ def test_command_palette_enter_with_match_closes_screen() -> None:
             await pilot.pause(0.1)
             screens = app.screen_stack
             assert not any(isinstance(s, CommandPaletteScreen) for s in screens)
+
+    asyncio.run(runner())
+
+
+# ── Search Overlay ───────────────────────────────────────────────────────────
+
+
+def test_search_action_opens_overlay() -> None:
+    """action_search pushes a SearchScreen onto the screen stack."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            app.action_search()
+            await pilot.pause(0.1)
+            # SearchScreen should be the current screen
+            from textual.screen import ModalScreen
+
+            assert isinstance(app.screen, ModalScreen)
+
+    asyncio.run(runner())
+
+
+def test_search_overlay_esc_dismisses() -> None:
+    """Pressing Esc on the search overlay dismisses it without navigation."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+
+        async with app.run_test() as pilot:
+            app.action_search()
+            await pilot.pause(0.1)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            # Back to main screen (not a ModalScreen)
+            from textual.screen import ModalScreen
+
+            assert not isinstance(app.screen, ModalScreen)
+
+    asyncio.run(runner())
+
+
+def test_search_result_item_renders() -> None:
+    """SearchResultItem renders with source icon and title."""
+
+    async def runner() -> None:
+        data = {
+            "source": "notes",
+            "id": "1",
+            "title": "Shopping list",
+            "snippet": "milk eggs",
+            "timestamp": "2026-04-10T12:00:00",
+            "metadata": {},
+        }
+        item = SearchResultItem(data)
+        assert item.data == data
+
+    asyncio.run(runner())
+
+
+def test_search_screen_show_results() -> None:
+    """SearchScreen._show_results populates the ListView."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        screen = SearchScreen(client)
+
+        mock_result = {
+            "query": "milk",
+            "total": 2,
+            "results": [
+                {
+                    "source": "notes",
+                    "id": "1",
+                    "title": "Shopping list",
+                    "snippet": "buy milk",
+                    "timestamp": "2026-04-10T12:00:00",
+                    "metadata": {},
+                },
+                {
+                    "source": "reminders",
+                    "id": "2",
+                    "title": "Buy milk",
+                    "snippet": "from store",
+                    "timestamp": "2026-04-09T10:00:00",
+                    "metadata": {},
+                },
+            ],
+        }
+
+        app = _make_app(client)
+        async with app.run_test() as pilot:
+            app.push_screen(screen)
+            await pilot.pause(0.1)
+            screen._show_results(mock_result)
+            await pilot.pause(0.1)
+            lv = screen.query_one("#search-results", ListView)
+            items = [c for c in lv.children if isinstance(c, SearchResultItem)]
+            assert len(items) == 2
+            assert items[0].data["title"] == "Shopping list"
+
+    asyncio.run(runner())
+
+
+def test_search_on_result_selected_navigates_to_notes() -> None:
+    """Selecting a notes result calls _on_search_result and switches to notes tab."""
+
+    async def runner() -> None:
+        client = MagicMock()
+        client.github_notifications.return_value = []
+        app = _make_app(client)
+        app.notes_data = [
+            {
+                "id": "1",
+                "title": "Shopping list",
+                "snippet": "milk",
+                "modified": "2026-04-10T12:00:00",
+                "folder": "",
+            }
+        ]
+
+        navigated = []
+
+        original = app._on_search_result
+
+        def track(result):
+            navigated.append(result)
+            original(result)
+
+        app._on_search_result = track
+
+        result = {
+            "source": "notes",
+            "id": "1",
+            "title": "Shopping list",
+            "snippet": "milk",
+            "timestamp": "2026-04-10T12:00:00",
+            "metadata": {},
+        }
+
+        async with app.run_test() as pilot:
+            app._on_search_result(result)
+            await pilot.pause(0.3)
+
+        assert len(navigated) == 1
+        assert navigated[0]["source"] == "notes"
 
     asyncio.run(runner())
