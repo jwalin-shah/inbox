@@ -559,3 +559,189 @@ class TestSearchEndpoint:
         assert resp.status_code == 200
         call_kwargs = mock_sa.call_args
         assert call_kwargs.kwargs.get("sources") == ["all"]
+
+
+class TestLLMStatusEndpoint:
+    def test_llm_status_includes_both_models(self, client):
+        c, _ = client
+        with (
+            patch("services.llm_is_loaded", return_value=False),
+            patch("inbox_server.llm_large_is_loaded", return_value=False),
+            patch("inbox_server.llm_large_is_loading", return_value=False),
+        ):
+            resp = c.get("/llm/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "small" in data
+        assert "large" in data
+        assert "loaded" in data["small"]
+        assert "loaded" in data["large"]
+        assert "loading" in data["large"]
+        assert "model_id" in data["small"]
+        assert "model_id" in data["large"]
+
+    def test_llm_status_small_loaded(self, client):
+        c, _ = client
+        with (
+            patch("services.llm_is_loaded", return_value=True),
+            patch("inbox_server.llm_large_is_loaded", return_value=False),
+            patch("inbox_server.llm_large_is_loading", return_value=False),
+        ):
+            resp = c.get("/llm/status")
+        data = resp.json()
+        assert data["small"]["loaded"] is True
+        assert data["large"]["loaded"] is False
+
+    def test_llm_status_large_loading(self, client):
+        c, _ = client
+        with (
+            patch("services.llm_is_loaded", return_value=False),
+            patch("inbox_server.llm_large_is_loaded", return_value=False),
+            patch("inbox_server.llm_large_is_loading", return_value=True),
+        ):
+            resp = c.get("/llm/status")
+        data = resp.json()
+        assert data["large"]["loading"] is True
+
+
+class TestAIEndpoints:
+    def test_ai_briefing_returns_structure(self, client):
+        c, _ = client
+        with (
+            patch("inbox_server.calendar_events", return_value=[]),
+            patch("inbox_server.reminders_list", return_value=[]),
+            patch("inbox_server.gmail_contacts", return_value=[]),
+            patch("inbox_server.imsg_contacts", return_value=[]),
+            patch("inbox_server.github_notifications", return_value=[]),
+            patch("inbox_server.github_pulls", return_value=[]),
+            patch(
+                "inbox_server.ai_briefing",
+                return_value={
+                    "events": [],
+                    "pending_reminders": [],
+                    "unread_counts": {
+                        "imessage": 0,
+                        "gmail": 0,
+                        "github_notifications": 0,
+                        "github_prs": 0,
+                    },
+                    "summary": None,
+                },
+            ),
+        ):
+            resp = c.post("/ai/briefing")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "events" in data
+        assert "pending_reminders" in data
+        assert "unread_counts" in data
+
+    def test_ai_triage_empty_conversations(self, client):
+        c, _ = client
+        with patch("inbox_server.ai_triage", return_value={}):
+            resp = c.post("/ai/triage", json={"conversations": []})
+        assert resp.status_code == 200
+        assert resp.json() == {}
+
+    def test_ai_triage_with_conversations(self, client):
+        c, _ = client
+        priorities = {"c1": "urgent", "c2": "normal"}
+        with patch("inbox_server.ai_triage", return_value=priorities):
+            resp = c.post(
+                "/ai/triage",
+                json={
+                    "conversations": [
+                        {
+                            "id": "c1",
+                            "source": "gmail",
+                            "name": "Boss",
+                            "snippet": "urgent",
+                            "unread": 1,
+                        },
+                        {
+                            "id": "c2",
+                            "source": "imessage",
+                            "name": "Alice",
+                            "snippet": "hi",
+                            "unread": 0,
+                        },
+                    ]
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["c1"] == "urgent"
+        assert data["c2"] == "normal"
+
+    def test_ai_summarize_short_thread(self, client):
+        c, _ = client
+        with patch(
+            "inbox_server.ai_summarize",
+            return_value={
+                "summary": None,
+                "key_points": [],
+                "action_items": [],
+                "decisions": [],
+                "skipped": True,
+            },
+        ):
+            resp = c.post(
+                "/ai/summarize",
+                json={
+                    "thread_id": "t1",
+                    "messages": [
+                        {"sender": "Alice", "body": "hi"},
+                    ],
+                },
+            )
+        assert resp.status_code == 200
+        assert resp.json()["skipped"] is True
+
+    def test_ai_summarize_long_thread(self, client):
+        c, _ = client
+        with patch(
+            "inbox_server.ai_summarize",
+            return_value={
+                "summary": "Thread summary here.",
+                "key_points": ["Point A"],
+                "action_items": ["Do X"],
+                "decisions": [],
+                "skipped": False,
+            },
+        ):
+            resp = c.post(
+                "/ai/summarize",
+                json={
+                    "thread_id": "t1",
+                    "messages": [{"sender": f"U{i}", "body": f"msg {i}"} for i in range(6)],
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["summary"] == "Thread summary here."
+        assert "action_items" in data
+
+    def test_ai_extract_actions_returns_actions(self, client):
+        c, _ = client
+        with patch(
+            "inbox_server.ai_extract_actions",
+            return_value={
+                "actions": [{"text": "Schedule meeting", "deadline": None, "type": "meeting"}]
+            },
+        ):
+            resp = c.post(
+                "/ai/extract-actions",
+                json={"text": "Please schedule a meeting with Alice tomorrow about Q2 planning."},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "actions" in data
+        assert len(data["actions"]) == 1
+        assert data["actions"][0]["type"] == "meeting"
+
+    def test_ai_extract_actions_empty_result(self, client):
+        c, _ = client
+        with patch("inbox_server.ai_extract_actions", return_value={"actions": []}):
+            resp = c.post("/ai/extract-actions", json={"text": "No actions in this message."})
+        assert resp.status_code == 200
+        assert resp.json() == {"actions": []}

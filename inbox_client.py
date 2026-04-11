@@ -508,6 +508,32 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    # ── AI ───────────────────────────────────────────────────────────────
+
+    def ai_briefing(self) -> dict:
+        r = self._client.post("/ai/briefing", timeout=60)
+        r.raise_for_status()
+        return r.json()
+
+    def ai_triage(self, conversations: list) -> dict:  # type: ignore[type-arg]
+        r = self._client.post("/ai/triage", json={"conversations": conversations})
+        r.raise_for_status()
+        return r.json()
+
+    def ai_summarize(self, thread_id: str, messages: list) -> dict:  # type: ignore[type-arg]
+        r = self._client.post(
+            "/ai/summarize",
+            json={"thread_id": thread_id, "messages": messages},
+            timeout=60,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def ai_extract_actions(self, text: str) -> dict:
+        r = self._client.post("/ai/extract-actions", json={"text": text})
+        r.raise_for_status()
+        return r.json()
+
     # ── Accounts ─────────────────────────────────────────────────────────
 
     def accounts(self) -> dict:

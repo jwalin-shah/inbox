@@ -393,3 +393,88 @@ class TestClientSearch:
         result = client.search("xyz")
         assert result["total"] == 0
         assert result["results"] == []
+
+
+# ── AI ──────────────────────────────────────────────────────────────────────
+
+
+class TestAIClient:
+    def test_ai_briefing(self, client):
+        expected = {
+            "events": [],
+            "pending_reminders": [],
+            "unread_counts": {
+                "imessage": 0,
+                "gmail": 0,
+                "github_notifications": 0,
+                "github_prs": 0,
+            },
+            "summary": None,
+        }
+        client._client.post.return_value = _mock_response(expected)
+        result = client.ai_briefing()
+        assert "events" in result
+        assert "unread_counts" in result
+        client._client.post.assert_called_once()
+        call_args = client._client.post.call_args
+        assert call_args[0][0] == "/ai/briefing"
+
+    def test_ai_triage_empty(self, client):
+        client._client.post.return_value = _mock_response({})
+        result = client.ai_triage([])
+        assert result == {}
+
+    def test_ai_triage_with_conversations(self, client):
+        client._client.post.return_value = _mock_response({"c1": "urgent", "c2": "normal"})
+        convos = [
+            {"id": "c1", "source": "gmail", "name": "Boss", "snippet": "urgent", "unread": 1},
+            {"id": "c2", "source": "imessage", "name": "Alice", "snippet": "hi", "unread": 0},
+        ]
+        result = client.ai_triage(convos)
+        assert result["c1"] == "urgent"
+        client._client.post.assert_called_once()
+        call_kwargs = client._client.post.call_args
+        assert call_kwargs[0][0] == "/ai/triage"
+        assert "conversations" in call_kwargs[1]["json"]
+
+    def test_ai_summarize(self, client):
+        expected = {
+            "summary": "Thread about project updates.",
+            "key_points": ["Point A"],
+            "action_items": ["Review PR"],
+            "decisions": [],
+            "skipped": False,
+        }
+        client._client.post.return_value = _mock_response(expected)
+        msgs = [{"sender": f"U{i}", "body": f"msg {i}"} for i in range(6)]
+        result = client.ai_summarize("t1", msgs)
+        assert result["summary"] == "Thread about project updates."
+        assert result["skipped"] is False
+        call_kwargs = client._client.post.call_args
+        assert call_kwargs[0][0] == "/ai/summarize"
+        assert call_kwargs[1]["json"]["thread_id"] == "t1"
+
+    def test_ai_extract_actions(self, client):
+        expected = {"actions": [{"text": "Follow up", "deadline": None, "type": "task"}]}
+        client._client.post.return_value = _mock_response(expected)
+        result = client.ai_extract_actions("Please follow up with the team about deployment.")
+        assert len(result["actions"]) == 1
+        call_kwargs = client._client.post.call_args
+        assert call_kwargs[0][0] == "/ai/extract-actions"
+        assert "text" in call_kwargs[1]["json"]
+
+    def test_llm_status_extended(self, client):
+        expected = {
+            "loaded": True,
+            "small": {"loaded": True, "model_id": "mlx-community/Qwen3.5-0.8B-MLX-4bit"},
+            "large": {
+                "loaded": False,
+                "model_id": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+                "loading": False,
+            },
+        }
+        client._client.get.return_value = _mock_response(expected)
+        result = client.llm_status()
+        assert "small" in result
+        assert "large" in result
+        assert result["large"]["loading"] is False
