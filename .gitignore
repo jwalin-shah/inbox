@@ -23,7 +23,7 @@ htmlcov/
 .DS_Store
 
 # Server logs
-server.log
+*.log
 
 # llm-tldr cache
 .tldr/
