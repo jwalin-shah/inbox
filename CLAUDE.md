@@ -15,10 +15,13 @@ uv run python inbox_server.py   # server only (for agent access)
 services.py       — data access layer (iMessage, Gmail, Calendar, Sheets, Docs, Notes, Reminders, GitHub, Drive, auth, LLM, audio)
 inbox_server.py   — FastAPI server wrapping services.py (port 9849)
 inbox_client.py   — sync HTTP client for the server API
+mcp_backend.py    — MCP server backend for Claude integration
+mcp_server.py     — MCP server (stdio-based protocol)
 inbox.py          — Textual TUI (thin client, auto-starts server)
 contacts.py       — reads macOS AddressBook SQLite DBs, resolves phone→name
 ambient_notes.py  — writes ambient captures to Obsidian vault (~/vault/daily/)
 ambient_daemon.py — background daemon for audio capture → ASR → extraction → notes
+memory_store.py   — persistent memory storage for conversations and state
 tokens/           — per-account Google OAuth tokens (auto-created)
 credentials.json  — Google OAuth client secret (never commit)
 github_token.txt  — GitHub personal access token (never commit)
@@ -29,6 +32,7 @@ github_token.txt  — GitHub personal access token (never commit)
 unsubscribe_interactive.py  — interactive unsubscribe helper (single email)
 unsubscribe_bulk.py         — batch unsubscribe from list of message IDs
 unsubscribe_all_newsletters.py — unsubscribe from all newsletters in inbox
+organize_inbox.py           — organize messages by category and labels
 oci_retry.sh                — retry utility for OCI operations
 ```
 
@@ -43,6 +47,10 @@ GET  /messages/{source}/{conv_id}?thread_id=...
 POST /messages/send  {"conv_id", "source", "text"}
 POST /messages/gmail/{msg_id}/unsubscribe
 POST /messages/gmail/bulk-unsubscribe  {"msg_ids": [str]}
+POST /search  {"q", "sources": [str], "limit"}
+GET  /gmail/labels?account=...
+POST /gmail/batch-modify  {"msg_ids": [str], "add_label_ids": [str], "remove_label_ids": [str], "account"}
+POST /gmail/filters  {"from_filter", "subject_filter", "add_label_ids": [str], "remove_label_ids": [str], "account"}
 GET  /calendar/events?date=YYYY-MM-DD
 POST /calendar/events  {"summary", "start", "end", "attendees", ...}
 POST /calendar/events/quick  {"text": "Meeting 2pm-3pm @ Office"}
@@ -150,6 +158,11 @@ POST /notifications/test  {"title", "body"}
 - Delete = trash (recoverable), not permanent delete
 - Supports folder filtering via `folder_id` parameter
 
+## Gmail advanced
+- **Label management**: list labels, batch modify labels on messages, create filters
+- **Cross-source search**: `/search` endpoint queries iMessage, Gmail, Calendar, Notes with unified results
+- **Batch operations**: apply/remove multiple labels across many messages
+
 ## GitHub
 - Personal access token in `github_token.txt` (needs `notifications` + `repo` scopes)
 - Notifications: displayed in TUI with type icons (🔀 PR review, 🐛 issue, 📦 release, 🔔 other) plus unread indicator; mark-read individual or all
@@ -170,6 +183,12 @@ POST /notifications/test  {"title", "body"}
 - Sends route through the correct account's service
 - Scopes: `gmail.readonly` + `gmail.send` + `calendar` + `drive` + `spreadsheets` + `documents` (full read/write)
 - **Note**: New `documents` scope added for Docs integration; users must re-auth once via `/accounts/reauth`
+
+## MCP Server
+- **mcp_server.py** — stdio-based MCP server for Claude integration
+- **mcp_backend.py** — backend client for the MCP server, calls inbox API
+- Exposes all inbox functionality (conversations, calendar, reminders, search, Gmail operations) via MCP tools
+- Agents can use the MCP interface directly without hitting the server HTTP API
 
 ## LLM + Audio stack
 - **LLM**: Qwen3.5-0.8B-MLX-4bit (~500MB) — shared singleton for extraction + autocomplete

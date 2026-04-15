@@ -1621,7 +1621,14 @@ def calendar_create_event(
             reminders=reminders,
         )
         result = cal_service.events().insert(calendarId=calendar_id, body=body).execute()
-        return result.get("id")
+        event_id = result.get("id")
+        # Send notification
+        send_notification(
+            title=f"Calendar: {summary}",
+            body=f"Created for {start.strftime('%Y-%m-%d %H:%M') if hasattr(start, 'strftime') else start}",
+            source="calendar",
+        )
+        return event_id
     except Exception as e:
         _log_service_failure(
             "calendar_create_event",
@@ -1669,6 +1676,12 @@ def calendar_update_event(
         cal_service.events().update(
             calendarId=calendar_id, eventId=event_id, body=existing
         ).execute()
+        # Send notification
+        send_notification(
+            title=f"Calendar: {summary or existing.get('summary', 'Event')} updated",
+            body="Modified event on calendar",
+            source="calendar",
+        )
         return True
     except Exception:  # logged below
         _log_service_failure(
@@ -1691,6 +1704,154 @@ def calendar_delete_event(cal_service, event_id: str, calendar_id: str = "primar
             calendar_id=calendar_id,
         )
         return False
+
+
+def calendar_event_to_reminder(
+    event: CalendarEvent,
+    list_name: str = "Reminders",
+    minutes_before: int = 30,
+) -> bool:
+    """Create an Apple Reminder from a calendar event.
+
+    Due time = event start - ``minutes_before``. Notes are populated from the
+    event's location, attendees, and description.
+    """
+    if not event or not event.start:
+        return False
+
+    # CalendarEvent.start is a datetime; tolerate a string fallback in case a
+    # caller hands us a raw API value.
+    try:
+        if isinstance(event.start, datetime):
+            start_dt = event.start
+        else:
+            start_dt = datetime.fromisoformat(str(event.start).replace("Z", "+00:00"))
+        due_dt: datetime | None = start_dt - timedelta(minutes=minutes_before)
+    except Exception:
+        due_dt = None
+
+    # Build notes from event details
+    notes_parts: list[str] = []
+    if event.location:
+        notes_parts.append(f"Location: {event.location}")
+    if event.attendees:
+        attendee_list = [(a.get("displayName") or a.get("email") or "") for a in event.attendees]
+        attendee_list = [a for a in attendee_list if a]
+        if attendee_list:
+            notes_parts.append(f"Attendees: {', '.join(attendee_list)}")
+    if event.description:
+        notes_parts.append(event.description)
+    notes_text = "\n".join(notes_parts)
+
+    # AppleScript's `date` coercion expects a human-readable string, not ISO.
+    due_str = due_dt.strftime("%B %d, %Y %I:%M:%S %p") if due_dt else ""
+
+    return reminder_create(
+        title=event.summary or "Calendar Event",
+        list_name=list_name,
+        due_date=due_str,
+        notes=notes_text,
+    )
+
+
+def gmail_label_create(service, name: str, visibility: str = "labelShow") -> dict[str, str]:
+    """Create a Gmail label and return its id and name."""
+    try:
+        body = {
+            "name": name,
+            "labelListVisibility": visibility,
+            "messageListVisibility": "show",
+        }
+        result = service.users().labels().create(userId="me", body=body).execute()
+        return {"id": result["id"], "name": result["name"]}
+    except Exception:
+        _log_service_failure("gmail_label_create", name=name)
+        raise
+
+
+def calendar_find_conflicts(
+    cal_services: dict[str, object], start: datetime, end: datetime
+) -> list[CalendarEvent]:
+    """Find calendar events that conflict with time range [start, end] across all accounts."""
+    conflicts = []
+    for account, service in cal_services.items():
+        try:
+            # Get actual events in that time range
+            events = calendar_events(
+                cal_services={account: service}, start_date=start, end_date=end
+            )
+
+            # Filter to only overlapping events
+            for event in events:
+                # event.start and event.end are already datetime objects
+                try:
+                    event_start = (
+                        datetime.fromisoformat(event.start)
+                        if isinstance(event.start, str)
+                        else event.start
+                    )
+                    event_end = (
+                        datetime.fromisoformat(event.end)
+                        if isinstance(event.end, str)
+                        else event.end
+                    )
+                except (TypeError, ValueError):
+                    continue
+                # Overlap test: start_A < end_B and start_B < end_A
+                if start < event_end and event_start < end:
+                    conflicts.append(event)
+        except Exception:
+            _log_service_failure("calendar_find_conflicts", account=account)
+    return conflicts
+
+
+def ai_extract_memory(text: str) -> dict[str, object]:
+    """Extract people, projects, commitments from text using LLM."""
+    from pydantic import BaseModel, Field
+
+    class PersonExtract(BaseModel):
+        name: str
+        context: str = ""
+        relationship: str = ""
+
+    class ProjectExtract(BaseModel):
+        name: str
+        description: str = ""
+        status: str = "active"
+
+    class CommitmentExtract(BaseModel):
+        text: str
+        deadline: str = ""
+        owner: str = ""
+
+    class MemoryExtractionResult(BaseModel):
+        people: list[PersonExtract] = Field(default_factory=list)
+        projects: list[ProjectExtract] = Field(default_factory=list)
+        commitments: list[CommitmentExtract] = Field(default_factory=list)
+        action_items: list[str] = Field(default_factory=list)
+
+    try:
+        result = generate_json_large(
+            prompt=f"Extract people (with name, context, relationship), projects (name, description, status), commitments (text, deadline, owner), and action items from:\n{text[:2000]}",
+            schema=MemoryExtractionResult,
+        )
+        if result is None:
+            # Fallback to small model
+            result = generate_json(
+                prompt=f"Extract people, projects, commitments, and action items from:\n{text[:1500]}",
+                schema=MemoryExtractionResult,
+            )
+        if result:
+            return {
+                "people": [p.dict() for p in result.people],
+                "projects": [p.dict() for p in result.projects],
+                "commitments": [c.dict() for c in result.commitments],
+                "action_items": result.action_items,
+            }
+    except Exception:
+        _log_service_failure("ai_extract_memory")
+
+    return {"people": [], "projects": [], "commitments": [], "action_items": []}
 
 
 # ── Notes ────────────────────────────────────────────────────────────────────
@@ -3947,6 +4108,7 @@ _DEFAULT_NOTIFICATION_CONFIG: dict = {
         "gmail": True,
         "calendar": True,
         "github": True,
+        "reminders": True,
     },
     "quiet_hours": {
         "enabled": False,

@@ -291,6 +291,111 @@ async def list_open_commitments(limit: int = 25) -> list[dict]:
     return memory_store.list_open_commitments(limit=limit)
 
 
+@mcp.tool()
+async def search_all(query: str, sources: list[str] | None = None, limit: int = 50) -> dict:
+    """Search across all data sources (Gmail, iMessage, Notes, Reminders, Calendar)."""
+    return await backend.search_all(query=query, sources=sources or ["all"], limit=limit)
+
+
+@mcp.tool()
+async def list_gmail_labels(account: str = "") -> list[dict]:
+    """List all Gmail labels for the account."""
+    return await backend.list_gmail_labels(account=account)
+
+
+@mcp.tool()
+async def batch_modify_emails(
+    msg_ids: list[str],
+    add_label_ids: list[str] | None = None,
+    remove_label_ids: list[str] | None = None,
+    confirm: bool = False,
+    account: str = "",
+) -> dict:
+    """Batch modify Gmail message labels. This tool is confirmation-gated."""
+    _require_confirmation(confirm, "batch_modify_emails")
+    return await backend.batch_modify_emails(
+        msg_ids=msg_ids,
+        add_labels=add_label_ids or [],
+        remove_labels=remove_label_ids or [],
+        account=account,
+    )
+
+
+@mcp.tool()
+async def create_gmail_filter(
+    from_filter: str = "",
+    subject_filter: str = "",
+    add_label_ids: list[str] | None = None,
+    remove_label_ids: list[str] | None = None,
+    confirm: bool = False,
+    account: str = "",
+) -> dict:
+    """Create a Gmail filter. This tool is confirmation-gated."""
+    _require_confirmation(confirm, "create_gmail_filter")
+    return await backend.create_gmail_filter(
+        from_filter=from_filter,
+        subject_filter=subject_filter,
+        add_labels=add_label_ids or [],
+        remove_labels=remove_label_ids or [],
+        account=account,
+    )
+
+
+@mcp.tool()
+async def update_memory(
+    entry_id: int,
+    confirm: bool = False,
+    subject: str | None = None,
+    content: str | None = None,
+    status: str | None = None,
+    confidence: float | None = None,
+) -> dict:
+    """Update a memory entry. This tool is confirmation-gated."""
+    _require_confirmation(confirm, "update_memory")
+    kwargs = {}
+    if subject is not None:
+        kwargs["subject"] = subject
+    if content is not None:
+        kwargs["content"] = content
+    if status is not None:
+        kwargs["status"] = status
+    if confidence is not None:
+        kwargs["confidence"] = confidence
+    return memory_store.update_entry(entry_id, **kwargs)
+
+
+@mcp.tool()
+async def close_commitment(entry_id: int, confirm: bool = False) -> dict:
+    """Close a commitment (set status to 'closed'). This tool is confirmation-gated."""
+    _require_confirmation(confirm, "close_commitment")
+    return memory_store.close_commitment(entry_id)
+
+
+@mcp.tool()
+async def create_gmail_label(
+    name: str, visibility: str = "labelShow", confirm: bool = False, account: str = ""
+) -> dict:
+    """Create a new Gmail label. This tool is confirmation-gated."""
+    _require_confirmation(confirm, "create_gmail_label")
+    return await backend.create_gmail_label(name=name, visibility=visibility, account=account)
+
+
+@mcp.tool()
+async def check_calendar_conflicts(start: str, end: str, account: str = "") -> dict:
+    """Find calendar conflicts in a time range. Returns list of conflicting events."""
+    return await backend.check_calendar_conflicts(start=start, end=end, account=account)
+
+
+@mcp.tool()
+async def extract_and_save_memory(
+    text: str, source: str = "manual", auto_save: bool = False, confirm: bool = False
+) -> dict:
+    """Extract memory entities (people, projects, commitments) from text and optionally auto-save them. This tool is confirmation-gated if auto_save=True."""
+    if auto_save:
+        _require_confirmation(confirm, "extract_and_save_memory")
+    return await backend.extract_memory(text=text, source=source, auto_save=auto_save)
+
+
 app = Starlette(
     routes=[
         Route("/health", endpoint=health),

@@ -18,6 +18,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 import ambient_notes
+from memory_store import MemoryStore
 from services import (
     MLX_LARGE_MODEL,
     AmbientService,
@@ -34,12 +35,15 @@ from services import (
     add_google_account,
     ai_briefing,
     ai_extract_actions,
+    ai_extract_memory,
     ai_summarize,
     ai_triage,
     ambient_available,
     calendar_create_event,
     calendar_delete_event,
+    calendar_event_to_reminder,
     calendar_events,
+    calendar_find_conflicts,
     calendar_find_free_slots,
     calendar_freebusy,
     calendar_get_event,
@@ -77,6 +81,7 @@ from services import (
     gmail_contacts_by_label,
     gmail_create_filter,
     gmail_delete,
+    gmail_label_create,
     gmail_labels,
     gmail_mark_read,
     gmail_mark_unread,
@@ -494,6 +499,7 @@ class ServerState:
 
 
 state = ServerState()
+memory_store = MemoryStore()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -637,7 +643,8 @@ async def lifespan(app: FastAPI):
         f"Gmail accounts: {list(gmail.keys())}, "
         f"Calendar accounts: {list(cal.keys())}, "
         f"Drive accounts: {list(drive.keys())}, "
-        f"Sheets accounts: {list(sheets.keys())}"
+        f"Sheets accounts: {list(sheets.keys())}, "
+        f"Docs accounts: {list(docs.keys())}"
     )
 
     # Pre-warm conversation cache if enabled (reduces cold-start latency)
@@ -2194,6 +2201,34 @@ async def set_reminders(
     return {"ok": ok}
 
 
+@app.post("/calendar/events/{event_id}/create-reminder")
+async def create_event_reminder(
+    event_id: str,
+    list_name: str = "Reminders",
+    minutes_before: int = 30,
+    account: str = "",
+    calendar_id: str = "primary",
+):
+    """Create an Apple Reminder from a calendar event.
+
+    The reminder is due ``minutes_before`` minutes before the event start.
+    """
+    try:
+        acct, svc = _get_cal_service_for_account(account)
+        event = await asyncio.to_thread(calendar_get_event, svc, event_id, calendar_id)
+        if not event:
+            return {"error": "Event not found"}
+
+        success = await asyncio.to_thread(
+            calendar_event_to_reminder, event, list_name, minutes_before
+        )
+        return {"success": success, "reminder_created": success}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/calendar/freebusy")
 async def get_freebusy(req: FreeBusyRequest):
     from datetime import datetime
@@ -2224,6 +2259,89 @@ async def find_free_slots(req: FreeSlotsRequest):
         req.timezone,
     )
     return {"slots": slots}
+
+
+@app.post("/gmail/labels")
+async def create_gmail_label(name: str, visibility: str = "labelShow", account: str = ""):
+    """Create a new Gmail label."""
+    try:
+        acct, svc = _get_gmail_service_for_account(account)
+        result = await asyncio.to_thread(gmail_label_create, svc, name, visibility)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/calendar/conflicts")
+async def check_calendar_conflicts(start: str, end: str, account: str = ""):
+    """Find calendar conflicts in time range [start, end]."""
+    try:
+        start_dt = datetime.fromisoformat(start)
+        end_dt = datetime.fromisoformat(end)
+        acct, svc = _get_cal_service_for_account(account)
+        conflicts = await asyncio.to_thread(calendar_find_conflicts, {acct: svc}, start_dt, end_dt)
+        return {
+            "conflicts": [
+                {
+                    "id": c.id,
+                    "title": c.title,
+                    "start": c.start,
+                    "end": c.end,
+                    "location": c.location or "",
+                }
+                for c in conflicts
+            ]
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/memory/extract")
+async def extract_memory_endpoint(text: str, source: str = "manual", auto_save: bool = False):
+    """Extract memory entities from text and optionally save to memory store."""
+    try:
+        extracted = await asyncio.to_thread(ai_extract_memory, text)
+        saved_count = 0
+
+        if auto_save:
+            # Auto-save extracted entities
+            for person in extracted.get("people", []):
+                memory_store.save_entry(
+                    memory_type="person",
+                    subject=person.get("name", ""),
+                    content=person.get("context", ""),
+                    source=source,
+                    confidence=0.8,
+                    metadata={"relationship": person.get("relationship", "")},
+                )
+                saved_count += 1
+
+            for project in extracted.get("projects", []):
+                memory_store.save_entry(
+                    memory_type="project",
+                    subject=project.get("name", ""),
+                    content=project.get("description", ""),
+                    source=source,
+                    confidence=0.85,
+                    metadata={"status": project.get("status", "active")},
+                )
+                saved_count += 1
+
+            for commitment in extracted.get("commitments", []):
+                memory_store.save_entry(
+                    memory_type="commitment",
+                    subject=commitment.get("text", ""),
+                    content=f"Owner: {commitment.get('owner', '')}",
+                    source=source,
+                    confidence=0.9,
+                    status="open",
+                    expires_at=commitment.get("deadline", None),
+                )
+                saved_count += 1
+
+        return {"extracted": extracted, "saved": saved_count}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":

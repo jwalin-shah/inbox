@@ -170,6 +170,33 @@ class MemoryStore:
     def list_open_commitments(self, limit: int = 25) -> list[dict[str, object]]:
         return self.query_entries(memory_type="commitment", status="open", limit=limit)
 
+    def update_entry(self, entry_id: int, **kwargs) -> dict[str, object]:
+        allowed_fields = {"subject", "content", "confidence", "status", "expires_at", "metadata"}
+        updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
+        if not updates:
+            return self.get_entry(entry_id)
+
+        set_clause = ", ".join([f"{k} = ?" for k in updates])
+        set_clause += ", updated_at = ?"
+        values = list(updates.values()) + [_utcnow(), entry_id]
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE memory_entries SET {set_clause} WHERE id = ?",  # nosec: B608
+                values,
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Memory entry {entry_id} not found")
+        return self.get_entry(entry_id)
+
+    def delete_entry(self, entry_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM memory_entries WHERE id = ?", (entry_id,))
+            return cursor.rowcount > 0
+
+    def close_commitment(self, entry_id: int) -> dict[str, object]:
+        return self.update_entry(entry_id, status="closed")
+
     def _row_to_entry(self, row: sqlite3.Row) -> MemoryEntry:
         return MemoryEntry(
             id=int(row["id"]),

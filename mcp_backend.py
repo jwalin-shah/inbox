@@ -188,3 +188,104 @@ class InboxBackend:
 
     async def complete_reminder(self, reminder_id: str) -> dict[str, Any]:
         return await self._request("POST", f"/reminders/{reminder_id}/complete")
+
+    async def search_all(
+        self,
+        query: str,
+        sources: list[str] | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/search",
+            json={
+                "q": query,
+                "sources": sources or ["all"],
+                "limit": limit,
+            },
+        )
+
+    async def list_gmail_labels(self, account: str = "") -> list[dict[str, Any]]:
+        return await self._request(
+            "GET",
+            "/gmail/labels",
+            params={"account": account},
+        )
+
+    async def batch_modify_emails(
+        self,
+        msg_ids: list[str],
+        add_labels: list[str] | None = None,
+        remove_labels: list[str] | None = None,
+        account: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/gmail/batch-modify",
+            json={
+                "msg_ids": msg_ids,
+                "add_label_ids": add_labels or [],
+                "remove_label_ids": remove_labels or [],
+                "account": account,
+            },
+        )
+
+    async def create_gmail_filter(
+        self,
+        from_filter: str = "",
+        subject_filter: str = "",
+        add_labels: list[str] | None = None,
+        remove_labels: list[str] | None = None,
+        account: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/gmail/filters",
+            json={
+                "from_filter": from_filter,
+                "subject_filter": subject_filter,
+                "add_label_ids": add_labels or [],
+                "remove_label_ids": remove_labels or [],
+                "account": account,
+            },
+        )
+
+    async def create_gmail_label(
+        self,
+        name: str,
+        visibility: str = "labelShow",
+        account: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/gmail/labels",
+            params={"name": name, "visibility": visibility, "account": account},
+        )
+
+    async def check_calendar_conflicts(
+        self,
+        start: str,
+        end: str,
+        account: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/calendar/conflicts",
+            json={
+                "start": start,
+                "end": end,
+                "account": account,
+            },
+        )
+
+    async def extract_memory(
+        self,
+        text: str,
+        source: str = "manual",
+        auto_save: bool = False,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/memory/extract",
+            params={"text": text, "source": source, "auto_save": str(auto_save).lower()},
+        )
