@@ -56,6 +56,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.settings.basic",
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
 ]
 
 ATTACHMENT_PLACEHOLDER = "\ufffc"
@@ -162,6 +163,24 @@ class DriveFile:
     shared: bool = False
     web_link: str = ""
     parents: list[str] = field(default_factory=list)
+    account: str = ""
+
+
+@dataclass
+class SheetTab:
+    sheet_id: int
+    title: str
+    index: int
+    row_count: int
+    col_count: int
+
+
+@dataclass
+class Spreadsheet:
+    id: str
+    title: str
+    url: str
+    sheets: list[SheetTab] = field(default_factory=list)
     account: str = ""
 
 
@@ -373,8 +392,10 @@ def _load_creds(token_path: Path) -> Credentials | None:
         return None
 
 
-def google_auth_all() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-    """Auth all accounts from tokens/ dir. Returns (gmail_svcs, cal_svcs, drive_svcs)."""
+def google_auth_all() -> tuple[
+    dict[str, object], dict[str, object], dict[str, object], dict[str, object]
+]:
+    """Auth all accounts from tokens/ dir. Returns (gmail_svcs, cal_svcs, drive_svcs, sheets_svcs)."""
     TOKENS_DIR.mkdir(exist_ok=True)
 
     # Migrate legacy token.json — if it's missing scopes, re-auth
@@ -399,6 +420,7 @@ def google_auth_all() -> tuple[dict[str, object], dict[str, object], dict[str, o
     gmail_svcs: dict[str, object] = {}
     cal_svcs: dict[str, object] = {}
     drive_svcs: dict[str, object] = {}
+    sheets_svcs: dict[str, object] = {}
 
     for token_path in sorted(TOKENS_DIR.glob("*.json")):
         creds = _load_creds(token_path)
@@ -431,7 +453,13 @@ def google_auth_all() -> tuple[dict[str, object], dict[str, object], dict[str, o
         except Exception:  # logged below
             _log_service_failure("google_auth_all.drive_service", email=email)
 
-    return gmail_svcs, cal_svcs, drive_svcs
+        try:
+            sheets_svc = build("sheets", "v4", credentials=creds)
+            sheets_svcs[email] = sheets_svc
+        except Exception:  # logged below
+            _log_service_failure("google_auth_all.sheets_service", email=email)
+
+    return gmail_svcs, cal_svcs, drive_svcs, sheets_svcs
 
 
 def add_google_account() -> str | None:
@@ -2549,6 +2577,366 @@ def drive_download(drive_service, file_id: str) -> tuple[bytes, str] | None:
         return buf.getvalue(), mime_type
     except Exception:  # logged below
         _log_service_failure("drive_download", file_id=file_id)
+        return None
+
+
+# ── Sheets ──────────────────────────────────────────────────────────────────
+
+
+def sheets_list(
+    drive_service: object, query: str = "", limit: int = 20, account: str = ""
+) -> list[Spreadsheet]:
+    """List spreadsheets from Drive. Returns list of Spreadsheet, empty on error."""
+    try:
+        q = "mimeType='application/vnd.google-apps.spreadsheet'"
+        if query:
+            q += f" and name contains '{query}'"
+        result = (
+            drive_service.files()
+            .list(q=q, pageSize=limit, fields="files(id, name, modifiedTime, webViewLink, owners)")
+            .execute()
+        )
+        spreadsheets = []
+        for file in result.get("files", []):
+            spreadsheets.append(
+                Spreadsheet(
+                    id=file["id"],
+                    title=file.get("name", ""),
+                    url=file.get("webViewLink", ""),
+                    sheets=[],
+                    account=account,
+                )
+            )
+        return spreadsheets
+    except Exception:  # logged below
+        _log_service_failure("sheets_list", query=query)
+        return []
+
+
+def sheets_get(sheets_service: object, spreadsheet_id: str) -> Spreadsheet | None:
+    """Get spreadsheet metadata including sheet tabs."""
+    try:
+        result = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheets_list = []
+        for sheet in result.get("sheets", []):
+            props = sheet.get("properties", {})
+            sheets_list.append(
+                SheetTab(
+                    sheet_id=props.get("sheetId", 0),
+                    title=props.get("title", ""),
+                    index=props.get("index", 0),
+                    row_count=props.get("gridProperties", {}).get("rowCount", 0),
+                    col_count=props.get("gridProperties", {}).get("columnCount", 0),
+                )
+            )
+        return Spreadsheet(
+            id=result.get("spreadsheetId", spreadsheet_id),
+            title=result.get("properties", {}).get("title", ""),
+            url=result.get("spreadsheetUrl", ""),
+            sheets=sheets_list,
+        )
+    except Exception:  # logged below
+        _log_service_failure("sheets_get", spreadsheet_id=spreadsheet_id)
+        return None
+
+
+def sheets_create(
+    sheets_service: object, title: str, sheets: list[str] | None = None
+) -> Spreadsheet | None:
+    """Create a new spreadsheet with optional sheet tabs."""
+    try:
+        requests = []
+        body = {
+            "properties": {"title": title},
+            "sheets": [{"properties": {"title": sheets[0] if sheets else "Sheet1"}}],
+        }
+        if sheets and len(sheets) > 1:
+            for i, sheet_title in enumerate(sheets[1:], start=1):
+                requests.append({"addSheet": {"properties": {"title": sheet_title, "index": i}}})
+
+        result = sheets_service.spreadsheets().create(body=body).execute()
+        spreadsheet_id = result.get("spreadsheetId", "")
+
+        if requests:
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body={"requests": requests}
+            ).execute()
+
+        return sheets_get(sheets_service, spreadsheet_id)
+    except Exception:  # logged below
+        _log_service_failure("sheets_create", title=title)
+        return None
+
+
+def sheets_delete(drive_service: object, spreadsheet_id: str) -> bool:
+    """Soft-delete (trash) a spreadsheet."""
+    try:
+        drive_service.files().update(fileId=spreadsheet_id, body={"trashed": True}).execute()
+        return True
+    except Exception:  # logged below
+        _log_service_failure("sheets_delete", spreadsheet_id=spreadsheet_id)
+        return False
+
+
+def sheets_values_get(
+    sheets_service: object, spreadsheet_id: str, range_: str
+) -> list[list] | None:
+    """Read a range from a spreadsheet. Returns list[list] or None on error."""
+    try:
+        result = (
+            sheets_service.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=range_)
+            .execute()
+        )
+        return result.get("values", [])
+    except Exception:  # logged below
+        _log_service_failure("sheets_values_get", spreadsheet_id=spreadsheet_id, range_=range_)
+        return None
+
+
+def sheets_values_batch_get(
+    sheets_service: object, spreadsheet_id: str, ranges: list[str]
+) -> dict[str, list[list]] | None:
+    """Read multiple ranges. Returns dict[range: list[list]] or None on error."""
+    try:
+        result = (
+            sheets_service.spreadsheets()
+            .values()
+            .batchGet(spreadsheetId=spreadsheet_id, ranges=ranges)
+            .execute()
+        )
+        output = {}
+        for value_range in result.get("valueRanges", []):
+            range_key = value_range.get("range", "")
+            output[range_key] = value_range.get("values", [])
+        return output
+    except Exception:  # logged below
+        _log_service_failure("sheets_values_batch_get", spreadsheet_id=spreadsheet_id)
+        return None
+
+
+def sheets_values_update(
+    sheets_service: object,
+    spreadsheet_id: str,
+    range_: str,
+    values: list[list],
+    value_input: str = "USER_ENTERED",
+) -> dict | None:
+    """Update a range with values. Returns update stats or None on error."""
+    try:
+        result = (
+            sheets_service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=spreadsheet_id,
+                range=range_,
+                valueInputOption=value_input,
+                body={"values": values},
+            )
+            .execute()
+        )
+        return result
+    except Exception:  # logged below
+        _log_service_failure("sheets_values_update", spreadsheet_id=spreadsheet_id, range_=range_)
+        return None
+
+
+def sheets_values_batch_update(
+    sheets_service: object,
+    spreadsheet_id: str,
+    data: list[dict],
+    value_input: str = "USER_ENTERED",
+) -> dict | None:
+    """Update multiple ranges. data = [{"range": "...", "values": [...]}, ...]."""
+    try:
+        result = (
+            sheets_service.spreadsheets()
+            .values()
+            .batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={
+                    "valueInputOption": value_input,
+                    "data": data,
+                },
+            )
+            .execute()
+        )
+        return result
+    except Exception:  # logged below
+        _log_service_failure("sheets_values_batch_update", spreadsheet_id=spreadsheet_id)
+        return None
+
+
+def sheets_values_append(
+    sheets_service: object,
+    spreadsheet_id: str,
+    range_: str,
+    values: list[list],
+    value_input: str = "USER_ENTERED",
+) -> dict | None:
+    """Append rows to a range. Returns append stats or None on error."""
+    try:
+        result = (
+            sheets_service.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=spreadsheet_id,
+                range=range_,
+                valueInputOption=value_input,
+                body={"values": values},
+            )
+            .execute()
+        )
+        return result
+    except Exception:  # logged below
+        _log_service_failure("sheets_values_append", spreadsheet_id=spreadsheet_id, range_=range_)
+        return None
+
+
+def sheets_values_clear(sheets_service: object, spreadsheet_id: str, range_: str) -> bool:
+    """Clear a range."""
+    try:
+        sheets_service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id, range=range_
+        ).execute()
+        return True
+    except Exception:  # logged below
+        _log_service_failure("sheets_values_clear", spreadsheet_id=spreadsheet_id, range_=range_)
+        return False
+
+
+def sheets_add_sheet(
+    sheets_service: object,
+    spreadsheet_id: str,
+    title: str,
+    rows: int = 1000,
+    cols: int = 26,
+) -> SheetTab | None:
+    """Add a new sheet tab to a spreadsheet."""
+    try:
+        result = (
+            sheets_service.spreadsheets()
+            .batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "addSheet": {
+                                "properties": {
+                                    "title": title,
+                                    "gridProperties": {"rowCount": rows, "columnCount": cols},
+                                }
+                            }
+                        }
+                    ]
+                },
+            )
+            .execute()
+        )
+        # Extract new sheet info from reply
+        reply = result.get("replies", [{}])[0]
+        props = reply.get("addSheet", {}).get("properties", {})
+        return SheetTab(
+            sheet_id=props.get("sheetId", 0),
+            title=props.get("title", ""),
+            index=props.get("index", 0),
+            row_count=props.get("gridProperties", {}).get("rowCount", 0),
+            col_count=props.get("gridProperties", {}).get("columnCount", 0),
+        )
+    except Exception:  # logged below
+        _log_service_failure("sheets_add_sheet", spreadsheet_id=spreadsheet_id, title=title)
+        return None
+
+
+def sheets_delete_sheet(sheets_service: object, spreadsheet_id: str, sheet_id: int) -> bool:
+    """Delete a sheet tab by sheet_id."""
+    try:
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"deleteSheet": {"sheetId": sheet_id}}]},
+        ).execute()
+        return True
+    except Exception:  # logged below
+        _log_service_failure(
+            "sheets_delete_sheet", spreadsheet_id=spreadsheet_id, sheet_id=sheet_id
+        )
+        return False
+
+
+def sheets_rename_sheet(
+    sheets_service: object, spreadsheet_id: str, sheet_id: int, new_title: str
+) -> bool:
+    """Rename a sheet tab."""
+    try:
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": sheet_id, "title": new_title},
+                            "fields": "title",
+                        }
+                    }
+                ]
+            },
+        ).execute()
+        return True
+    except Exception:  # logged below
+        _log_service_failure(
+            "sheets_rename_sheet", spreadsheet_id=spreadsheet_id, sheet_id=sheet_id
+        )
+        return False
+
+
+def sheets_format(sheets_service: object, spreadsheet_id: str, requests: list[dict]) -> dict | None:
+    """Apply formatting via raw batchUpdate requests. For max flexibility."""
+    try:
+        result = (
+            sheets_service.spreadsheets()
+            .batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": requests},
+            )
+            .execute()
+        )
+        return result
+    except Exception:  # logged below
+        _log_service_failure("sheets_format", spreadsheet_id=spreadsheet_id)
+        return None
+
+
+def sheets_copy_to(
+    sheets_service: object, spreadsheet_id: str, sheet_id: int, dest_spreadsheet_id: str
+) -> SheetTab | None:
+    """Copy a sheet to another spreadsheet."""
+    try:
+        result = (
+            sheets_service.spreadsheets()
+            .sheets()
+            .copyTo(
+                spreadsheetId=spreadsheet_id,
+                sheetId=sheet_id,
+                body={"destinationSpreadsheetId": dest_spreadsheet_id},
+            )
+            .execute()
+        )
+        props = result.get("properties", {})
+        return SheetTab(
+            sheet_id=props.get("sheetId", 0),
+            title=props.get("title", ""),
+            index=props.get("index", 0),
+            row_count=props.get("gridProperties", {}).get("rowCount", 0),
+            col_count=props.get("gridProperties", {}).get("columnCount", 0),
+        )
+    except Exception:  # logged below
+        _log_service_failure(
+            "sheets_copy_to",
+            spreadsheet_id=spreadsheet_id,
+            sheet_id=sheet_id,
+            dest_id=dest_spreadsheet_id,
+        )
         return None
 
 

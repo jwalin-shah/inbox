@@ -29,6 +29,8 @@ from services import (
     Msg,
     Note,
     Reminder,
+    SheetTab,
+    Spreadsheet,
     add_google_account,
     ai_briefing,
     ai_extract_actions,
@@ -96,6 +98,21 @@ from services import (
     save_voice_config,
     search_all,
     send_notification,
+    sheets_add_sheet,
+    sheets_copy_to,
+    sheets_create,
+    sheets_delete,
+    sheets_delete_sheet,
+    sheets_format,
+    sheets_get,
+    sheets_list,
+    sheets_rename_sheet,
+    sheets_values_append,
+    sheets_values_batch_get,
+    sheets_values_batch_update,
+    sheets_values_clear,
+    sheets_values_get,
+    sheets_values_update,
 )
 from services import (
     autocomplete as services_autocomplete,
@@ -243,6 +260,58 @@ class DriveCreateFolderRequest(BaseModel):
     account: str = ""
 
 
+class SheetTabOut(BaseModel):
+    sheet_id: int
+    title: str
+    index: int
+    row_count: int
+    col_count: int
+
+
+class SpreadsheetOut(BaseModel):
+    id: str
+    title: str
+    url: str
+    sheets: list[SheetTabOut] = []
+    account: str = ""
+
+
+class CreateSpreadsheetRequest(BaseModel):
+    title: str
+    sheets: list[str] = []
+    account: str = ""
+
+
+class SheetValuesUpdateRequest(BaseModel):
+    values: list[list]  # type: ignore[type-arg]
+    value_input: str = "USER_ENTERED"
+
+
+class SheetValuesBatchUpdateRequest(BaseModel):
+    data: list[dict]  # type: ignore[type-arg]
+    value_input: str = "USER_ENTERED"
+
+
+class AddSheetRequest(BaseModel):
+    title: str
+    rows: int = 1000
+    cols: int = 26
+    account: str = ""
+
+
+class FormatRequest(BaseModel):
+    requests: list[dict]  # type: ignore[type-arg]
+    account: str = ""
+
+
+class BatchGetRequest(BaseModel):
+    ranges: list[str]
+
+
+class CopySheetRequest(BaseModel):
+    dest_spreadsheet_id: str
+
+
 class AutocompleteRequest(BaseModel):
     draft: str = ""
     messages: list[dict] = []  # type: ignore[type-arg]
@@ -330,6 +399,7 @@ class ServerState:
         self.gmail_services: dict[str, object] = {}
         self.cal_services: dict[str, object] = {}
         self.drive_services: dict[str, object] = {}
+        self.sheets_services: dict[str, object] = {}
         self.conv_cache: dict[str, Contact] = {}  # "source:id" -> Contact
         self.events_cache: list[CalendarEvent] = []
         self.ambient: AmbientService = AmbientService(
@@ -440,6 +510,26 @@ def _drive_to_out(f: DriveFile, account: str = "") -> DriveFileOut:
     )
 
 
+def _sheet_tab_to_out(tab: SheetTab) -> SheetTabOut:
+    return SheetTabOut(
+        sheet_id=tab.sheet_id,
+        title=tab.title,
+        index=tab.index,
+        row_count=tab.row_count,
+        col_count=tab.col_count,
+    )
+
+
+def _spreadsheet_to_out(s: Spreadsheet, account: str = "") -> SpreadsheetOut:
+    return SpreadsheetOut(
+        id=s.id,
+        title=s.title,
+        url=s.url,
+        sheets=[_sheet_tab_to_out(tab) for tab in s.sheets],
+        account=account or s.account,
+    )
+
+
 def _cache_key(source: str, conv_id: str) -> str:
     return f"{source}:{conv_id}"
 
@@ -452,14 +542,16 @@ async def lifespan(app: FastAPI):
     n = await asyncio.to_thread(init_contacts)
     print(f"Loaded {n} contacts")
 
-    gmail, cal, drive = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
+    state.sheets_services = sheets
     print(
         f"Gmail accounts: {list(gmail.keys())}, "
         f"Calendar accounts: {list(cal.keys())}, "
-        f"Drive accounts: {list(drive.keys())}"
+        f"Drive accounts: {list(drive.keys())}, "
+        f"Sheets accounts: {list(sheets.keys())}"
     )
 
     # Pre-warm conversation cache if enabled (reduces cold-start latency)
@@ -545,6 +637,7 @@ async def health():
         "gmail_accounts": list(state.gmail_services.keys()),
         "calendar_accounts": list(state.cal_services.keys()),
         "drive_accounts": list(state.drive_services.keys()),
+        "sheets_accounts": list(state.sheets_services.keys()),
         "github_configured": _github_token() is not None,
     }
 
@@ -655,6 +748,22 @@ def _get_gmail_service_for_account(account: str = "") -> tuple[str, object]:
     svc = state.gmail_services.get(acct)
     if not svc:
         raise HTTPException(404, "No Gmail account available")
+    return acct, svc
+
+
+def _get_sheets_service_for_account(account: str = "") -> tuple[str, object]:
+    acct = account or (next(iter(state.sheets_services)) if state.sheets_services else "")
+    svc = state.sheets_services.get(acct)
+    if not svc:
+        raise HTTPException(404, "No Sheets account available")
+    return acct, svc
+
+
+def _get_drive_service_for_account(account: str = "") -> tuple[str, object]:
+    acct = account or (next(iter(state.drive_services)) if state.drive_services else "")
+    svc = state.drive_services.get(acct)
+    if not svc:
+        raise HTTPException(404, "No Drive account available")
     return acct, svc
 
 
@@ -1232,6 +1341,177 @@ async def delete_drive_file(file_id: str, account: str = ""):
     return {"ok": ok}
 
 
+# ── Sheets ───────────────────────────────────────────────────────────────────
+
+
+@app.get("/sheets", response_model=list[SpreadsheetOut])
+async def list_sheets(q: str = "", limit: int = 20, account: str = ""):
+
+    # List spreadsheets from Drive (need Drive service)
+    if account and account in state.drive_services:
+        drive_svcs = {account: state.drive_services[account]}
+    else:
+        drive_svcs = state.drive_services
+
+    results = []
+    for acct, drive_svc in drive_svcs.items():
+        sheets = await asyncio.to_thread(sheets_list, drive_svc, q, limit, acct)
+        results.extend(sheets)
+    return [_spreadsheet_to_out(s, s.account) for s in results]
+
+
+@app.post("/sheets", response_model=SpreadsheetOut)
+async def create_spreadsheet(req: CreateSpreadsheetRequest):
+
+    acct, sheets_svc = _get_sheets_service_for_account(req.account)
+    result = await asyncio.to_thread(sheets_create, sheets_svc, req.title, req.sheets or [])
+    if not result:
+        raise HTTPException(400, "Failed to create spreadsheet")
+    return _spreadsheet_to_out(result, acct)
+
+
+@app.get("/sheets/{spreadsheet_id}", response_model=SpreadsheetOut)
+async def get_spreadsheet(spreadsheet_id: str, account: str = ""):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    result = await asyncio.to_thread(sheets_get, sheets_svc, spreadsheet_id)
+    if not result:
+        raise HTTPException(404, "Spreadsheet not found")
+    return _spreadsheet_to_out(result, acct)
+
+
+@app.delete("/sheets/{spreadsheet_id}")
+async def delete_spreadsheet(spreadsheet_id: str, account: str = ""):
+
+    acct, drive_svc = _get_drive_service_for_account(account)
+    ok = await asyncio.to_thread(sheets_delete, drive_svc, spreadsheet_id)
+    return {"ok": ok}
+
+
+@app.get("/sheets/{spreadsheet_id}/values/{range_}")
+async def read_range(spreadsheet_id: str, range_: str, account: str = ""):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    result = await asyncio.to_thread(sheets_values_get, sheets_svc, spreadsheet_id, range_)
+    if result is None:
+        raise HTTPException(404, "Failed to read range")
+    return {"range": range_, "values": result}
+
+
+@app.put("/sheets/{spreadsheet_id}/values/{range_}")
+async def update_range(
+    spreadsheet_id: str, range_: str, req: SheetValuesUpdateRequest, account: str = ""
+):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    result = await asyncio.to_thread(
+        sheets_values_update, sheets_svc, spreadsheet_id, range_, req.values, req.value_input
+    )
+    if result is None:
+        raise HTTPException(400, "Failed to update range")
+    return result
+
+
+@app.post("/sheets/{spreadsheet_id}/values/{range_}/append")
+async def append_range(
+    spreadsheet_id: str, range_: str, req: SheetValuesUpdateRequest, account: str = ""
+):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    result = await asyncio.to_thread(
+        sheets_values_append, sheets_svc, spreadsheet_id, range_, req.values, req.value_input
+    )
+    if result is None:
+        raise HTTPException(400, "Failed to append range")
+    return result
+
+
+@app.delete("/sheets/{spreadsheet_id}/values/{range_}")
+async def clear_range(spreadsheet_id: str, range_: str, account: str = ""):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    ok = await asyncio.to_thread(sheets_values_clear, sheets_svc, spreadsheet_id, range_)
+    return {"ok": ok}
+
+
+@app.post("/sheets/{spreadsheet_id}/values/batch-get")
+async def batch_get_values(spreadsheet_id: str, req: BatchGetRequest, account: str = ""):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    result = await asyncio.to_thread(
+        sheets_values_batch_get, sheets_svc, spreadsheet_id, req.ranges
+    )
+    if result is None:
+        raise HTTPException(404, "Failed to read ranges")
+    return result
+
+
+@app.post("/sheets/{spreadsheet_id}/values/batch-update")
+async def batch_update_values(
+    spreadsheet_id: str, req: SheetValuesBatchUpdateRequest, account: str = ""
+):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    result = await asyncio.to_thread(
+        sheets_values_batch_update, sheets_svc, spreadsheet_id, req.data, req.value_input
+    )
+    if result is None:
+        raise HTTPException(400, "Failed to batch update ranges")
+    return result
+
+
+@app.post("/sheets/{spreadsheet_id}/tabs", response_model=SheetTabOut)
+async def add_sheet_tab(spreadsheet_id: str, req: AddSheetRequest):
+
+    acct, sheets_svc = _get_sheets_service_for_account(req.account)
+    result = await asyncio.to_thread(
+        sheets_add_sheet, sheets_svc, spreadsheet_id, req.title, req.rows, req.cols
+    )
+    if not result:
+        raise HTTPException(400, "Failed to add sheet tab")
+    return _sheet_tab_to_out(result)
+
+
+@app.delete("/sheets/{spreadsheet_id}/tabs/{sheet_id}")
+async def delete_sheet_tab(spreadsheet_id: str, sheet_id: int, account: str = ""):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    ok = await asyncio.to_thread(sheets_delete_sheet, sheets_svc, spreadsheet_id, sheet_id)
+    return {"ok": ok}
+
+
+@app.patch("/sheets/{spreadsheet_id}/tabs/{sheet_id}")
+async def rename_sheet_tab(spreadsheet_id: str, sheet_id: int, title: str, account: str = ""):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    ok = await asyncio.to_thread(sheets_rename_sheet, sheets_svc, spreadsheet_id, sheet_id, title)
+    return {"ok": ok}
+
+
+@app.post("/sheets/{spreadsheet_id}/tabs/{sheet_id}/copy")
+async def copy_sheet_tab(
+    spreadsheet_id: str, sheet_id: int, req: CopySheetRequest, account: str = ""
+):
+
+    acct, sheets_svc = _get_sheets_service_for_account(account)
+    result = await asyncio.to_thread(
+        sheets_copy_to, sheets_svc, spreadsheet_id, sheet_id, req.dest_spreadsheet_id
+    )
+    if not result:
+        raise HTTPException(400, "Failed to copy sheet")
+    return _sheet_tab_to_out(result)
+
+
+@app.post("/sheets/{spreadsheet_id}/format")
+async def format_spreadsheet(spreadsheet_id: str, req: FormatRequest):
+
+    acct, sheets_svc = _get_sheets_service_for_account(req.account)
+    result = await asyncio.to_thread(sheets_format, sheets_svc, spreadsheet_id, req.requests)
+    if result is None:
+        raise HTTPException(400, "Failed to apply formatting")
+    return result
+
+
 # ── Search ───────────────────────────────────────────────────────────────────
 
 
@@ -1527,6 +1807,7 @@ async def list_accounts():
         "gmail": list(state.gmail_services.keys()),
         "calendar": list(state.cal_services.keys()),
         "drive": list(state.drive_services.keys()),
+        "sheets": list(state.sheets_services.keys()),
         "github": _github_token() is not None,
     }
 
@@ -1537,10 +1818,11 @@ async def add_account():
     if not email:
         raise HTTPException(400, "Failed to add account — no credentials.json")
     # Reload all services
-    gmail, cal, drive = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
+    state.sheets_services = sheets
     return {"email": email}
 
 
@@ -1551,10 +1833,11 @@ async def reauth_account(req: AccountRequest):
     email = await asyncio.to_thread(reauth_google_account, req.email)
     if not email:
         raise HTTPException(400, "Re-auth failed")
-    gmail, cal, drive = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
+    state.sheets_services = sheets
     return {"email": email}
 
 

@@ -1,7 +1,7 @@
 # Inbox — Project Context
 
 ## What this is
-A terminal TUI (Python + Textual + Rich) that unifies iMessage, Gmail, Google Calendar, and Apple Notes into one inbox. Client-server architecture: a local FastAPI server handles all data access, the TUI is a thin HTTP client. Agents can also hit the server API directly.
+A terminal TUI (Python + Textual + Rich) that unifies iMessage, Gmail, Google Calendar, Google Sheets, and Apple Notes into one inbox. Client-server architecture: a local FastAPI server handles all data access, the TUI is a thin HTTP client. Agents can also hit the server API directly.
 
 ## Run it
 ```bash
@@ -12,7 +12,7 @@ uv run python inbox_server.py   # server only (for agent access)
 
 ## Architecture
 ```
-services.py       — data access layer (iMessage, Gmail, Calendar, Notes, Reminders, GitHub, Drive, auth, LLM, audio)
+services.py       — data access layer (iMessage, Gmail, Calendar, Sheets, Notes, Reminders, GitHub, Drive, auth, LLM, audio)
 inbox_server.py   — FastAPI server wrapping services.py (port 9849)
 inbox_client.py   — sync HTTP client for the server API
 inbox.py          — Textual TUI (thin client, auto-starts server)
@@ -65,6 +65,21 @@ GET  /drive/files/{id}?account=...
 POST /drive/upload  (multipart: file + folder_id + account)
 POST /drive/folder  {"name", "parent_id", "account"}
 DELETE /drive/files/{id}?account=...
+GET  /sheets?q=...&limit=20&account=...
+POST /sheets  {"title", "sheets", "account"}
+GET  /sheets/{id}
+DELETE /sheets/{id}?account=...
+GET  /sheets/{id}/values/{range}?account=...
+PUT  /sheets/{id}/values/{range}?account=...  {"values": [[...]], "value_input": "USER_ENTERED"}
+POST /sheets/{id}/values/{range}/append?account=...  {"values": [[...]]}
+DELETE /sheets/{id}/values/{range}?account=...
+POST /sheets/{id}/values/batch-get?account=...  {"ranges": [...]}
+POST /sheets/{id}/values/batch-update?account=...  {"data": [...], "value_input": "USER_ENTERED"}
+POST /sheets/{id}/tabs?account=...  {"title", "rows", "cols"}
+DELETE /sheets/{id}/tabs/{sheet_id}?account=...
+PATCH /sheets/{id}/tabs/{sheet_id}?account=...&title=NewTitle
+POST /sheets/{id}/tabs/{sheet_id}/copy?account=...  {"dest_spreadsheet_id"}
+POST /sheets/{id}/format?account=...  {"requests": [...]}
 POST /ambient/start
 POST /ambient/stop
 GET  /ambient/status
@@ -98,6 +113,16 @@ POST /notifications/test  {"title", "body"}
 - **Tab** — accept autocomplete suggestion (in compose input)
 - **Ctrl+Q** — quit
 
+## Google Sheets
+- Uses the same OAuth token as Gmail/Calendar (full `spreadsheets` scope added)
+- Full CRUD on spreadsheets: create, list, get metadata, trash (recoverable)
+- **Range operations**: read (A1 notation), write, append, clear, batch read/write
+- **Sheet tab management**: add, delete, rename, copy to another spreadsheet
+- **Formatting**: raw `batchUpdate` requests for cell formatting, borders, colors, formulas
+- Multi-account: routes by `account` param, queries all accounts for list
+- Agents can perform any operation available in Sheets API (values, formatting, tabs, formulas)
+- All mutations return operation stats (cells updated, etc.)
+
 ## Google Drive
 - Uses the same OAuth token as Gmail/Calendar (full `drive` scope)
 - Upload files, create folders, list/search/delete files
@@ -118,12 +143,13 @@ POST /notifications/test  {"title", "body"}
 - Mutations (complete, create) via AppleScript — SQLite is read-only
 - Lists come from `ZREMCDBASELIST`, reminders from `ZREMCDREMINDER`
 
-## Multi-account Gmail
+## Multi-account Google
 - Each Google account gets its own token in `tokens/`
 - Legacy `token.json` auto-migrates to `tokens/` on first run
 - All accounts queried on refresh, contacts tagged with `gmail_account`
 - Sends route through the correct account's service
-- Scopes: `gmail.readonly` + `gmail.send` + `calendar` + `drive` (full read/write)
+- Scopes: `gmail.readonly` + `gmail.send` + `calendar` + `drive` + `spreadsheets` (full read/write)
+- **Note**: New `spreadsheets` scope added for Sheets integration; users must re-auth once via `/accounts/reauth`
 
 ## LLM + Audio stack
 - **LLM**: Qwen3.5-0.8B-MLX-4bit (~500MB) — shared singleton for extraction + autocomplete
@@ -154,7 +180,7 @@ POST /notifications/test  {"title", "body"}
 - **AddressBook**: `~/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb`
 - **Apple Notes**: `~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite`
 - **Apple Reminders**: `~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite`
-- **Gmail/Calendar/Drive**: Google API via OAuth tokens in `tokens/`
+- **Gmail/Calendar/Drive/Sheets**: Google API via OAuth tokens in `tokens/`
 - **GitHub**: REST API via personal access token in `github_token.txt`
 
 ## Testing
