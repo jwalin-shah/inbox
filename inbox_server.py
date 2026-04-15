@@ -40,10 +40,25 @@ from services import (
     calendar_create_event,
     calendar_delete_event,
     calendar_events,
+    calendar_find_free_slots,
+    calendar_freebusy,
+    calendar_get_event,
+    calendar_get_recurring_instances,
+    calendar_list_calendars,
+    calendar_modify_attendees,
+    calendar_rsvp_event,
+    calendar_search_events,
     calendar_update_event,
     close_sqlite_connections,
     contacts_profile,
     contacts_search,
+    docs_create,
+    docs_delete,
+    docs_export,
+    docs_get,
+    docs_get_text,
+    docs_insert_text,
+    docs_list,
     drive_create_folder,
     drive_delete,
     drive_download,
@@ -162,6 +177,56 @@ class CalendarEventOut(BaseModel):
     event_id: str = ""
     calendar_id: str = ""
     attendees: list[dict[str, str]] = []
+    recurrence: list[str] = []
+    reminders: dict = {}
+    recurring_event_id: str = ""
+
+
+class CalendarOut(BaseModel):
+    id: str
+    summary: str
+    description: str = ""
+    primary: bool = False
+    access_role: str = ""
+    background_color: str = ""
+    account: str = ""
+
+
+class RsvpRequest(BaseModel):
+    response: str  # "accepted" | "declined" | "tentative"
+    calendar_id: str = "primary"
+    account: str = ""
+
+
+class ModifyAttendeesRequest(BaseModel):
+    add: list[dict[str, str]] = []
+    remove: list[str] = []
+    calendar_id: str = "primary"
+    account: str = ""
+
+
+class EventRemindersRequest(BaseModel):
+    use_default: bool = False
+    overrides: list[dict[str, int | str]] = []
+    calendar_id: str = "primary"
+    account: str = ""
+
+
+class FreeBusyRequest(BaseModel):
+    time_min: str
+    time_max: str
+    calendar_ids: list[str] = ["primary"]
+    timezone: str = "UTC"
+    account: str = ""
+
+
+class FreeSlotsRequest(BaseModel):
+    time_min: str
+    time_max: str
+    calendar_ids: list[str] = ["primary"]
+    duration_minutes: int = 30
+    timezone: str = "UTC"
+    account: str = ""
 
 
 class NoteOut(BaseModel):
@@ -200,6 +265,7 @@ class UpdateEventRequest(BaseModel):
     end: str | None = None
     location: str | None = None
     description: str | None = None
+    reminders: dict | None = None
 
 
 class AccountRequest(BaseModel):
@@ -308,6 +374,24 @@ class BatchGetRequest(BaseModel):
     ranges: list[str]
 
 
+class DocumentOut(BaseModel):
+    id: str
+    title: str
+    url: str
+    mime_type: str = "application/vnd.google-apps.document"
+    account: str = ""
+
+
+class CreateDocumentRequest(BaseModel):
+    title: str
+    account: str = ""
+
+
+class InsertTextRequest(BaseModel):
+    text: str
+    index: int = 1
+
+
 class CopySheetRequest(BaseModel):
     dest_spreadsheet_id: str
 
@@ -400,6 +484,7 @@ class ServerState:
         self.cal_services: dict[str, object] = {}
         self.drive_services: dict[str, object] = {}
         self.sheets_services: dict[str, object] = {}
+        self.docs_services: dict[str, object] = {}
         self.conv_cache: dict[str, Contact] = {}  # "source:id" -> Contact
         self.events_cache: list[CalendarEvent] = []
         self.ambient: AmbientService = AmbientService(
@@ -542,11 +627,12 @@ async def lifespan(app: FastAPI):
     n = await asyncio.to_thread(init_contacts)
     print(f"Loaded {n} contacts")
 
-    gmail, cal, drive, sheets = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets, docs = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
     state.sheets_services = sheets
+    state.docs_services = docs
     print(
         f"Gmail accounts: {list(gmail.keys())}, "
         f"Calendar accounts: {list(cal.keys())}, "
@@ -1512,6 +1598,101 @@ async def format_spreadsheet(spreadsheet_id: str, req: FormatRequest):
     return result
 
 
+# ── Docs ─────────────────────────────────────────────────────────────────────
+
+
+def _get_docs_service_for_account(account: str = "") -> tuple[str, object]:
+    """Get docs service for account, return (account_email, service). Raises HTTPException on failure."""
+    acct = account or (next(iter(state.docs_services)) if state.docs_services else "")
+    if not acct or acct not in state.docs_services:
+        raise HTTPException(400, "No docs service available")
+    return acct, state.docs_services[acct]
+
+
+def _document_to_out(d) -> DocumentOut:  # type: ignore[no-untyped-def]
+    return DocumentOut(
+        id=d.id,
+        title=d.title,
+        url=d.url,
+        mime_type=d.mime_type,
+        account=d.account,
+    )
+
+
+@app.get("/docs", response_model=list[DocumentOut])
+async def list_docs(q: str = "", limit: int = 20, account: str = ""):
+
+    acct, drive_svc = _get_drive_service_for_account(account)
+    docs = await asyncio.to_thread(docs_list, drive_svc, q, limit, acct)
+    return [_document_to_out(d) for d in docs]
+
+
+@app.post("/docs", response_model=DocumentOut)
+async def create_doc(req: CreateDocumentRequest):
+
+    acct, docs_svc = _get_docs_service_for_account(req.account)
+    doc = await asyncio.to_thread(docs_create, docs_svc, req.title)
+    if not doc:
+        raise HTTPException(400, "Failed to create document")
+    return _document_to_out(doc)
+
+
+@app.get("/docs/{document_id}", response_model=DocumentOut)
+async def get_doc(document_id: str, account: str = ""):
+
+    acct, docs_svc = _get_docs_service_for_account(account)
+    doc = await asyncio.to_thread(docs_get, docs_svc, document_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    return _document_to_out(doc)
+
+
+@app.delete("/docs/{document_id}")
+async def delete_doc(document_id: str, account: str = ""):
+
+    acct, drive_svc = _get_drive_service_for_account(account)
+    ok = await asyncio.to_thread(docs_delete, drive_svc, document_id)
+    return {"ok": ok}
+
+
+@app.get("/docs/{document_id}/text")
+async def get_doc_text(document_id: str, account: str = ""):
+
+    acct, docs_svc = _get_docs_service_for_account(account)
+    text = await asyncio.to_thread(docs_get_text, docs_svc, document_id)
+    if text is None:
+        raise HTTPException(400, "Failed to read document")
+    return {"text": text}
+
+
+@app.post("/docs/{document_id}/text")
+async def insert_doc_text(document_id: str, req: InsertTextRequest, account: str = ""):
+
+    acct, docs_svc = _get_docs_service_for_account(account)
+    ok = await asyncio.to_thread(docs_insert_text, docs_svc, document_id, req.text, req.index)
+    return {"ok": ok}
+
+
+@app.get("/docs/{document_id}/export")
+async def export_doc(document_id: str, format: str = "text/plain", account: str = ""):
+
+    acct, drive_svc = _get_drive_service_for_account(account)
+    content = await asyncio.to_thread(docs_export, drive_svc, document_id, format)
+    if not content:
+        raise HTTPException(400, "Failed to export document")
+    # Return raw bytes with appropriate content type
+    from starlette.responses import Response
+
+    mime_type = format
+    if format == "text/plain":
+        mime_type = "text/plain; charset=utf-8"
+    elif format == "application/pdf":
+        mime_type = "application/pdf"
+    elif format == "text/html":
+        mime_type = "text/html; charset=utf-8"
+    return Response(content=content, media_type=mime_type)
+
+
 # ── Search ───────────────────────────────────────────────────────────────────
 
 
@@ -1818,11 +1999,12 @@ async def add_account():
     if not email:
         raise HTTPException(400, "Failed to add account — no credentials.json")
     # Reload all services
-    gmail, cal, drive, sheets = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets, docs = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
     state.sheets_services = sheets
+    state.docs_services = docs
     return {"email": email}
 
 
@@ -1833,11 +2015,12 @@ async def reauth_account(req: AccountRequest):
     email = await asyncio.to_thread(reauth_google_account, req.email)
     if not email:
         raise HTTPException(400, "Re-auth failed")
-    gmail, cal, drive, sheets = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets, docs = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
     state.sheets_services = sheets
+    state.docs_services = docs
     return {"email": email}
 
 
@@ -1864,6 +2047,184 @@ async def test_notification(req: NotificationTestRequest):
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+
+
+# ── Calendar (extended) ──────────────────────────────────────────────────────
+
+
+def _get_cal_service_for_account(account: str = "") -> tuple[str, object]:
+    """Get calendar service for account, raising HTTPException if unavailable."""
+    acct = account or (next(iter(state.cal_services)) if state.cal_services else "")
+    svc = state.cal_services.get(acct)
+    if not svc:
+        raise HTTPException(404, "No calendar account available")
+    return acct, svc
+
+
+@app.get("/calendar/calendars", response_model=list[CalendarOut])
+async def list_calendars(account: str = ""):
+    acct, svc = _get_cal_service_for_account(account)
+    calendars = await asyncio.to_thread(calendar_list_calendars, state.cal_services)
+    return calendars
+
+
+@app.get("/calendar/events/{event_id}", response_model=CalendarEventOut)
+async def get_event(
+    event_id: str,
+    calendar_id: str = "primary",
+    account: str = "",
+):
+    acct, svc = _get_cal_service_for_account(account)
+    evt = await asyncio.to_thread(calendar_get_event, svc, event_id, calendar_id)
+    if not evt:
+        raise HTTPException(404, "Event not found")
+    return _event_to_out(evt)
+
+
+@app.get("/calendar/events/{event_id}/attendees")
+async def get_event_attendees(
+    event_id: str,
+    calendar_id: str = "primary",
+    account: str = "",
+):
+    acct, svc = _get_cal_service_for_account(account)
+    evt = await asyncio.to_thread(calendar_get_event, svc, event_id, calendar_id)
+    if not evt:
+        raise HTTPException(404, "Event not found")
+    return {"event_id": event_id, "attendees": evt.attendees}
+
+
+@app.post("/calendar/events/{event_id}/rsvp")
+async def rsvp_event(
+    event_id: str,
+    req: RsvpRequest,
+):
+    acct, svc = _get_cal_service_for_account(req.account)
+    ok = await asyncio.to_thread(
+        calendar_rsvp_event, svc, event_id, acct, req.response, req.calendar_id
+    )
+    return {"ok": ok}
+
+
+@app.patch("/calendar/events/{event_id}/attendees")
+async def modify_attendees(
+    event_id: str,
+    req: ModifyAttendeesRequest,
+):
+    acct, svc = _get_cal_service_for_account(req.account)
+    ok = await asyncio.to_thread(
+        calendar_modify_attendees, svc, event_id, req.add, req.remove, req.calendar_id
+    )
+    return {"ok": ok}
+
+
+@app.get("/calendar/events/{event_id}/instances", response_model=list[CalendarEventOut])
+async def get_instances(
+    event_id: str,
+    calendar_id: str = "primary",
+    account: str = "",
+    time_min: str = "",
+    time_max: str = "",
+    max_results: int = 50,
+):
+    from datetime import datetime
+
+    acct, svc = _get_cal_service_for_account(account)
+    time_min_dt = datetime.fromisoformat(time_min) if time_min else None
+    time_max_dt = datetime.fromisoformat(time_max) if time_max else None
+    instances = await asyncio.to_thread(
+        calendar_get_recurring_instances,
+        svc,
+        event_id,
+        calendar_id,
+        time_min_dt,
+        time_max_dt,
+        max_results,
+    )
+    return [_event_to_out(e) for e in instances]
+
+
+@app.get("/calendar/search", response_model=list[CalendarEventOut])
+async def search_calendar(
+    q: str = "",
+    attendee: str = "",
+    location: str = "",
+    start: str = "",
+    end: str = "",
+    calendar_id: str = "",
+    account: str = "",
+    limit: int = 50,
+):
+    from datetime import datetime
+
+    # Use single account if specified, else all
+    cal_svcs = (
+        {account: state.cal_services[account]}
+        if account and account in state.cal_services
+        else state.cal_services
+    )
+    start_dt = datetime.fromisoformat(start) if start else None
+    end_dt = datetime.fromisoformat(end) if end else None
+    events = await asyncio.to_thread(
+        calendar_search_events,
+        cal_svcs,
+        q,
+        attendee,
+        location,
+        start_dt,
+        end_dt,
+        calendar_id or None,
+        limit,
+    )
+    return [_event_to_out(e) for e in events]
+
+
+@app.put("/calendar/events/{event_id}/reminders")
+async def set_reminders(
+    event_id: str,
+    req: EventRemindersRequest,
+):
+    acct, svc = _get_cal_service_for_account(req.account)
+    reminders_dict = {"useDefault": req.use_default}
+    if not req.use_default:
+        reminders_dict["overrides"] = req.overrides
+    ok = await asyncio.to_thread(
+        calendar_update_event, svc, event_id, reminders=reminders_dict, calendar_id=req.calendar_id
+    )
+    return {"ok": ok}
+
+
+@app.post("/calendar/freebusy")
+async def get_freebusy(req: FreeBusyRequest):
+    from datetime import datetime
+
+    acct, svc = _get_cal_service_for_account(req.account)
+    time_min = datetime.fromisoformat(req.time_min)
+    time_max = datetime.fromisoformat(req.time_max)
+    busy = await asyncio.to_thread(
+        calendar_freebusy, svc, time_min, time_max, req.calendar_ids, req.timezone
+    )
+    return {"time_min": req.time_min, "time_max": req.time_max, "busy": busy}
+
+
+@app.post("/calendar/free-slots")
+async def find_free_slots(req: FreeSlotsRequest):
+    from datetime import datetime
+
+    acct, svc = _get_cal_service_for_account(req.account)
+    time_min = datetime.fromisoformat(req.time_min)
+    time_max = datetime.fromisoformat(req.time_max)
+    slots = await asyncio.to_thread(
+        calendar_find_free_slots,
+        svc,
+        time_min,
+        time_max,
+        req.calendar_ids,
+        req.duration_minutes,
+        req.timezone,
+    )
+    return {"slots": slots}
+
 
 if __name__ == "__main__":
     import uvicorn

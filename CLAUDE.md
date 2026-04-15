@@ -12,7 +12,7 @@ uv run python inbox_server.py   # server only (for agent access)
 
 ## Architecture
 ```
-services.py       — data access layer (iMessage, Gmail, Calendar, Sheets, Notes, Reminders, GitHub, Drive, auth, LLM, audio)
+services.py       — data access layer (iMessage, Gmail, Calendar, Sheets, Docs, Notes, Reminders, GitHub, Drive, auth, LLM, audio)
 inbox_server.py   — FastAPI server wrapping services.py (port 9849)
 inbox_client.py   — sync HTTP client for the server API
 inbox.py          — Textual TUI (thin client, auto-starts server)
@@ -80,6 +80,13 @@ DELETE /sheets/{id}/tabs/{sheet_id}?account=...
 PATCH /sheets/{id}/tabs/{sheet_id}?account=...&title=NewTitle
 POST /sheets/{id}/tabs/{sheet_id}/copy?account=...  {"dest_spreadsheet_id"}
 POST /sheets/{id}/format?account=...  {"requests": [...]}
+GET  /docs?q=...&limit=20&account=...
+POST /docs  {"title", "account"}
+GET  /docs/{id}
+DELETE /docs/{id}?account=...
+GET  /docs/{id}/text
+POST /docs/{id}/text  {"text", "index"}
+GET  /docs/{id}/export?format=text/plain|application/pdf|text/html&account=...
 POST /ambient/start
 POST /ambient/stop
 GET  /ambient/status
@@ -113,6 +120,13 @@ POST /notifications/test  {"title", "body"}
 - **Tab** — accept autocomplete suggestion (in compose input)
 - **Ctrl+Q** — quit
 
+## Google Calendar
+- Creates, reads, updates, deletes calendar events
+- **Recurring events**: supported via `recurrence` parameter (RRULE format, e.g., `["RRULE:FREQ=WEEKLY;BYDAY=MO"]`)
+- **Reminders**: supported via `reminders` parameter (e.g., `{"useDefault": false, "overrides": [{"method": "email", "minutes": 15}]}`)
+- Tracks `recurring_event_id` to support updates to recurring series
+- Multi-account: queries all authed accounts on refresh
+
 ## Google Sheets
 - Uses the same OAuth token as Gmail/Calendar (full `spreadsheets` scope added)
 - Full CRUD on spreadsheets: create, list, get metadata, trash (recoverable)
@@ -122,6 +136,12 @@ POST /notifications/test  {"title", "body"}
 - Multi-account: routes by `account` param, queries all accounts for list
 - Agents can perform any operation available in Sheets API (values, formatting, tabs, formulas)
 - All mutations return operation stats (cells updated, etc.)
+
+## Google Docs
+- Uses the same OAuth token as Gmail/Calendar (full `documents` scope added)
+- Create, read, update, delete documents
+- **Text operations**: insert and append text
+- Multi-account: routes by `account` param, queries all accounts for list
 
 ## Google Drive
 - Uses the same OAuth token as Gmail/Calendar (full `drive` scope)
@@ -148,8 +168,8 @@ POST /notifications/test  {"title", "body"}
 - Legacy `token.json` auto-migrates to `tokens/` on first run
 - All accounts queried on refresh, contacts tagged with `gmail_account`
 - Sends route through the correct account's service
-- Scopes: `gmail.readonly` + `gmail.send` + `calendar` + `drive` + `spreadsheets` (full read/write)
-- **Note**: New `spreadsheets` scope added for Sheets integration; users must re-auth once via `/accounts/reauth`
+- Scopes: `gmail.readonly` + `gmail.send` + `calendar` + `drive` + `spreadsheets` + `documents` (full read/write)
+- **Note**: New `documents` scope added for Docs integration; users must re-auth once via `/accounts/reauth`
 
 ## LLM + Audio stack
 - **LLM**: Qwen3.5-0.8B-MLX-4bit (~500MB) — shared singleton for extraction + autocomplete
@@ -180,7 +200,7 @@ POST /notifications/test  {"title", "body"}
 - **AddressBook**: `~/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb`
 - **Apple Notes**: `~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite`
 - **Apple Reminders**: `~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite`
-- **Gmail/Calendar/Drive/Sheets**: Google API via OAuth tokens in `tokens/`
+- **Gmail/Calendar/Drive/Sheets/Docs**: Google API via OAuth tokens in `tokens/`
 - **GitHub**: REST API via personal access token in `github_token.txt`
 
 ## Testing

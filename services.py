@@ -57,6 +57,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/documents",
 ]
 
 ATTACHMENT_PLACEHOLDER = "\ufffc"
@@ -117,6 +118,9 @@ class CalendarEvent:
     event_id: str = ""
     calendar_id: str = ""
     attendees: list[dict[str, str]] = field(default_factory=list)
+    recurrence: list[str] = field(default_factory=list)
+    reminders: dict = field(default_factory=dict)
+    recurring_event_id: str = ""
 
 
 @dataclass
@@ -181,6 +185,15 @@ class Spreadsheet:
     title: str
     url: str
     sheets: list[SheetTab] = field(default_factory=list)
+    account: str = ""
+
+
+@dataclass
+class Document:
+    id: str
+    title: str
+    url: str
+    mime_type: str = "application/vnd.google-apps.document"
     account: str = ""
 
 
@@ -393,9 +406,9 @@ def _load_creds(token_path: Path) -> Credentials | None:
 
 
 def google_auth_all() -> tuple[
-    dict[str, object], dict[str, object], dict[str, object], dict[str, object]
+    dict[str, object], dict[str, object], dict[str, object], dict[str, object], dict[str, object]
 ]:
-    """Auth all accounts from tokens/ dir. Returns (gmail_svcs, cal_svcs, drive_svcs, sheets_svcs)."""
+    """Auth all accounts from tokens/ dir. Returns (gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs)."""
     TOKENS_DIR.mkdir(exist_ok=True)
 
     # Migrate legacy token.json — if it's missing scopes, re-auth
@@ -421,6 +434,7 @@ def google_auth_all() -> tuple[
     cal_svcs: dict[str, object] = {}
     drive_svcs: dict[str, object] = {}
     sheets_svcs: dict[str, object] = {}
+    docs_svcs: dict[str, object] = {}
 
     for token_path in sorted(TOKENS_DIR.glob("*.json")):
         creds = _load_creds(token_path)
@@ -459,7 +473,13 @@ def google_auth_all() -> tuple[
         except Exception:  # logged below
             _log_service_failure("google_auth_all.sheets_service", email=email)
 
-    return gmail_svcs, cal_svcs, drive_svcs, sheets_svcs
+        try:
+            docs_svc = build("docs", "v1", credentials=creds)
+            docs_svcs[email] = docs_svc
+        except Exception:  # logged below
+            _log_service_failure("google_auth_all.docs_service", email=email)
+
+    return gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs
 
 
 def add_google_account() -> str | None:
@@ -1540,6 +1560,8 @@ def _build_event_body(
     description: str = "",
     all_day: bool = False,
     attendees: list[dict[str, str]] | None = None,
+    recurrence: list[str] | None = None,
+    reminders: dict | None = None,
 ) -> dict:
     body: dict = {"summary": summary}
     if all_day:
@@ -1566,6 +1588,10 @@ def _build_event_body(
             for attendee in attendees
             if attendee.get("email")
         ]
+    if recurrence:
+        body["recurrence"] = recurrence
+    if reminders:
+        body["reminders"] = reminders
     return body
 
 
@@ -1579,6 +1605,8 @@ def calendar_create_event(
     all_day: bool = False,
     attendees: list[dict[str, str]] | None = None,
     calendar_id: str = "primary",
+    recurrence: list[str] | None = None,
+    reminders: dict | None = None,
 ) -> str | None:
     try:
         body = _build_event_body(
@@ -1589,6 +1617,8 @@ def calendar_create_event(
             description,
             all_day,
             attendees=attendees,
+            recurrence=recurrence,
+            reminders=reminders,
         )
         result = cal_service.events().insert(calendarId=calendar_id, body=body).execute()
         return result.get("id")
@@ -1612,6 +1642,7 @@ def calendar_update_event(
     location: str | None = None,
     description: str | None = None,
     calendar_id: str = "primary",
+    reminders: dict | None = None,
 ) -> bool:
     try:
         existing = cal_service.events().get(calendarId=calendar_id, eventId=event_id).execute()
@@ -1633,6 +1664,8 @@ def calendar_update_event(
             existing["location"] = location
         if description is not None:
             existing["description"] = description
+        if reminders is not None:
+            existing["reminders"] = reminders
         cal_service.events().update(
             calendarId=calendar_id, eventId=event_id, body=existing
         ).execute()
@@ -2937,6 +2970,136 @@ def sheets_copy_to(
             sheet_id=sheet_id,
             dest_id=dest_spreadsheet_id,
         )
+        return None
+
+
+# ── Docs ─────────────────────────────────────────────────────────────────────
+
+
+def docs_list(
+    drive_service: object, query: str = "", limit: int = 20, account: str = ""
+) -> list[Document]:
+    """List documents from Drive. Returns list of Document, empty on error."""
+    try:
+        q = "mimeType='application/vnd.google-apps.document'"
+        if query:
+            q += f" and name contains '{query}'"
+        result = (
+            drive_service.files()
+            .list(q=q, pageSize=limit, fields="files(id, name, modifiedTime, webViewLink, owners)")
+            .execute()
+        )
+        documents = []
+        for file in result.get("files", []):
+            documents.append(
+                Document(
+                    id=file["id"],
+                    title=file.get("name", ""),
+                    url=file.get("webViewLink", ""),
+                    account=account,
+                )
+            )
+        return documents
+    except Exception:  # logged below
+        _log_service_failure("docs_list", query=query)
+        return []
+
+
+def docs_get(docs_service: object, document_id: str) -> Document | None:
+    """Get document metadata and content."""
+    try:
+        result = docs_service.documents().get(documentId=document_id).execute()
+        return Document(
+            id=result.get("documentId", document_id),
+            title=result.get("title", ""),
+            url=f"https://docs.google.com/document/d/{document_id}/edit",
+        )
+    except Exception:  # logged below
+        _log_service_failure("docs_get", document_id=document_id)
+        return None
+
+
+def docs_create(docs_service: object, title: str) -> Document | None:
+    """Create a new Google Doc."""
+    try:
+        result = docs_service.documents().create(body={"title": title}).execute()
+        document_id = result.get("documentId", "")
+        return Document(
+            id=document_id,
+            title=result.get("title", title),
+            url=f"https://docs.google.com/document/d/{document_id}/edit",
+        )
+    except Exception:  # logged below
+        _log_service_failure("docs_create", title=title)
+        return None
+
+
+def docs_delete(drive_service: object, document_id: str) -> bool:
+    """Soft-delete (trash) a document."""
+    try:
+        drive_service.files().update(fileId=document_id, body={"trashed": True}).execute()
+        return True
+    except Exception:  # logged below
+        _log_service_failure("docs_delete", document_id=document_id)
+        return False
+
+
+def docs_export(
+    drive_service: object, document_id: str, mime_type: str = "text/plain"
+) -> bytes | None:
+    """Export document content. Supports: text/plain, application/pdf, text/html."""
+    try:
+        response = drive_service.files().export(fileId=document_id, mimeType=mime_type).execute()
+        return response
+    except Exception:  # logged below
+        _log_service_failure("docs_export", document_id=document_id, mime_type=mime_type)
+        return None
+
+
+def docs_insert_text(docs_service: object, document_id: str, text: str, index: int = 1) -> bool:
+    """Insert text into a document at specified index."""
+    try:
+        docs_service.documents().batchUpdate(
+            documentId=document_id,
+            body={
+                "requests": [
+                    {
+                        "insertText": {
+                            "text": text,
+                            "location": {"index": index},
+                        }
+                    }
+                ]
+            },
+        ).execute()
+        return True
+    except Exception:  # logged below
+        _log_service_failure("docs_insert_text", document_id=document_id)
+        return False
+
+
+def docs_get_text(docs_service: object, document_id: str) -> str | None:
+    """Get plain text content of a document."""
+    try:
+        result = docs_service.documents().get(documentId=document_id).execute()
+        text_parts = []
+        for elem in result.get("body", {}).get("content", []):
+            if "paragraph" in elem:
+                for run in elem["paragraph"].get("elements", []):
+                    if "textRun" in run:
+                        text_parts.append(run["textRun"].get("content", ""))
+            elif "table" in elem:
+                # Basic table extraction
+                for row in elem["table"].get("tableRows", []):
+                    for cell in row.get("tableCells", []):
+                        for content in cell.get("content", []):
+                            if "paragraph" in content:
+                                for run in content["paragraph"].get("elements", []):
+                                    if "textRun" in run:
+                                        text_parts.append(run["textRun"].get("content", ""))
+        return "".join(text_parts)
+    except Exception:  # logged below
+        _log_service_failure("docs_get_text", document_id=document_id)
         return None
 
 
@@ -4472,3 +4635,330 @@ def route_voice_command(text: str) -> bool:
         except Exception:
             pass
     return False
+
+
+def _event_to_calendar(
+    item: dict,
+    account: str = "",
+    calendar_id: str = "primary",
+) -> CalendarEvent | None:
+    """Parse a Google Calendar API event dict into a CalendarEvent."""
+    try:
+        start_raw = item.get("start", {})
+        end_raw = item.get("end", {})
+
+        all_day = "date" in start_raw
+        if all_day:
+            start_dt = datetime.strptime(start_raw["date"], "%Y-%m-%d")
+            end_dt = datetime.strptime(end_raw["date"], "%Y-%m-%d")
+        else:
+            start_dt = datetime.fromisoformat(start_raw.get("dateTime", ""))
+            end_dt = datetime.fromisoformat(end_raw.get("dateTime", ""))
+
+        # Extract attendee data
+        raw_attendees = item.get("attendees", [])
+        attendee_list = [
+            {
+                "name": a.get("displayName", ""),
+                "email": a.get("email", ""),
+                "responseStatus": a.get("responseStatus", ""),
+            }
+            for a in raw_attendees
+        ]
+
+        # Extract recurrence and reminders
+        recurrence = item.get("recurrence", [])
+        reminders = item.get("reminders", {})
+        recurring_event_id = item.get("recurringEventId", "")
+
+        return CalendarEvent(
+            summary=item.get("summary", "(No title)"),
+            start=start_dt,
+            end=end_dt,
+            location=item.get("location", ""),
+            description=item.get("description", ""),
+            account=account,
+            all_day=all_day,
+            event_id=item.get("id", ""),
+            calendar_id=calendar_id,
+            attendees=attendee_list,
+            recurrence=recurrence,
+            reminders=reminders,
+            recurring_event_id=recurring_event_id,
+        )
+    except Exception:
+        return None
+
+
+def calendar_list_calendars(cal_services: dict[str, object]) -> list[dict]:
+    """List all calendars across all accounts."""
+    result: list[dict] = []
+    for account, svc in cal_services.items():
+        try:
+            calendars_list = svc.calendarList().list().execute().get("items", [])
+            for cal in calendars_list:
+                result.append(
+                    {
+                        "id": cal.get("id", ""),
+                        "summary": cal.get("summary", ""),
+                        "description": cal.get("description", ""),
+                        "primary": cal.get("primary", False),
+                        "access_role": cal.get("accessRole", ""),
+                        "background_color": cal.get("backgroundColor", ""),
+                        "account": account,
+                    }
+                )
+        except Exception:
+            _log_service_failure("calendar_list_calendars", account=account)
+    return result
+
+
+def calendar_get_event(
+    cal_service,
+    event_id: str,
+    calendar_id: str = "primary",
+) -> CalendarEvent | None:
+    """Fetch a single event and return as CalendarEvent."""
+    try:
+        item = cal_service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        return _event_to_calendar(item, account="", calendar_id=calendar_id)
+    except Exception:
+        _log_service_failure(
+            "calendar_get_event",
+            event_id=event_id,
+            calendar_id=calendar_id,
+        )
+        return None
+
+
+def calendar_rsvp_event(
+    cal_service,
+    event_id: str,
+    self_email: str,
+    response: str,
+    calendar_id: str = "primary",
+) -> bool:
+    """RSVP to an event (accept/decline/tentative)."""
+    try:
+        cal_service.events().patch(
+            calendarId=calendar_id,
+            eventId=event_id,
+            body={"attendees": [{"email": self_email, "responseStatus": response}]},
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure(
+            "calendar_rsvp_event",
+            event_id=event_id,
+            self_email=self_email,
+            response=response,
+            calendar_id=calendar_id,
+        )
+        return False
+
+
+def calendar_modify_attendees(
+    cal_service,
+    event_id: str,
+    add: list[dict[str, str]] | None = None,
+    remove: list[str] | None = None,
+    calendar_id: str = "primary",
+) -> bool:
+    """Add/remove attendees from an event."""
+    try:
+        existing = cal_service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        attendees = existing.get("attendees", [])
+
+        if remove:
+            remove_set = {e.lower() for e in remove}
+            attendees = [a for a in attendees if a.get("email", "").lower() not in remove_set]
+
+        if add:
+            existing_emails = {a.get("email", "").lower() for a in attendees}
+            for new in add:
+                new_email = new.get("email", "").lower()
+                if new_email and new_email not in existing_emails:
+                    attendees.append(new)
+
+        cal_service.events().patch(
+            calendarId=calendar_id,
+            eventId=event_id,
+            body={"attendees": attendees},
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure(
+            "calendar_modify_attendees",
+            event_id=event_id,
+            calendar_id=calendar_id,
+        )
+        return False
+
+
+def calendar_get_recurring_instances(
+    cal_service,
+    event_id: str,
+    calendar_id: str = "primary",
+    time_min: datetime | None = None,
+    time_max: datetime | None = None,
+    max_results: int = 50,
+) -> list[CalendarEvent]:
+    """Get all instances of a recurring event."""
+    result: list[CalendarEvent] = []
+    try:
+        kwargs = {"calendarId": calendar_id, "eventId": event_id, "maxResults": max_results}
+        if time_min:
+            kwargs["timeMin"] = time_min.isoformat()
+        if time_max:
+            kwargs["timeMax"] = time_max.isoformat()
+
+        items = cal_service.events().instances(**kwargs).execute().get("items", [])
+        for item in items:
+            evt = _event_to_calendar(item, account="", calendar_id=calendar_id)
+            if evt:
+                result.append(evt)
+    except Exception:
+        _log_service_failure(
+            "calendar_get_recurring_instances",
+            event_id=event_id,
+            calendar_id=calendar_id,
+        )
+    return result
+
+
+def calendar_search_events(
+    cal_services: dict[str, object],
+    query: str = "",
+    attendee_email: str = "",
+    location: str = "",
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    calendar_id: str | None = None,
+    max_results: int = 50,
+) -> list[CalendarEvent]:
+    """Search events across calendars with filtering."""
+    result: list[CalendarEvent] = []
+    attendee_email_lower = attendee_email.lower()
+    location_lower = location.lower()
+
+    for account, svc in cal_services.items():
+        try:
+            cal_ids = [calendar_id] if calendar_id else ["primary"]
+
+            for cal_id in cal_ids:
+                kwargs = {"calendarId": cal_id, "maxResults": max_results}
+                if query:
+                    kwargs["q"] = query
+                if start_date:
+                    kwargs["timeMin"] = start_date.isoformat()
+                if end_date:
+                    kwargs["timeMax"] = end_date.isoformat()
+
+                items = svc.events().list(**kwargs).execute().get("items", [])
+
+                for item in items:
+                    if attendee_email:
+                        attendees = item.get("attendees", [])
+                        if not any(
+                            a.get("email", "").lower() == attendee_email_lower for a in attendees
+                        ):
+                            continue
+
+                    if location and location_lower not in item.get("location", "").lower():
+                        continue
+
+                    evt = _event_to_calendar(item, account=account, calendar_id=cal_id)
+                    if evt:
+                        result.append(evt)
+        except Exception:
+            _log_service_failure("calendar_search_events", account=account)
+
+    return result
+
+
+def calendar_freebusy(
+    cal_service,
+    time_min: datetime,
+    time_max: datetime,
+    calendar_ids: list[str],
+    timezone: str = "UTC",
+) -> dict[str, list[dict[str, str]]]:
+    """Get busy blocks for calendars."""
+    try:
+        result = (
+            cal_service.freebusy()
+            .query(
+                body={
+                    "timeMin": time_min.isoformat(),
+                    "timeMax": time_max.isoformat(),
+                    "timeZone": timezone,
+                    "items": [{"id": cid} for cid in calendar_ids],
+                }
+            )
+            .execute()
+        )
+
+        busy_dict: dict[str, list[dict[str, str]]] = {}
+        for cal_id, data in result.get("calendars", {}).items():
+            busy_list = data.get("busy", [])
+            busy_dict[cal_id] = [
+                {"start": b.get("start", ""), "end": b.get("end", "")} for b in busy_list
+            ]
+        return busy_dict
+    except Exception:
+        _log_service_failure("calendar_freebusy")
+        return {}
+
+
+def calendar_find_free_slots(
+    cal_service,
+    time_min: datetime,
+    time_max: datetime,
+    calendar_ids: list[str],
+    duration_minutes: int = 30,
+    timezone: str = "UTC",
+) -> list[dict[str, str]]:
+    """Find free slots between busy blocks."""
+    busy_dict = calendar_freebusy(cal_service, time_min, time_max, calendar_ids, timezone)
+
+    all_busy = []
+    for busy_list in busy_dict.values():
+        for b in busy_list:
+            all_busy.append(
+                (
+                    datetime.fromisoformat(b["start"].replace("Z", "+00:00")),
+                    datetime.fromisoformat(b["end"].replace("Z", "+00:00")),
+                )
+            )
+
+    all_busy.sort()
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in all_busy:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    current = time_min
+    slots: list[dict[str, str]] = []
+    duration = timedelta(minutes=duration_minutes)
+
+    for busy_start, busy_end in merged:
+        if busy_start > current and (busy_start - current) >= duration:
+            slots.append(
+                {
+                    "start": current.isoformat(),
+                    "end": busy_start.isoformat(),
+                }
+            )
+        current = max(current, busy_end)
+
+    if current + duration <= time_max:
+        slots.append(
+            {
+                "start": current.isoformat(),
+                "end": time_max.isoformat(),
+            }
+        )
+
+    return slots
