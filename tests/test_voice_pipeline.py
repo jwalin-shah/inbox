@@ -337,6 +337,8 @@ class TestAmbientNotesSearch:
 
 class TestAmbientAutostart:
     def test_autostart_enabled_starts_ambient(self):
+        import os
+
         from inbox_server import app, state
 
         started = []
@@ -346,6 +348,7 @@ class TestAmbientAutostart:
             state.ambient._running = True
 
         with (
+            patch.dict(os.environ, {"INBOX_DISABLE_AMBIENT": ""}, clear=False),
             patch("inbox_server.init_contacts", return_value=0),
             patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
             patch("inbox_server.load_voice_config", return_value={"ambient_autostart": True}),

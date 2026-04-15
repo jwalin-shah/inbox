@@ -427,19 +427,22 @@ class TestReminders:
         assert data[0]["title"] == "Buy milk"
 
     @patch("inbox_server.reminder_complete")
+    @patch("inbox_server.reminder_by_id")
     @patch("inbox_server.reminders_list")
-    def test_complete_reminder(self, mock_list, mock_complete, client):
-        mock_list.return_value = [
-            Reminder(id="99", title="Buy milk", completed=False),
-        ]
+    def test_complete_reminder(self, mock_list, mock_by_id, mock_complete, client):
+        reminder = Reminder(id="99", title="Buy milk", completed=False)
+        mock_list.return_value = [reminder]
+        mock_by_id.return_value = reminder
         mock_complete.return_value = True
         resp = client.post("/reminders/99/complete")
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
+    @patch("inbox_server.reminder_by_id")
     @patch("inbox_server.reminders_list")
-    def test_complete_reminder_not_found(self, mock_list, client):
+    def test_complete_reminder_not_found(self, mock_list, mock_by_id, client):
         mock_list.return_value = []
+        mock_by_id.return_value = None
         resp = client.post("/reminders/999/complete")
         assert resp.status_code == 404
 
