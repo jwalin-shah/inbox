@@ -157,12 +157,12 @@ class MemoryStore:
         where_clause = " AND ".join(predicates) if predicates else "1=1"
         params.append(limit)
         # NOTE: where_clause is constructed from fixed predicate strings (not user input),
-        # so the f-string here is safe and not a SQL injection vector.
+        # so concatenation here is safe and not a SQL injection vector.
         sql = (
             "SELECT * FROM memory_entries WHERE "
-            + where_clause
+            + where_clause  # nosec: B608
             + " ORDER BY updated_at DESC, id DESC LIMIT ?"
-        )  # nosec: B608
+        )
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_entry(row).to_dict() for row in rows]
