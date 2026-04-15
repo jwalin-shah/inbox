@@ -221,7 +221,10 @@ def test_send_notification_fires_osascript_when_enabled(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def server_client():
+    import os
+
     with (
+        patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
         patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
     ):

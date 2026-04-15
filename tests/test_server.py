@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +21,7 @@ def client():
 
     # Patch lifespan dependencies so real auth doesn't run
     with (
+        patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
         patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
         TestClient(inbox_server.app, raise_server_exceptions=False) as c,
@@ -82,6 +84,48 @@ class TestHealth:
         data = resp.json()
         assert "a@gmail.com" in data["gmail_accounts"]
         assert data["github_configured"] is True
+
+
+class TestAuth:
+    def test_auth_not_required_when_token_unset(self, client):
+        resp = client.get("/health")
+        assert resp.status_code == 200
+
+    def test_auth_required_when_token_set(self):
+        import inbox_server
+
+        with (
+            patch.dict(os.environ, {"INBOX_SERVER_TOKEN": "secret-token"}, clear=False),
+            patch("inbox_server.init_contacts", return_value=0),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
+            TestClient(inbox_server.app, raise_server_exceptions=False) as client,
+        ):
+            resp = client.get("/health")
+        assert resp.status_code == 401
+
+    def test_bearer_auth_allows_request(self):
+        import inbox_server
+
+        with (
+            patch.dict(os.environ, {"INBOX_SERVER_TOKEN": "secret-token"}, clear=False),
+            patch("inbox_server.init_contacts", return_value=0),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
+            TestClient(inbox_server.app, raise_server_exceptions=False) as client,
+        ):
+            resp = client.get("/health", headers={"Authorization": "Bearer secret-token"})
+        assert resp.status_code == 200
+
+    def test_x_api_key_auth_allows_request(self):
+        import inbox_server
+
+        with (
+            patch.dict(os.environ, {"INBOX_SERVER_TOKEN": "secret-token"}, clear=False),
+            patch("inbox_server.init_contacts", return_value=0),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
+            TestClient(inbox_server.app, raise_server_exceptions=False) as client,
+        ):
+            resp = client.get("/health", headers={"X-API-Key": "secret-token"})
+        assert resp.status_code == 200
 
 
 class TestLifespanCleanup:
@@ -472,6 +516,98 @@ class TestDrive:
     def test_delete_drive_file_no_account_404(self, client):
         resp = client.delete("/drive/files/abc123")
         assert resp.status_code == 404
+
+
+class TestGmailExtensions:
+    @patch("inbox_server.gmail_search")
+    def test_gmail_search(self, mock_search, client):
+        import inbox_server
+
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        mock_search.return_value = [
+            Contact(
+                id="msg1",
+                name="Alice",
+                source="gmail",
+                reply_to="alice@example.com",
+                thread_id="thread1",
+                gmail_account="me@gmail.com",
+                last_ts=datetime(2025, 1, 1),
+            )
+        ]
+        resp = client.get("/gmail/search", params={"q": "invoice", "account": "me@gmail.com"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice"
+
+    @patch("inbox_server.gmail_reply")
+    def test_gmail_reply(self, mock_reply, client):
+        import inbox_server
+
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        mock_reply.return_value = True
+        resp = client.post(
+            "/messages/gmail/reply",
+            json={"msg_id": "msg1", "body": "Thanks", "account": "me@gmail.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    @patch("inbox_server.gmail_batch_modify")
+    def test_gmail_batch_modify(self, mock_batch_modify, client):
+        import inbox_server
+
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        mock_batch_modify.return_value = True
+        resp = client.post(
+            "/gmail/batch-modify",
+            json={
+                "msg_ids": ["a", "b"],
+                "add_label_ids": ["STARRED"],
+                "account": "me@gmail.com",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["count"] == 2
+
+
+class TestCalendarExtensions:
+    @patch("inbox_server.calendar_events")
+    def test_calendar_upcoming(self, mock_events, client):
+        mock_events.return_value = [
+            CalendarEvent(
+                summary="Standup",
+                start=datetime(2025, 6, 15, 9, 0),
+                end=datetime(2025, 6, 15, 9, 30),
+            ),
+        ]
+        resp = client.get("/calendar/upcoming", params={"days": 7})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["summary"] == "Standup"
+
+    @patch("inbox_server.calendar_create_event")
+    def test_create_event_with_attendees(self, mock_create, client):
+        import inbox_server
+
+        inbox_server.state.cal_services = {"me@gmail.com": MagicMock()}
+        mock_create.return_value = "evt123"
+        resp = client.post(
+            "/calendar/events",
+            json={
+                "summary": "Interview",
+                "start": "2025-06-15T14:00:00",
+                "end": "2025-06-15T15:00:00",
+                "account": "me@gmail.com",
+                "attendees": [{"email": "alice@example.com", "name": "Alice"}],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["event_id"] == "evt123"
 
 
 # ── Autocomplete ────────────────────────────────────────────────────────────

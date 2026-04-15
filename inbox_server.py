@@ -9,9 +9,11 @@ import asyncio
 import base64
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
+from secrets import compare_digest
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel
 
@@ -52,17 +54,22 @@ from services import (
     github_pulls,
     gmail_archive,
     gmail_attachment_download,
+    gmail_batch_modify,
     gmail_compose_send,
     gmail_contacts,
     gmail_contacts_by_label,
+    gmail_create_filter,
     gmail_delete,
     gmail_labels,
     gmail_mark_read,
     gmail_mark_unread,
+    gmail_reply,
+    gmail_search,
     gmail_send,
     gmail_star,
     gmail_thread,
     gmail_unstar,
+    gmail_unsubscribe,
     google_auth_all,
     imsg_contacts,
     imsg_send,
@@ -95,6 +102,7 @@ from services import (
 )
 
 PORT = 9849
+AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -123,6 +131,7 @@ class MessageOut(BaseModel):
     is_me: bool
     source: str
     attachments: list[dict] = []  # type: ignore[type-arg]
+    message_id: str = ""
 
 
 class CalendarEventOut(BaseModel):
@@ -159,6 +168,7 @@ class CreateEventRequest(BaseModel):
     location: str = ""
     description: str = ""
     all_day: bool = False
+    attendees: list[dict[str, str]] = []
     account: str = ""  # defaults to first calendar account
 
 
@@ -259,6 +269,36 @@ class ComposeRequest(BaseModel):
     account: str = ""
 
 
+class GmailReplyRequest(BaseModel):
+    msg_id: str
+    body: str
+    thread_id: str = ""
+    to: str = ""
+    subject: str = ""
+    message_id_header: str = ""
+    account: str = ""
+
+
+class GmailBatchModifyRequest(BaseModel):
+    msg_ids: list[str]
+    add_label_ids: list[str] = []
+    remove_label_ids: list[str] = []
+    account: str = ""
+
+
+class GmailFilterCreateRequest(BaseModel):
+    from_filter: str = ""
+    to_filter: str = ""
+    subject_filter: str = ""
+    query: str = ""
+    has_words: str = ""
+    does_not_have_words: str = ""
+    add_label_ids: list[str] = []
+    remove_label_ids: list[str] = []
+    forward: str = ""
+    account: str = ""
+
+
 class SearchRequest(BaseModel):
     q: str
     sources: list[str] = ["all"]
@@ -276,6 +316,10 @@ class SummarizeRequest(BaseModel):
 
 class ExtractActionsRequest(BaseModel):
     text: str
+
+
+class BulkUnsubscribeRequest(BaseModel):
+    msg_ids: list[str]
 
 
 # ── Server state ─────────────────────────────────────────────────────────────
@@ -326,6 +370,7 @@ def _msg_to_out(m: Msg) -> MessageOut:
         is_me=m.is_me,
         source=m.source,
         attachments=m.attachments,
+        message_id=m.message_id,
     )
 
 
@@ -428,10 +473,17 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.warning("Pre-warm conversations failed (non-fatal)")
 
-    # Ambient autostart — respects voice config, graceful on missing deps
+    # Ambient autostart — can be disabled by env and otherwise respects voice config
     try:
+        disable_ambient = os.environ.get("INBOX_DISABLE_AMBIENT", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         voice_cfg = load_voice_config()
-        if voice_cfg.get("ambient_autostart", True):
+        if disable_ambient:
+            print("[ambient] Autostart disabled by INBOX_DISABLE_AMBIENT")
+        elif voice_cfg.get("ambient_autostart", False):
             avail, reason = ambient_available()
             if avail:
                 state.ambient.start()
@@ -444,10 +496,41 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        state.ambient.stop()
         await asyncio.to_thread(close_sqlite_connections)
 
 
 app = FastAPI(title="Inbox API", lifespan=lifespan)
+
+
+def _auth_token() -> str:
+    return os.getenv(AUTH_TOKEN_ENV, "").strip()
+
+
+def _is_authorized(request: Request) -> bool:
+    token = _auth_token()
+    if not token:
+        return True
+
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        provided = auth_header[7:].strip()
+        if provided and compare_digest(provided, token):
+            return True
+
+    api_key = request.headers.get("x-api-key", "").strip()
+    return bool(api_key) and compare_digest(api_key, token)
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    if not _is_authorized(request):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Unauthorized"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -567,6 +650,14 @@ def _get_gmail_service(msg_id: str) -> tuple[object, Contact | None]:
     raise HTTPException(404, "No Gmail service available")
 
 
+def _get_gmail_service_for_account(account: str = "") -> tuple[str, object]:
+    acct = account or (next(iter(state.gmail_services)) if state.gmail_services else "")
+    svc = state.gmail_services.get(acct)
+    if not svc:
+        raise HTTPException(404, "No Gmail account available")
+    return acct, svc
+
+
 @app.post("/messages/gmail/{msg_id}/archive")
 async def archive_gmail(msg_id: str):
     svc, _ = _get_gmail_service(msg_id)
@@ -579,6 +670,30 @@ async def delete_gmail(msg_id: str):
     svc, _ = _get_gmail_service(msg_id)
     ok = await asyncio.to_thread(gmail_delete, svc, msg_id)
     return {"ok": ok}
+
+
+@app.post("/messages/gmail/{msg_id}/unsubscribe")
+async def unsubscribe_gmail(msg_id: str):
+    svc, _ = _get_gmail_service(msg_id)
+    result = await asyncio.to_thread(gmail_unsubscribe, svc, msg_id)
+    if not result["raw"]:
+        raise HTTPException(422, "No List-Unsubscribe header found")
+    return result
+
+
+@app.post("/messages/gmail/bulk-unsubscribe")
+async def bulk_unsubscribe_gmail(req: BulkUnsubscribeRequest):
+    """Unsubscribe from multiple emails in parallel."""
+    results = []
+    for msg_id in req.msg_ids:
+        try:
+            svc, _ = _get_gmail_service(msg_id)
+            result = await asyncio.to_thread(gmail_unsubscribe, svc, msg_id)
+            results.append({"msg_id": msg_id, **result})
+        except Exception as e:
+            results.append({"msg_id": msg_id, "error": str(e)})
+
+    return {"total": len(req.msg_ids), "results": results}
 
 
 @app.post("/messages/gmail/{msg_id}/star")
@@ -630,12 +745,25 @@ async def download_gmail_attachment(msg_id: str, att_id: str):
 
 @app.post("/messages/compose")
 async def compose_email(req: ComposeRequest):
-    acct = req.account or (next(iter(state.gmail_services)) if state.gmail_services else "")
-    svc = state.gmail_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Gmail account available")
+    _, svc = _get_gmail_service_for_account(req.account)
     ok = await asyncio.to_thread(gmail_compose_send, svc, req.to, req.subject, req.body)
     return {"ok": ok}
+
+
+@app.post("/messages/gmail/reply")
+async def reply_gmail(req: GmailReplyRequest):
+    acct, svc = _get_gmail_service_for_account(req.account)
+    ok = await asyncio.to_thread(
+        gmail_reply,
+        svc,
+        req.msg_id,
+        req.body,
+        req.thread_id,
+        req.to,
+        req.subject,
+        req.message_id_header,
+    )
+    return {"ok": ok, "account": acct}
 
 
 @app.get("/gmail/conversations", response_model=list[ConversationOut])
@@ -660,6 +788,83 @@ async def list_gmail_by_label(label: str = "INBOX", limit: int = 50, account: st
         state.conv_cache[_cache_key(c.source, c.id)] = c
 
     return [_contact_to_out(c) for c in results]
+
+
+@app.get("/gmail/search", response_model=list[ConversationOut])
+async def search_gmail(
+    q: str = "",
+    limit: int = 20,
+    label: str = "",
+    from_filter: str = "",
+    subject_filter: str = "",
+    after: str = "",
+    before: str = "",
+    account: str = "",
+):
+    results: list[Contact] = []
+    targets = (
+        {account: state.gmail_services[account]}
+        if account and account in state.gmail_services
+        else state.gmail_services
+    )
+    for email, svc in targets.items():
+        contacts = await asyncio.to_thread(
+            gmail_search,
+            svc,
+            email,
+            q,
+            limit,
+            label,
+            from_filter,
+            subject_filter,
+            after,
+            before,
+        )
+        results.extend(contacts)
+
+    results.sort(key=lambda c: c.last_ts, reverse=True)
+    for c in results:
+        state.conv_cache[_cache_key(c.source, c.id)] = c
+    return [_contact_to_out(c) for c in results[:limit]]
+
+
+@app.post("/gmail/batch-modify")
+async def batch_modify_gmail(req: GmailBatchModifyRequest):
+    acct, svc = _get_gmail_service_for_account(req.account)
+    ok = await asyncio.to_thread(
+        gmail_batch_modify,
+        svc,
+        req.msg_ids,
+        req.add_label_ids,
+        req.remove_label_ids,
+    )
+    return {"ok": ok, "account": acct, "count": len(req.msg_ids)}
+
+
+@app.post("/gmail/filters")
+async def create_gmail_filter(req: GmailFilterCreateRequest):
+    acct, svc = _get_gmail_service_for_account(req.account)
+    criteria = {
+        "from": req.from_filter,
+        "to": req.to_filter,
+        "subject": req.subject_filter,
+        "query": req.query or req.has_words,
+        "negatedQuery": req.does_not_have_words,
+    }
+    result = await asyncio.to_thread(
+        gmail_create_filter,
+        svc,
+        criteria,
+        req.add_label_ids,
+        req.remove_label_ids,
+        req.forward,
+    )
+    if not result:
+        raise HTTPException(
+            400,
+            "Failed to create Gmail filter. Re-auth may be required for gmail.settings.basic scope.",
+        )
+    return {"ok": True, "account": acct, "filter": result}
 
 
 # ── Calendar ─────────────────────────────────────────────────────────────────
@@ -687,6 +892,21 @@ async def list_events(
     return [_event_to_out(e) for e in evts]
 
 
+@app.get("/calendar/upcoming", response_model=list[CalendarEventOut])
+async def list_upcoming_events(days: int = 7):
+    days = max(1, min(days, 30))
+    start_dt = datetime.now()
+    end_dt = start_dt + timedelta(days=days - 1)
+    evts = await asyncio.to_thread(
+        calendar_events,
+        state.cal_services,
+        start_date=start_dt,
+        end_date=end_dt,
+    )
+    state.events_cache = evts
+    return [_event_to_out(e) for e in evts]
+
+
 @app.post("/calendar/events")
 async def create_event(req: CreateEventRequest):
     account = req.account or (next(iter(state.cal_services)) if state.cal_services else "")
@@ -694,17 +914,21 @@ async def create_event(req: CreateEventRequest):
     if not svc:
         raise HTTPException(404, "No calendar account available")
 
-    event_id = await asyncio.to_thread(
-        calendar_create_event,
-        svc,
-        summary=req.summary,
-        start=datetime.fromisoformat(req.start),
-        end=datetime.fromisoformat(req.end),
-        location=req.location,
-        description=req.description,
-        all_day=req.all_day,
-    )
-    return {"ok": event_id is not None, "event_id": event_id}
+    try:
+        event_id = await asyncio.to_thread(
+            calendar_create_event,
+            svc,
+            summary=req.summary,
+            start=datetime.fromisoformat(req.start),
+            end=datetime.fromisoformat(req.end),
+            location=req.location,
+            description=req.description,
+            all_day=req.all_day,
+            attendees=req.attendees,
+        )
+        return {"ok": True, "event_id": event_id}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to create event: {str(e)}") from e
 
 
 @app.post("/calendar/events/quick")
@@ -715,16 +939,19 @@ async def create_quick_event(req: QuickEventRequest):
         raise HTTPException(404, "No calendar account available")
 
     parsed = parse_quick_event(req.text)
-    event_id = await asyncio.to_thread(
-        calendar_create_event,
-        svc,
-        summary=parsed["summary"],
-        start=parsed["start"],
-        end=parsed["end"],
-        location=parsed.get("location", ""),
-        all_day=parsed.get("all_day", False),
-    )
-    return {"ok": event_id is not None, "event_id": event_id}
+    try:
+        event_id = await asyncio.to_thread(
+            calendar_create_event,
+            svc,
+            summary=parsed["summary"],
+            start=parsed["start"],
+            end=parsed["end"],
+            location=parsed.get("location", ""),
+            all_day=parsed.get("all_day", False),
+        )
+        return {"ok": True, "event_id": event_id}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to create event: {str(e)}") from e
 
 
 @app.put("/calendar/events/{event_id}")

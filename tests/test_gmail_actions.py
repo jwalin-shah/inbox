@@ -13,7 +13,10 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def client():
     """Create a test client with mocked startup."""
+    import os
+
     with (
+        patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
         patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
     ):
@@ -29,7 +32,10 @@ def client():
 @pytest.fixture()
 def client_with_gmail():
     """Create a test client with a mock Gmail service."""
+    import os
+
     with (
+        patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
         patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
     ):

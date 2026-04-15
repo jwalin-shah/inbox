@@ -51,7 +51,9 @@ GITHUB_TOKEN_FILE = BASE_DIR / "github_token.txt"
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
 ]
@@ -60,7 +62,7 @@ ATTACHMENT_PLACEHOLDER = "\ufffc"
 SQLITE_LOCK_RETRIES = 2
 SQLITE_LOCK_RETRY_DELAY = 0.05
 SQLITE_CONNECT_TIMEOUT = 0.2
-GMAIL_METADATA_BATCH_SIZE = 50
+GMAIL_METADATA_BATCH_SIZE = 10
 
 # Global contact book
 _contacts = ContactBook()
@@ -99,6 +101,7 @@ class Msg:
     is_me: bool
     source: str
     attachments: list[dict[str, str | int]] = field(default_factory=list)
+    message_id: str = ""  # Gmail message ID, empty for iMessage
 
 
 @dataclass
@@ -896,7 +899,8 @@ def gmail_thread(service, msg_id: str, thread_id: str = "") -> list[Msg]:
             ts = datetime.fromtimestamp(ts_ms / 1000) if ts_ms else datetime.now()
             is_me = me_email.lower() in email_addr.lower()
             sender = "Me" if is_me else display_name
-            atts = _extract_attachments(m["payload"], m.get("id", msg_id))
+            msg_id_from_thread = m.get("id", msg_id)
+            atts = _extract_attachments(m["payload"], msg_id_from_thread)
             if body:
                 if i == 0 and subject:
                     body = f"Subject: {subject}\nTo: {to_raw}\n{'─' * 30}\n\n{body}"
@@ -908,6 +912,7 @@ def gmail_thread(service, msg_id: str, thread_id: str = "") -> list[Msg]:
                         is_me=is_me,
                         source="gmail",
                         attachments=atts,
+                        message_id=msg_id_from_thread,
                     )
                 )
         return msgs
@@ -953,6 +958,81 @@ def gmail_archive(service, msg_id: str) -> bool:
     except Exception:
         _log_service_failure("gmail_archive", msg_id=msg_id)
         return False
+
+
+def gmail_get_unsubscribe_info(service, msg_id: str) -> dict[str, str]:
+    """Return {'url': ..., 'mailto': ..., 'one_click': bool} from List-Unsubscribe headers."""
+    try:
+        msg = (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=msg_id,
+                format="metadata",
+                metadataHeaders=["List-Unsubscribe", "List-Unsubscribe-Post"],
+            )
+            .execute()
+        )
+        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+        raw = headers.get("List-Unsubscribe", "")
+        one_click = "List-Unsubscribe-Post" in headers
+
+        url = None
+        mailto = None
+        for part in raw.split(","):
+            part = part.strip().strip("<>")
+            if part.startswith("http"):
+                url = part
+            elif part.startswith("mailto:"):
+                mailto = part
+
+        return {"url": url, "mailto": mailto, "one_click": one_click, "raw": raw}
+    except Exception as e:
+        logger.warning(f"Failed to get unsubscribe info for {msg_id}: {e}")
+        return {"url": None, "mailto": None, "one_click": False, "raw": ""}
+
+
+def gmail_unsubscribe(service, msg_id: str) -> dict[str, str]:
+    """
+    Execute unsubscribe via List-Unsubscribe header, then archive the message.
+    Returns {"method": "url|mailto|none", "ok": bool}.
+    """
+    import urllib.parse
+
+    import requests
+
+    info = gmail_get_unsubscribe_info(service, msg_id)
+
+    method = "none"
+    ok = False
+
+    if info["url"]:
+        method = "url"
+        try:
+            if info["one_click"]:
+                resp = requests.post(
+                    info["url"], data={"List-Unsubscribe": "One-Click"}, timeout=10
+                )
+            else:
+                resp = requests.get(info["url"], timeout=10)
+            ok = resp.status_code < 400
+        except Exception as e:
+            logger.warning(f"Unsubscribe URL failed: {e}")
+
+    elif info["mailto"]:
+        method = "mailto"
+        try:
+            parsed = urllib.parse.urlparse(info["mailto"])
+            to = parsed.path
+            qs = urllib.parse.parse_qs(parsed.query)
+            subject = qs.get("subject", ["unsubscribe"])[0]
+            ok = gmail_compose_send(service, to, subject, "")
+        except Exception as e:
+            logger.warning(f"Unsubscribe mailto failed: {e}")
+
+    gmail_archive(service, msg_id)
+    return {"method": method, "ok": ok, "raw": info["raw"]}
 
 
 def gmail_delete(service, msg_id: str) -> bool:
@@ -1063,6 +1143,206 @@ def gmail_compose_send(service, to: str, subject: str, body: str) -> bool:
     except Exception:
         _log_service_failure("gmail_compose_send", to=to, subject=subject, body_length=len(body))
         return False
+
+
+def gmail_reply(
+    service,
+    msg_id: str,
+    body: str,
+    thread_id: str = "",
+    to: str = "",
+    subject: str = "",
+    message_id_header: str = "",
+) -> bool:
+    """Reply to an existing Gmail thread."""
+    contact = Contact(
+        id=msg_id,
+        name="",
+        source="gmail",
+        snippet=subject or "(no subject)",
+        reply_to=to,
+        thread_id=thread_id,
+        message_id_header=message_id_header,
+    )
+    if not contact.reply_to or not contact.message_id_header:
+        try:
+            msg = (
+                service.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=msg_id,
+                    format="metadata",
+                    metadataHeaders=_gmail_metadata_headers() + ["To"],
+                )
+                .execute()
+            )
+            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            _, email_addr = _parse_email_address(headers.get("From", ""))
+            contact.reply_to = contact.reply_to or email_addr
+            contact.thread_id = contact.thread_id or msg.get("threadId", "")
+            contact.message_id_header = contact.message_id_header or headers.get("Message-ID", "")
+            contact.snippet = contact.snippet if subject else headers.get("Subject", "(no subject)")
+        except Exception:
+            _log_service_failure("gmail_reply.lookup", msg_id=msg_id, thread_id=thread_id)
+            return False
+    return gmail_send(service, contact, body)
+
+
+def gmail_search(
+    service,
+    account_email: str,
+    q: str = "",
+    limit: int = 20,
+    label: str = "",
+    from_filter: str = "",
+    subject_filter: str = "",
+    after: str = "",
+    before: str = "",
+) -> list[Contact]:
+    """Search Gmail conversations using Gmail's native query syntax."""
+    query_parts = [q.strip()]
+    if from_filter.strip():
+        query_parts.append(f"from:{from_filter.strip()}")
+    if subject_filter.strip():
+        query_parts.append(f"subject:({subject_filter.strip()})")
+    if after.strip():
+        query_parts.append(f"after:{after.strip()}")
+    if before.strip():
+        query_parts.append(f"before:{before.strip()}")
+    query = " ".join(part for part in query_parts if part)
+
+    try:
+        req = service.users().messages().list(userId="me", q=query, maxResults=limit)
+        if label.strip():
+            req = (
+                service.users()
+                .messages()
+                .list(
+                    userId="me",
+                    q=query,
+                    labelIds=[label.strip()],
+                    maxResults=limit,
+                )
+            )
+        result = req.execute()
+        messages = result.get("messages", [])
+        contacts: list[Contact] = []
+        seen_threads: set[str] = set()
+        thread_messages: list[dict[str, str]] = []
+        for m in messages:
+            thread_id = m.get("threadId", m["id"])
+            if thread_id in seen_threads:
+                continue
+            seen_threads.add(thread_id)
+            thread_messages.append(m)
+
+        metadata_by_id = _fetch_gmail_metadata_batch(service, [m["id"] for m in thread_messages])
+        for m in thread_messages:
+            msg = metadata_by_id.get(m["id"])
+            if not msg:
+                continue
+            payload = msg.get("payload", {})
+            headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
+            raw_from = headers.get("From", "Unknown")
+            display_name, email_addr = _parse_email_address(raw_from)
+            subject = headers.get("Subject", "(no subject)")
+            msg_id_header = headers.get("Message-ID", "")
+            unread = "UNREAD" in msg.get("labelIds", [])
+            ts_ms = int(msg.get("internalDate", 0))
+            msg_ts = datetime.fromtimestamp(ts_ms / 1000) if ts_ms else datetime.now()
+            contacts.append(
+                Contact(
+                    id=m["id"],
+                    name=display_name,
+                    source="gmail",
+                    snippet=subject[:60],
+                    unread=1 if unread else 0,
+                    last_ts=msg_ts,
+                    reply_to=email_addr,
+                    thread_id=m.get("threadId", m["id"]),
+                    message_id_header=msg_id_header,
+                    gmail_account=account_email,
+                )
+            )
+        contacts.sort(key=lambda c: c.last_ts, reverse=True)
+        return contacts
+    except Exception:
+        _log_service_failure(
+            "gmail_search",
+            account_email=account_email,
+            q=query,
+            limit=limit,
+            label=label,
+        )
+        return []
+
+
+def gmail_batch_modify(
+    service,
+    msg_ids: list[str],
+    add_label_ids: list[str] | None = None,
+    remove_label_ids: list[str] | None = None,
+) -> bool:
+    """Apply Gmail labels to multiple messages at once."""
+    try:
+        service.users().messages().batchModify(
+            userId="me",
+            body={
+                "ids": msg_ids,
+                "addLabelIds": add_label_ids or [],
+                "removeLabelIds": remove_label_ids or [],
+            },
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure(
+            "gmail_batch_modify",
+            msg_count=len(msg_ids),
+            add_label_ids=add_label_ids or [],
+            remove_label_ids=remove_label_ids or [],
+        )
+        return False
+
+
+def gmail_create_filter(
+    service,
+    criteria: dict[str, str],
+    add_label_ids: list[str] | None = None,
+    remove_label_ids: list[str] | None = None,
+    forward: str = "",
+) -> dict | None:
+    """Create a Gmail filter. Requires gmail.settings.basic scope."""
+    try:
+        action: dict[str, object] = {
+            "addLabelIds": add_label_ids or [],
+            "removeLabelIds": remove_label_ids or [],
+        }
+        if forward:
+            action["forward"] = forward
+        result = (
+            service.users()
+            .settings()
+            .filters()
+            .create(
+                userId="me",
+                body={
+                    "criteria": {k: v for k, v in criteria.items() if v},
+                    "action": action,
+                },
+            )
+            .execute()
+        )
+        return result
+    except Exception:
+        _log_service_failure(
+            "gmail_create_filter",
+            criteria=criteria,
+            add_label_ids=add_label_ids or [],
+            remove_label_ids=remove_label_ids or [],
+            forward=forward,
+        )
+        return None
 
 
 def gmail_contacts_by_label(
@@ -1231,6 +1511,7 @@ def _build_event_body(
     location: str = "",
     description: str = "",
     all_day: bool = False,
+    attendees: list[dict[str, str]] | None = None,
 ) -> dict:
     body: dict = {"summary": summary}
     if all_day:
@@ -1251,6 +1532,12 @@ def _build_event_body(
         body["location"] = location
     if description:
         body["description"] = description
+    if attendees:
+        body["attendees"] = [
+            {k: v for k, v in attendee.items() if v}
+            for attendee in attendees
+            if attendee.get("email")
+        ]
     return body
 
 
@@ -1262,20 +1549,30 @@ def calendar_create_event(
     location: str = "",
     description: str = "",
     all_day: bool = False,
+    attendees: list[dict[str, str]] | None = None,
     calendar_id: str = "primary",
 ) -> str | None:
     try:
-        body = _build_event_body(summary, start, end, location, description, all_day)
+        body = _build_event_body(
+            summary,
+            start,
+            end,
+            location,
+            description,
+            all_day,
+            attendees=attendees,
+        )
         result = cal_service.events().insert(calendarId=calendar_id, body=body).execute()
         return result.get("id")
-    except Exception:  # logged below
+    except Exception as e:
         _log_service_failure(
             "calendar_create_event",
+            error=str(e),
             summary=summary,
             calendar_id=calendar_id,
             all_day=all_day,
         )
-        return None
+        raise
 
 
 def calendar_update_event(
@@ -3211,6 +3508,8 @@ def send_notification(title: str, body: str, source: str = "") -> bool:
     except Exception:
         _log_service_failure("send_notification", title=title, source=source)
         return False
+
+
 # ── Contacts search / profile ────────────────────────────────────────────────
 
 FAVORITES_FILE = Path.home() / ".config" / "inbox" / "favorites.json"
@@ -3742,7 +4041,7 @@ def ai_extract_actions(text: str) -> dict:  # type: ignore[type-arg]
 VOICE_CONFIG_PATH = Path.home() / ".config" / "inbox" / "voice.json"
 
 _VOICE_CONFIG_DEFAULTS: dict[str, object] = {
-    "ambient_autostart": True,
+    "ambient_autostart": False,
     "dictation_hotkey": "f5",
     "vault_dir": str(Path.home() / "vault"),
 }

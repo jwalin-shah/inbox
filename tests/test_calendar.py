@@ -14,7 +14,10 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def server_client():
     """Create a test client with mocked startup."""
+    import os
+
     with (
+        patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
         patch("inbox_server.google_auth_all", return_value=({}, {}, {})),
     ):
@@ -242,10 +245,10 @@ class TestCalendarDateLabel:
 
     def test_non_today_format(self):
         app = self._make_app()
-        app._calendar_date = date(2026, 4, 14)
+        app._calendar_date = date(2026, 4, 13)
         label = app._calendar_date_label()
-        assert "Tue" in label
-        assert "Apr 14" in label
+        assert "Mon" in label
+        assert "Apr 13" in label
         assert "Today" not in label
 
     def test_today_format(self):

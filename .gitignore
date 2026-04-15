@@ -28,6 +28,10 @@ htmlcov/
 # llm-tldr cache
 .tldr/
 
+# Claude Code & local MCP memory
+.claude/
+.inbox_memory.sqlite3
+
 # Editor/IDE
 .idea/
 .vscode/

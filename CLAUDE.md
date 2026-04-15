@@ -24,14 +24,27 @@ credentials.json  — Google OAuth client secret (never commit)
 github_token.txt  — GitHub personal access token (never commit)
 ```
 
+## Utility scripts
+```
+unsubscribe_interactive.py  — interactive unsubscribe helper (single email)
+unsubscribe_bulk.py         — batch unsubscribe from list of message IDs
+unsubscribe_all_newsletters.py — unsubscribe from all newsletters in inbox
+oci_retry.sh                — retry utility for OCI operations
+```
+
+## Server authentication
+Optional token-based auth via `INBOX_SERVER_TOKEN` environment variable. If set, all requests must include `Authorization: Bearer <token>` header.
+
 ## API endpoints (localhost:9849)
 ```
 GET  /health
 GET  /conversations?source=all|imessage|gmail&limit=50
 GET  /messages/{source}/{conv_id}?thread_id=...
 POST /messages/send  {"conv_id", "source", "text"}
+POST /messages/gmail/{msg_id}/unsubscribe
+POST /messages/gmail/bulk-unsubscribe  {"msg_ids": [str]}
 GET  /calendar/events?date=YYYY-MM-DD
-POST /calendar/events  {"summary", "start", "end", ...}
+POST /calendar/events  {"summary", "start", "end", "attendees", ...}
 POST /calendar/events/quick  {"text": "Meeting 2pm-3pm @ Office"}
 PUT  /calendar/events/{id}
 DELETE /calendar/events/{id}
@@ -66,7 +79,7 @@ GET  /accounts
 POST /accounts/add
 POST /accounts/reauth  {"email": "..."}
 GET  /notifications/config
-PUT  /notifications/config  {enabled, sources, quiet_hours}
+PUT /notifications/config  {enabled, sources, quiet_hours}
 POST /notifications/test  {"title", "body"}
 ```
 
