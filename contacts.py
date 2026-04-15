@@ -45,13 +45,17 @@ def _addressbook_paths() -> list[Path]:
             break
     sources = base / "Sources"
     if sources.exists():
-        for src in sources.iterdir():
-            if src.is_dir():
-                for version in ("v22", "v21", "v20"):
-                    p = src / f"AddressBook-{version}.abcddb"
-                    if p.exists():
-                        paths.append(p)
-                        break
+        try:
+            for src in sources.iterdir():
+                if src.is_dir():
+                    for version in ("v22", "v21", "v20"):
+                        p = src / f"AddressBook-{version}.abcddb"
+                        if p.exists():
+                            paths.append(p)
+                            break
+        except PermissionError:
+            # macOS may require Full Disk Access for AddressBook folder
+            pass
     return paths
 
 
