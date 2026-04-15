@@ -29,12 +29,22 @@ github_token.txt  — GitHub personal access token (never commit)
 
 ## Utility scripts
 ```
-unsubscribe_interactive.py  — interactive unsubscribe helper (single email)
-unsubscribe_bulk.py         — batch unsubscribe from list of message IDs
+unsubscribe_interactive.py     — interactive unsubscribe helper (single email)
+unsubscribe_bulk.py            — batch unsubscribe from list of message IDs
 unsubscribe_all_newsletters.py — unsubscribe from all newsletters in inbox
-organize_inbox.py           — organize messages by category and labels
-oci_retry.sh                — retry utility for OCI operations
+organize_inbox.py              — tag emails by category (tag-only, no archiving)
+organize-inbox-helper.sh       — wrapper: auto-starts server, then organizes inbox
+oci_retry.sh                   — retry utility for OCI operations
 ```
+
+**Email organization workflow**:
+```bash
+./organize-inbox-helper.sh
+# or directly: uv run python organize_inbox.py
+```
+- Tags emails by category (Finance, Jobs, Newsletters, Promotions)
+- Does NOT archive, delete, or modify anything except labels
+- Requires: labels to exist, server running, `gmail.settings.basic` scope (re-auth: Ctrl+Shift+A in TUI)
 
 ## Server authentication
 Optional token-based auth via `INBOX_SERVER_TOKEN` environment variable. If set, all requests must include `Authorization: Bearer <token>` header.

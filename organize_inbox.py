@@ -1,40 +1,28 @@
 #!/usr/bin/env python
-"""Smart email organization: create labels and auto-tag emails."""
+"""Smart inbox organization: tag emails by category.
+
+Usage:
+  uv run python organize_inbox.py
+
+Does NOT archive, delete, or modify anything else.
+Only applies labels to matching emails.
+"""
 
 import sys
 
-from services import (
-    gmail_batch_modify,
-    gmail_label_create,
-    gmail_labels,
-    gmail_search,
-    google_auth_all,
-)
+from services import gmail_batch_modify, gmail_labels, gmail_search, google_auth_all
 
-LABEL_CONFIG = {
-    "Newsletters": {
-        "query": 'newsletter OR digest OR "weekly digest" OR "daily digest" OR "product hunt"',
-        "visibility": "labelShow",
-    },
-    "Finance": {
-        "query": "invoice OR receipt OR payment OR transaction OR statement OR billing OR tax OR "
-        '"credit card" OR "bank statement"',
-        "visibility": "labelShow",
-    },
-    "Jobs": {
-        "query": '"job opportunity" OR interview OR LinkedIn OR hiring OR recruiter OR "career" OR "apply now" OR "job opening"',
-        "visibility": "labelShow",
-    },
-    "Promotions": {
-        "query": "CATEGORY_PROMOTIONS OR deal OR offer OR discount OR promo OR coupon OR sale OR "
-        '"special offer" OR "limited time"',
-        "visibility": "labelShow",
-    },
+# Label name → search query mapping
+LABEL_QUERIES = {
+    "Newsletters": 'newsletter OR digest OR "weekly digest" OR "daily digest" OR "product hunt"',
+    "Finance": "invoice OR receipt OR payment OR transaction OR statement OR billing OR tax",
+    "Jobs": '"job opportunity" OR interview OR LinkedIn OR hiring OR recruiter OR "career"',
+    "Promotions": "CATEGORY_PROMOTIONS OR deal OR offer OR discount OR promo OR coupon OR sale",
 }
 
 
 def main():
-    """Organize inbox by tagging emails with smart labels."""
+    """Tag emails by category using existing labels."""
     # Auth
     gmail_svcs, _, _, _, _ = google_auth_all()
     if not gmail_svcs:
@@ -43,49 +31,34 @@ def main():
 
     service = list(gmail_svcs.values())[0]
     account = list(gmail_svcs.keys())[0]
+    print(f"Using account: {account}\n")
 
-    print(f"Using account: {account}")
-    print()
-
-    # Get/create labels
+    # Get existing labels
     existing_labels = {label["name"]: label["id"] for label in gmail_labels(service)}
-    labels_to_use = {}
-
-    for label_name, config in LABEL_CONFIG.items():
-        if label_name in existing_labels:
-            labels_to_use[label_name] = existing_labels[label_name]
-            print(f"✓ Label '{label_name}' exists (ID: {labels_to_use[label_name]})")
-        else:
-            try:
-                result = gmail_label_create(service, label_name, config["visibility"])
-                labels_to_use[label_name] = result["id"]
-                print(f"✓ Created label '{label_name}' (ID: {result['id']})")
-            except Exception as e:
-                print(f"✗ Failed to create label '{label_name}': {e}")
+    print(f"Found {len(existing_labels)} existing labels")
 
     # Tag emails by category
-    print("\nScanning and tagging emails...")
-    stats = {label: 0 for label in labels_to_use}
+    print("\nTagging emails by category...")
+    stats = {label: 0 for label in LABEL_QUERIES}
 
-    for label_name, label_id in labels_to_use.items():
-        config = LABEL_CONFIG[label_name]
-        query = config["query"]
+    for label_name, query in LABEL_QUERIES.items():
+        if label_name not in existing_labels:
+            print(f"  {label_name}: ⊘ label does not exist (skipped)")
+            continue
 
-        # Search for emails matching this category
+        label_id = existing_labels[label_name]
+
         try:
             conversations = gmail_search(service, account, q=query, limit=1000)
             if not conversations:
-                print(f"  {label_name}: 0 emails found")
+                print(f"  {label_name}: 0 emails matched")
                 continue
 
-            # Get message IDs (extract from message_id)
-            msg_ids = []
-            for conv in conversations:
-                if conv.get("message_id"):
-                    msg_ids.append(conv["message_id"])
+            # Get message IDs
+            msg_ids = [conv["message_id"] for conv in conversations if conv.get("message_id")]
 
             if msg_ids:
-                # Batch apply label
+                # Batch apply label (no removal, no archiving)
                 success = gmail_batch_modify(
                     service,
                     msg_ids,
@@ -94,16 +67,17 @@ def main():
                 )
                 if success:
                     stats[label_name] = len(msg_ids)
-                    print(f"  {label_name}: Tagged {len(msg_ids)} emails ✓")
+                    print(f"  {label_name}: ✓ tagged {len(msg_ids)} emails")
                 else:
-                    print(f"  {label_name}: Failed to tag emails ✗")
+                    print(f"  {label_name}: ✗ batch modify failed")
         except Exception as e:
-            print(f"  {label_name}: Error — {e}")
+            print(f"  {label_name}: ✗ {e}")
 
     print("\n=== Summary ===")
     total = sum(stats.values())
     for label, count in sorted(stats.items()):
-        print(f"{label}: {count}")
+        if count > 0:
+            print(f"{label}: {count}")
     print(f"Total emails tagged: {total}")
 
     return 0
