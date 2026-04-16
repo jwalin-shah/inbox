@@ -17,7 +17,7 @@ def client():
     with (
         patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
-        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
         patch("inbox_server.load_voice_config", return_value={"ambient_autostart": False}),
     ):
         from inbox_server import app, state
@@ -185,6 +185,8 @@ class TestReminderEndpoints:
             due_date=None,
             notes=None,
             list_name="Daily",
+            priority=None,
+            flagged=None,
         )
 
     def test_delete_reminder_passes_list_name(self, client):

@@ -197,7 +197,7 @@ def server_client():
     with (
         patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
-        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
         patch("inbox_server.load_voice_config", return_value={"ambient_autostart": False}),
     ):
         from inbox_server import app, state
@@ -351,7 +351,7 @@ class TestAmbientAutostart:
         with (
             patch.dict(os.environ, {"INBOX_DISABLE_AMBIENT": ""}, clear=False),
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             patch("inbox_server.load_voice_config", return_value={"ambient_autostart": True}),
             patch("inbox_server.ambient_available", return_value=(True, "")),
             patch.object(state.ambient, "start", side_effect=mock_start),
@@ -369,7 +369,7 @@ class TestAmbientAutostart:
 
         with (
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             patch("inbox_server.load_voice_config", return_value={"ambient_autostart": True}),
             patch(
                 "inbox_server.ambient_available", return_value=(False, "sounddevice not installed")
@@ -386,7 +386,7 @@ class TestAmbientAutostart:
 
         with (
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             patch("inbox_server.load_voice_config", return_value={"ambient_autostart": False}),
             patch("inbox_server.ambient_available", return_value=(True, "")),
         ):

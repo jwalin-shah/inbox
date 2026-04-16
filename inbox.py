@@ -1030,6 +1030,13 @@ class InboxApp(App):
         Binding("ctrl+b", "morning_briefing", "Briefing"),
         Binding("escape", "clear_compose", "Clear"),
         Binding("ctrl+q", "quit", "Quit"),
+        # ── Vim mode bindings (active when no input has focus) ──
+        Binding("j", "vim_down", "↓", show=False),
+        Binding("k", "vim_up", "↑", show=False),
+        Binding("g", "vim_top", "Top", show=False),
+        Binding("shift+g", "vim_bottom", "Bottom", show=False),
+        Binding("slash", "search", "Search", show=False),
+        Binding("question_mark", "vim_help", "Help", show=False),
     ]
 
     POLL_INTERVAL = _poll_interval_from_env()
@@ -1626,6 +1633,98 @@ class InboxApp(App):
 
     def action_filter_drv(self) -> None:
         self.query_one("#tabs", Tabs).active = "tab-drv"
+
+    # ── Vim mode actions ─────────────────────────────────────────────────
+
+    def _vim_focused_nav_widget(self):
+        """Return the currently focused navigable widget (ListView/DataTable), or None."""
+        focused = self.focused
+        if focused is None:
+            return None
+        # Walk up the widget tree looking for a navigable
+        widget = focused
+        while widget is not None:
+            if hasattr(widget, "action_cursor_down") and hasattr(widget, "action_cursor_up"):
+                return widget
+            widget = getattr(widget, "parent", None)
+        return None
+
+    def _is_input_focused(self) -> bool:
+        """Check if a text input widget currently has focus (should block vim keys)."""
+        from textual.widgets import Input, TextArea
+
+        focused = self.focused
+        return isinstance(focused, (Input, TextArea))
+
+    def action_vim_down(self) -> None:
+        """Vim j — move cursor down in focused list/table."""
+        if self._is_input_focused():
+            return
+        widget = self._vim_focused_nav_widget()
+        if widget is not None:
+            widget.action_cursor_down()
+
+    def action_vim_up(self) -> None:
+        """Vim k — move cursor up in focused list/table."""
+        if self._is_input_focused():
+            return
+        widget = self._vim_focused_nav_widget()
+        if widget is not None:
+            widget.action_cursor_up()
+
+    def action_vim_top(self) -> None:
+        """Vim g — jump to top of focused list/table."""
+        if self._is_input_focused():
+            return
+        widget = self._vim_focused_nav_widget()
+        if widget is None:
+            return
+        if hasattr(widget, "index"):
+            with contextlib.suppress(Exception):
+                widget.index = 0
+        elif hasattr(widget, "action_scroll_top"):
+            widget.action_scroll_top()
+
+    def action_vim_bottom(self) -> None:
+        """Vim G — jump to bottom of focused list/table."""
+        if self._is_input_focused():
+            return
+        widget = self._vim_focused_nav_widget()
+        if widget is None:
+            return
+        if hasattr(widget, "index"):
+            try:
+                # Get the length of children/rows if available
+                length = 0
+                if hasattr(widget, "row_count"):
+                    length = widget.row_count
+                elif hasattr(widget, "children"):
+                    length = len(widget.children)
+                if length > 0:
+                    widget.index = length - 1
+            except Exception:
+                pass
+        elif hasattr(widget, "action_scroll_bottom"):
+            widget.action_scroll_bottom()
+
+    def action_vim_help(self) -> None:
+        """Show vim shortcuts help overlay."""
+        if self._is_input_focused():
+            return
+        help_text = (
+            "Vim shortcuts:\n"
+            "  j  — down\n"
+            "  k  — up\n"
+            "  g  — top\n"
+            "  G  — bottom\n"
+            "  /  — search\n"
+            "  ?  — this help\n"
+            "  Esc — clear/close"
+        )
+        try:
+            self.query_one("#status", Static).update(help_text)
+        except Exception:
+            self.notify(help_text)
 
     # ── Command palette ──────────────────────────────────────────────────
 

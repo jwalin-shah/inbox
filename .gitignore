@@ -12,8 +12,13 @@ wheels/
 # Credentials & tokens (never commit)
 credentials.json
 token.json
+token.json.lock
 tokens/
 github_token.txt
+google_maps_key.txt
+gemini_api_key.txt
+*.key
+*.secret
 
 # Coverage & test artifacts
 .coverage
@@ -31,6 +36,7 @@ htmlcov/
 # Claude Code & local MCP memory
 .claude/
 .inbox_memory.sqlite3
+.inbox_scheduler.sqlite3
 
 # Editor/IDE
 .idea/

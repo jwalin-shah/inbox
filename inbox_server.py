@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from secrets import compare_digest
 
@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 import ambient_notes
 from memory_store import MemoryStore
+from scheduler import SchedulerStore
 from services import (
     MLX_LARGE_MODEL,
     AmbientService,
@@ -27,6 +28,7 @@ from services import (
     DictationService,
     DriveFile,
     GitHubNotification,
+    GoogleTask,
     Msg,
     Note,
     Reminder,
@@ -56,6 +58,7 @@ from services import (
     close_sqlite_connections,
     contacts_profile,
     contacts_search,
+    departure_times_for_events,
     docs_create,
     docs_delete,
     docs_export,
@@ -69,6 +72,12 @@ from services import (
     drive_files,
     drive_get,
     drive_upload,
+    gemini_categorize,
+    gemini_digest,
+    gemini_extract_action_items,
+    gemini_smart_reply,
+    gemini_summarize,
+    get_current_location,
     github_mark_all_read,
     github_mark_read,
     github_notifications,
@@ -102,6 +111,7 @@ from services import (
     load_favorites,
     load_notification_config,
     load_voice_config,
+    maps_travel_time,
     note_body,
     notes_list,
     parse_quick_event,
@@ -111,6 +121,7 @@ from services import (
     reminder_create,
     reminder_delete,
     reminder_edit,
+    reminder_uncomplete,
     reminders_list,
     reminders_lists,
     save_favorites,
@@ -133,6 +144,14 @@ from services import (
     sheets_values_clear,
     sheets_values_get,
     sheets_values_update,
+    task_complete,
+    task_create,
+    task_delete,
+    task_update,
+    tasks_list,
+    tasks_lists,
+    whatsapp_contacts,
+    whatsapp_thread,
 )
 from services import (
     autocomplete as services_autocomplete,
@@ -294,12 +313,78 @@ class ReminderCreateRequest(BaseModel):
     list_name: str = "Reminders"
     due_date: str = ""
     notes: str = ""
+    priority: int = 0
+    flagged: bool = False
 
 
 class ReminderEditRequest(BaseModel):
     title: str | None = None
     due_date: str | None = None
     notes: str | None = None
+    priority: int | None = None
+    flagged: bool | None = None
+
+
+class TaskOut(BaseModel):
+    id: str
+    title: str
+    status: str
+    list_id: str
+    list_title: str
+    due: str | None = None
+    notes: str = ""
+    completed: str | None = None
+
+
+class TaskCreateRequest(BaseModel):
+    title: str
+    list_id: str = "@default"
+    due: str = ""
+    notes: str = ""
+
+
+class TaskUpdateRequest(BaseModel):
+    title: str | None = None
+    due: str | None = None
+    notes: str | None = None
+
+
+class ScheduleMessageRequest(BaseModel):
+    source: str  # "gmail" | "imessage"
+    conv_id: str  # iMessage contact id, or Gmail "to|subject" for compose
+    text: str
+    send_at: str  # ISO datetime
+    account: str = ""
+
+
+class FollowupCreateRequest(BaseModel):
+    source: str  # "gmail" | "imessage"
+    conv_id: str
+    thread_id: str = ""
+    remind_after: str  # ISO datetime
+    reminder_title: str
+    reminder_list: str = "Reminders"
+
+
+class TaskLinkRequest(BaseModel):
+    task_id: str
+    task_source: str  # "google_tasks" | "reminders"
+    message_id: str
+    message_source: str  # "gmail" | "imessage"
+    thread_id: str = ""
+    account: str = ""
+
+
+class TaskFromMessageRequest(BaseModel):
+    message_id: str
+    message_source: str  # "gmail" | "imessage"
+    title: str
+    task_type: str = "google_tasks"  # "google_tasks" | "reminders"
+    list_id: str = "@default"  # for google_tasks
+    list_name: str = "Reminders"  # for reminders
+    notes: str = ""
+    thread_id: str = ""
+    account: str = ""
 
 
 class GitHubNotificationOut(BaseModel):
@@ -461,6 +546,11 @@ class SearchRequest(BaseModel):
     q: str
     sources: list[str] = ["all"]
     limit: int = 50
+    from_addr: str = ""  # filter by sender (gmail/imessage)
+    before: str = ""  # ISO date cutoff (inclusive upper bound)
+    after: str = ""  # ISO date cutoff (inclusive lower bound)
+    has_attachment: bool = False  # Gmail only
+    is_unread: bool = False  # Gmail only
 
 
 class TriageRequest(BaseModel):
@@ -490,12 +580,14 @@ class ServerState:
         self.drive_services: dict[str, object] = {}
         self.sheets_services: dict[str, object] = {}
         self.docs_services: dict[str, object] = {}
+        self.tasks_services: dict[str, object] = {}
         self.conv_cache: dict[str, Contact] = {}  # "source:id" -> Contact
         self.events_cache: list[CalendarEvent] = []
         self.ambient: AmbientService = AmbientService(
             on_note=lambda raw, summary: ambient_notes.save_note(raw, summary)
         )
         self.dictation: DictationService = DictationService()
+        self.scheduler: SchedulerStore = SchedulerStore()
 
 
 state = ServerState()
@@ -574,6 +666,19 @@ def _reminder_to_out(r: Reminder) -> ReminderOut:
     )
 
 
+def _task_to_out(t: GoogleTask) -> TaskOut:
+    return TaskOut(
+        id=t.id,
+        title=t.title,
+        status=t.status,
+        list_id=t.list_id,
+        list_title=t.list_title,
+        due=t.due.isoformat() if t.due else None,
+        notes=t.notes,
+        completed=t.completed.isoformat() if t.completed else None,
+    )
+
+
 def _gh_notif_to_out(n: GitHubNotification) -> GitHubNotificationOut:
     return GitHubNotificationOut(
         id=n.id,
@@ -625,6 +730,222 @@ def _cache_key(source: str, conv_id: str) -> str:
     return f"{source}:{conv_id}"
 
 
+# ── Background scheduler loop ────────────────────────────────────────────────
+
+
+async def _process_scheduled_messages() -> None:
+    """Send any scheduled messages that are due."""
+    try:
+        due = await asyncio.to_thread(state.scheduler.get_due_messages)
+        for msg in due:
+            msg_id = msg["id"]
+            source = msg["source"]
+            try:
+                if source == "gmail":
+                    acct = msg.get("account", "")
+                    svc_key = acct or (
+                        next(iter(state.gmail_services)) if state.gmail_services else ""
+                    )
+                    svc = state.gmail_services.get(svc_key)
+                    if not svc:
+                        await asyncio.to_thread(
+                            state.scheduler.mark_failed, msg_id, "No Gmail service"
+                        )
+                        continue
+                    # conv_id here holds the "to" email address for compose
+                    # Format: "to|subject" — if no pipe, treat whole as recipient with empty subject
+                    raw_conv = msg["conv_id"]
+                    if "|" in raw_conv:
+                        to, subject = raw_conv.split("|", 1)
+                    else:
+                        to, subject = raw_conv, "(no subject)"
+                    ok = await asyncio.to_thread(gmail_compose_send, svc, to, subject, msg["text"])
+                    if ok:
+                        await asyncio.to_thread(state.scheduler.mark_sent, msg_id)
+                        logger.info(f"[scheduler] Sent gmail msg {msg_id} → {to}")
+                    else:
+                        await asyncio.to_thread(
+                            state.scheduler.mark_failed, msg_id, "gmail_compose_send returned False"
+                        )
+                elif source == "imessage":
+                    cache_key = _cache_key("imessage", msg["conv_id"])
+                    contact = state.conv_cache.get(cache_key)
+                    if not contact:
+                        contacts = await asyncio.to_thread(imsg_contacts, 200)
+                        contact = next((c for c in contacts if c.id == msg["conv_id"]), None)
+                        if contact:
+                            state.conv_cache[cache_key] = contact
+                    if not contact:
+                        await asyncio.to_thread(
+                            state.scheduler.mark_failed, msg_id, "Contact not found"
+                        )
+                        continue
+                    ok = await asyncio.to_thread(imsg_send, contact, msg["text"])
+                    if ok:
+                        await asyncio.to_thread(state.scheduler.mark_sent, msg_id)
+                        logger.info(f"[scheduler] Sent imsg {msg_id} → {contact.name}")
+                    else:
+                        await asyncio.to_thread(
+                            state.scheduler.mark_failed, msg_id, "imsg_send returned False"
+                        )
+                else:
+                    await asyncio.to_thread(
+                        state.scheduler.mark_failed, msg_id, f"Unknown source: {source}"
+                    )
+            except Exception as e:
+                logger.exception(f"[scheduler] Failed to send msg {msg_id}")
+                await asyncio.to_thread(state.scheduler.mark_failed, msg_id, str(e))
+    except Exception:
+        logger.exception("[scheduler] _process_scheduled_messages failed")
+
+
+async def _process_followup_reminders() -> None:
+    """Check follow-up reminders — create Apple Reminders if no reply has come in."""
+    try:
+        due = await asyncio.to_thread(state.scheduler.get_due_followups)
+        for fu in due:
+            fid = fu["id"]
+            try:
+                created_at = datetime.fromisoformat(fu["created_at"])
+                replied = False
+                if fu["source"] == "gmail" and fu["thread_id"]:
+                    svc_key = next(iter(state.gmail_services)) if state.gmail_services else ""
+                    svc = state.gmail_services.get(svc_key)
+                    if svc:
+                        msgs = await asyncio.to_thread(
+                            gmail_thread, svc, fu["conv_id"], fu["thread_id"]
+                        )
+                        # Reply = any message in thread newer than created_at that isn't from me
+                        replied = any(m.ts > created_at and not m.is_me for m in msgs)
+                elif fu["source"] == "imessage":
+                    cache_key = _cache_key("imessage", fu["conv_id"])
+                    contact = state.conv_cache.get(cache_key)
+                    if not contact:
+                        contacts = await asyncio.to_thread(imsg_contacts, 200)
+                        contact = next((c for c in contacts if c.id == fu["conv_id"]), None)
+                    if contact:
+                        msgs = await asyncio.to_thread(imsg_thread, contact, 20)
+                        replied = any(m.ts > created_at and not m.is_me for m in msgs)
+
+                if replied:
+                    await asyncio.to_thread(state.scheduler.mark_followup_replied, fid)
+                    logger.info(f"[scheduler] Follow-up {fid} replied — skipping task")
+                else:
+                    # Try Google Tasks first (integrates with Google Calendar)
+                    ok = False
+                    task_created_via = ""
+                    title = fu["reminder_title"]
+                    notes = f"No reply in conversation: {fu['conv_id']}"
+
+                    if state.tasks_services:
+                        try:
+                            _, tasks_svc = _get_tasks_service_for_account("")
+                            due_iso = datetime.now().strftime("%Y-%m-%dT00:00:00.000Z")
+                            ok = await asyncio.to_thread(
+                                task_create, tasks_svc, title, "@default", due_iso, notes
+                            )
+                            if ok:
+                                task_created_via = "google_tasks"
+                        except Exception as e:
+                            logger.warning(
+                                f"[scheduler] Google Tasks followup failed ({e}), falling back to Apple Reminders"
+                            )
+
+                    # Fallback: Apple Reminders
+                    if not ok:
+                        now_str = datetime.now().strftime("%B %d, %Y %I:%M:%S %p")
+                        ok = await asyncio.to_thread(
+                            reminder_create,
+                            title=title,
+                            list_name=fu["reminder_list"],
+                            due_date=now_str,
+                            notes=notes,
+                        )
+                        if ok:
+                            task_created_via = "apple_reminders"
+
+                    if ok:
+                        await asyncio.to_thread(state.scheduler.mark_followup_fired, fid)
+                        logger.info(
+                            f"[scheduler] Follow-up {fid} fired — created via {task_created_via}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[scheduler] Follow-up {fid} failed to create task via any backend"
+                        )
+            except Exception:
+                logger.exception(f"[scheduler] Failed to process followup {fid}")
+    except Exception:
+        logger.exception("[scheduler] _process_followup_reminders failed")
+
+
+# Track which events we've already created departure tasks for (avoid duplicates)
+_departure_task_created: set[str] = set()
+
+
+async def _process_departure_alerts() -> None:
+    """Check upcoming events and create 'time to leave' tasks when departure time is near."""
+    home = await asyncio.to_thread(get_current_location)
+    if not home:
+        return  # No location available — skip departure alerts
+
+    try:
+        events = await asyncio.to_thread(calendar_events, state.cal_services)
+        departures = await asyncio.to_thread(
+            departure_times_for_events, events, home, "driving", 10, 4
+        )
+        now = datetime.now()
+        for dep in departures:
+            # Alert if departure time is within 15 minutes from now
+            minutes_until_departure = (dep.departure_time - now).total_seconds() / 60
+            if -5 < minutes_until_departure < 15:
+                event_key = f"{dep.event_summary}|{dep.event_start.isoformat()}"
+                if event_key in _departure_task_created:
+                    continue
+                _departure_task_created.add(event_key)
+
+                title = f"🚗 Leave now for {dep.event_summary} ({dep.duration_text})"
+                notes = f"Travel: {dep.distance_text}, {dep.duration_text} ({dep.mode})\nTo: {dep.event_location}\nEvent: {dep.event_start.strftime('%I:%M %p')}"
+
+                # Try Google Tasks first, fallback to Apple Reminders
+                ok = False
+                if state.tasks_services:
+                    try:
+                        _, tasks_svc = _get_tasks_service_for_account("")
+                        due_iso = dep.departure_time.strftime("%Y-%m-%dT00:00:00.000Z")
+                        ok = await asyncio.to_thread(
+                            task_create, tasks_svc, title, "@default", due_iso, notes
+                        )
+                    except Exception:
+                        pass
+                if not ok:
+                    now_str = dep.departure_time.strftime("%B %d, %Y %I:%M:%S %p")
+                    ok = await asyncio.to_thread(
+                        reminder_create, title=title, due_date=now_str, notes=notes
+                    )
+
+                if ok:
+                    logger.info(f"[scheduler] Departure alert: {title}")
+    except Exception:
+        logger.exception("[scheduler] _process_departure_alerts failed")
+
+
+async def _scheduler_loop() -> None:
+    """Background loop: check scheduled messages, followups, departures every 30s."""
+    logger.info("[scheduler] Background loop started")
+    while True:
+        try:
+            await asyncio.sleep(30)
+            await _process_scheduled_messages()
+            await _process_followup_reminders()
+            await _process_departure_alerts()
+        except asyncio.CancelledError:
+            logger.info("[scheduler] Background loop cancelled")
+            raise
+        except Exception:
+            logger.exception("[scheduler] Loop iteration failed")
+
+
 # ── App lifecycle ────────────────────────────────────────────────────────────
 
 
@@ -633,18 +954,20 @@ async def lifespan(app: FastAPI):
     n = await asyncio.to_thread(init_contacts)
     print(f"Loaded {n} contacts")
 
-    gmail, cal, drive, sheets, docs = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets, docs, tasks = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
     state.sheets_services = sheets
     state.docs_services = docs
+    state.tasks_services = tasks
     print(
         f"Gmail accounts: {list(gmail.keys())}, "
         f"Calendar accounts: {list(cal.keys())}, "
         f"Drive accounts: {list(drive.keys())}, "
         f"Sheets accounts: {list(sheets.keys())}, "
-        f"Docs accounts: {list(docs.keys())}"
+        f"Docs accounts: {list(docs.keys())}, "
+        f"Tasks accounts: {list(tasks.keys())}"
     )
 
     # Pre-warm conversation cache if enabled (reduces cold-start latency)
@@ -678,9 +1001,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Ambient autostart failed (non-fatal)")
 
+    # Start background scheduler loop (message scheduling + followup reminders)
+    scheduler_task = asyncio.create_task(_scheduler_loop())
+
     try:
         yield
     finally:
+        scheduler_task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await scheduler_task
         state.ambient.stop()
         await asyncio.to_thread(close_sqlite_connections)
 
@@ -831,13 +1160,14 @@ def _get_gmail_service(msg_id: str) -> tuple[object, Contact | None]:
     contact = state.conv_cache.get(_cache_key("gmail", msg_id))
     if contact and contact.gmail_account in state.gmail_services:
         return state.gmail_services[contact.gmail_account], contact
-    if state.gmail_services:
-        return next(iter(state.gmail_services.values())), contact
+    default_acct = _default_google_account(state.gmail_services)
+    if default_acct:
+        return state.gmail_services[default_acct], contact
     raise HTTPException(404, "No Gmail service available")
 
 
 def _get_gmail_service_for_account(account: str = "") -> tuple[str, object]:
-    acct = account or (next(iter(state.gmail_services)) if state.gmail_services else "")
+    acct = account or _default_google_account(state.gmail_services)
     svc = state.gmail_services.get(acct)
     if not svc:
         raise HTTPException(404, "No Gmail account available")
@@ -845,18 +1175,38 @@ def _get_gmail_service_for_account(account: str = "") -> tuple[str, object]:
 
 
 def _get_sheets_service_for_account(account: str = "") -> tuple[str, object]:
-    acct = account or (next(iter(state.sheets_services)) if state.sheets_services else "")
+    acct = account or _default_google_account(state.sheets_services)
     svc = state.sheets_services.get(acct)
     if not svc:
         raise HTTPException(404, "No Sheets account available")
     return acct, svc
 
 
+def _default_google_account(services: dict[str, object]) -> str:
+    """Pick the default account for a Google service.
+
+    Priority: INBOX_DEFAULT_GOOGLE_ACCOUNT env var if present in services,
+    then first service key.
+    """
+    preferred = os.environ.get("INBOX_DEFAULT_GOOGLE_ACCOUNT", "").strip()
+    if preferred and preferred in services:
+        return preferred
+    return next(iter(services)) if services else ""
+
+
 def _get_drive_service_for_account(account: str = "") -> tuple[str, object]:
-    acct = account or (next(iter(state.drive_services)) if state.drive_services else "")
+    acct = account or _default_google_account(state.drive_services)
     svc = state.drive_services.get(acct)
     if not svc:
         raise HTTPException(404, "No Drive account available")
+    return acct, svc
+
+
+def _get_tasks_service_for_account(account: str = "") -> tuple[str, object]:
+    acct = account or _default_google_account(state.tasks_services)
+    svc = state.tasks_services.get(acct)
+    if not svc:
+        raise HTTPException(404, "No Tasks account available")
     return acct, svc
 
 
@@ -1255,6 +1605,15 @@ async def complete_reminder(reminder_id: str):
     return {"ok": ok}
 
 
+@app.post("/reminders/{reminder_id}/uncomplete")
+async def uncomplete_reminder(reminder_id: str):
+    reminder = await asyncio.to_thread(reminder_by_id, reminder_id)
+    if not reminder:
+        raise HTTPException(404, "Reminder not found")
+    ok = await asyncio.to_thread(reminder_uncomplete, reminder.title, reminder.list_name)
+    return {"ok": ok}
+
+
 @app.post("/reminders")
 async def create_reminder(req: ReminderCreateRequest):
     ok = await asyncio.to_thread(
@@ -1263,6 +1622,8 @@ async def create_reminder(req: ReminderCreateRequest):
         list_name=req.list_name,
         due_date=req.due_date,
         notes=req.notes,
+        priority=req.priority,
+        flagged=req.flagged,
     )
     return {"ok": ok}
 
@@ -1279,6 +1640,8 @@ async def edit_reminder(reminder_id: str, req: ReminderEditRequest):
         due_date=req.due_date,
         notes=req.notes,
         list_name=reminder.list_name,
+        priority=req.priority,
+        flagged=req.flagged,
     )
     return {"ok": ok}
 
@@ -1290,6 +1653,387 @@ async def delete_reminder(reminder_id: str):
         raise HTTPException(404, "Reminder not found")
     ok = await asyncio.to_thread(reminder_delete, reminder.title, reminder.list_name)
     return {"ok": ok}
+
+
+# ── Google Tasks ─────────────────────────────────────────────────────────────
+
+
+@app.get("/tasks/lists", response_model=list[dict])
+async def list_task_lists(account: str = ""):
+    _, svc = _get_tasks_service_for_account(account)
+    return await asyncio.to_thread(tasks_lists, svc)
+
+
+@app.get("/tasks", response_model=list[TaskOut])
+async def list_tasks(
+    list_id: str = "@default",
+    show_completed: bool = False,
+    limit: int = 100,
+    account: str = "",
+):
+    _, svc = _get_tasks_service_for_account(account)
+    tasks = await asyncio.to_thread(tasks_list, svc, list_id, show_completed, limit)
+    return [_task_to_out(t) for t in tasks]
+
+
+@app.post("/tasks")
+async def create_task(req: TaskCreateRequest, account: str = ""):
+    _, svc = _get_tasks_service_for_account(account)
+    ok = await asyncio.to_thread(task_create, svc, req.title, req.list_id, req.due, req.notes)
+    return {"ok": ok}
+
+
+@app.post("/tasks/{task_id}/complete")
+async def complete_task(task_id: str, list_id: str = "@default", account: str = ""):
+    _, svc = _get_tasks_service_for_account(account)
+    ok = await asyncio.to_thread(task_complete, svc, task_id, list_id)
+    return {"ok": ok}
+
+
+@app.put("/tasks/{task_id}")
+async def update_task(
+    task_id: str, req: TaskUpdateRequest, list_id: str = "@default", account: str = ""
+):
+    _, svc = _get_tasks_service_for_account(account)
+    ok = await asyncio.to_thread(task_update, svc, task_id, list_id, req.title, req.due, req.notes)
+    return {"ok": ok}
+
+
+@app.delete("/tasks/{task_id}")
+async def delete_task(task_id: str, list_id: str = "@default", account: str = ""):
+    _, svc = _get_tasks_service_for_account(account)
+    ok = await asyncio.to_thread(task_delete, svc, task_id, list_id)
+    return {"ok": ok}
+
+
+# ── Scheduled Messages ───────────────────────────────────────────────────────
+
+
+@app.get("/scheduled")
+async def list_scheduled_messages(status: str = "pending"):
+    return await asyncio.to_thread(state.scheduler.list_scheduled, status)
+
+
+@app.post("/scheduled")
+async def create_scheduled_message(req: ScheduleMessageRequest):
+    result = await asyncio.to_thread(
+        state.scheduler.schedule_message,
+        req.source,
+        req.conv_id,
+        req.text,
+        req.send_at,
+        req.account,
+    )
+    return result
+
+
+@app.delete("/scheduled/{msg_id}")
+async def cancel_scheduled_message(msg_id: int):
+    ok = await asyncio.to_thread(state.scheduler.cancel_scheduled, msg_id)
+    return {"ok": ok}
+
+
+# ── Follow-up Reminders ──────────────────────────────────────────────────────
+
+
+@app.get("/followups")
+async def list_followup_reminders(status: str = "active"):
+    return await asyncio.to_thread(state.scheduler.list_followups, status)
+
+
+@app.post("/followups")
+async def create_followup_reminder(req: FollowupCreateRequest):
+    result = await asyncio.to_thread(
+        state.scheduler.create_followup,
+        req.source,
+        req.conv_id,
+        req.thread_id,
+        req.remind_after,
+        req.reminder_title,
+        req.reminder_list,
+    )
+    return result
+
+
+@app.delete("/followups/{fid}")
+async def cancel_followup_reminder(fid: int):
+    ok = await asyncio.to_thread(state.scheduler.cancel_followup, fid)
+    return {"ok": ok}
+
+
+# ── Task ↔ Message Links ─────────────────────────────────────────────────────
+
+
+@app.get("/tasks/links")
+async def list_task_links(
+    message_id: str = "",
+    message_source: str = "",
+    task_id: str = "",
+    task_source: str = "",
+):
+    if message_id and message_source:
+        return await asyncio.to_thread(
+            state.scheduler.links_for_message, message_id, message_source
+        )
+    if task_id and task_source:
+        return await asyncio.to_thread(state.scheduler.links_for_task, task_id, task_source)
+    raise HTTPException(400, "Must provide (message_id, message_source) OR (task_id, task_source)")
+
+
+@app.post("/tasks/links")
+async def create_task_link(req: TaskLinkRequest):
+    result = await asyncio.to_thread(
+        state.scheduler.link_task,
+        req.task_id,
+        req.task_source,
+        req.message_id,
+        req.message_source,
+        req.thread_id,
+        req.account,
+    )
+    return result
+
+
+@app.delete("/tasks/links/{link_id}")
+async def delete_task_link(link_id: int):
+    ok = await asyncio.to_thread(state.scheduler.unlink_task, link_id)
+    return {"ok": ok}
+
+
+@app.post("/tasks/from-message")
+async def create_task_from_message(req: TaskFromMessageRequest):
+    """Create a task from a message and auto-link it."""
+    task_id = ""
+    if req.task_type == "google_tasks":
+        _, svc = _get_tasks_service_for_account(req.account)
+        # Include message reference in notes
+        notes = req.notes
+        if req.message_source == "gmail":
+            notes = f"{notes}\n\nFrom email: {req.message_id}".strip()
+        ok = await asyncio.to_thread(task_create, svc, req.title, req.list_id, "", notes)
+        if not ok:
+            raise HTTPException(500, "Failed to create Google Task")
+        # Query newly-created task id (Google Tasks API doesn't return it from task_create)
+        tasks = await asyncio.to_thread(tasks_list, svc, req.list_id, False, 10)
+        latest = next((t for t in tasks if t.title == req.title), None)
+        task_id = latest.id if latest else ""
+    elif req.task_type == "reminders":
+        notes = req.notes
+        if req.message_source == "gmail":
+            notes = f"{notes}\n\nFrom email: {req.message_id}".strip()
+        ok = await asyncio.to_thread(reminder_create, req.title, req.list_name, "", notes, 0, False)
+        if not ok:
+            raise HTTPException(500, "Failed to create Reminder")
+        # Reminder ids come from SQLite Z_PK — not easy to get the just-created one
+        task_id = req.title  # fallback: use title as identifier
+    else:
+        raise HTTPException(400, f"Unknown task_type: {req.task_type}")
+
+    # Auto-link
+    link = await asyncio.to_thread(
+        state.scheduler.link_task,
+        task_id,
+        req.task_type,
+        req.message_id,
+        req.message_source,
+        req.thread_id,
+        req.account,
+    )
+    return {"ok": True, "task_id": task_id, "link": link}
+
+
+# ── Gemini AI ────────────────────────────────────────────────────────────────
+
+
+@app.post("/ai/gemini-summarize")
+async def ai_gemini_summarize(messages: list[dict]):
+    result = await asyncio.to_thread(gemini_summarize, messages)
+    if result is None:
+        raise HTTPException(502, "Gemini summarization failed")
+    return {"summary": result}
+
+
+@app.post("/ai/smart-reply")
+async def ai_gemini_smart_reply(messages: list[dict], num_replies: int = 3):
+    replies = await asyncio.to_thread(gemini_smart_reply, messages, num_replies)
+    return {"replies": replies}
+
+
+@app.post("/ai/categorize")
+async def ai_gemini_categorize(emails: list[dict]):
+    categories = await asyncio.to_thread(gemini_categorize, emails)
+    return {"categories": categories}
+
+
+@app.post("/ai/digest")
+async def ai_gemini_digest():
+    """Generate morning digest from all sources."""
+    # Gather data from all sources
+    emails_raw = await _fetch_conversations("gmail", limit=20)
+    emails = [
+        {"name": c.name, "snippet": c.snippet, "id": c.id} for c in emails_raw if c.unread > 0
+    ]
+
+    events_raw = await asyncio.to_thread(calendar_events, state.cal_services)
+    events = [
+        {"summary": e.summary, "start": e.start.isoformat(), "location": e.location}
+        for e in events_raw
+    ]
+
+    tasks_data = []
+    if state.tasks_services:
+        try:
+            _, svc = _get_tasks_service_for_account("")
+            tasks_raw = await asyncio.to_thread(tasks_list, svc, "@default", False, 20)
+            tasks_data = [
+                {"title": t.title, "due": t.due.isoformat() if t.due else ""} for t in tasks_raw
+            ]
+        except Exception:
+            pass
+
+    rem_raw = await asyncio.to_thread(reminders_list, limit=20)
+    reminders_data = [
+        {"title": r.title, "due_date": r.due_date.isoformat() if r.due_date else ""}
+        for r in rem_raw
+    ]
+
+    notifs = await asyncio.to_thread(github_notifications)
+    notifs_data = [{"title": n.title, "repo": n.repo, "type": n.type} for n in notifs if n.unread]
+
+    result = await asyncio.to_thread(
+        gemini_digest, emails, events, tasks_data, reminders_data, notifs_data
+    )
+    if result is None:
+        raise HTTPException(502, "Gemini digest failed")
+    return {"digest": result}
+
+
+@app.post("/ai/action-items")
+async def ai_gemini_action_items(messages: list[dict]):
+    items = await asyncio.to_thread(gemini_extract_action_items, messages)
+    return {"action_items": items}
+
+
+# ── Departure Times (Google Maps) ────────────────────────────────────────────
+
+
+@app.get("/calendar/departure-times")
+async def get_departure_times(
+    origin: str = "",
+    mode: str = "driving",
+    buffer_minutes: int = 10,
+    lookahead_hours: int = 24,
+):
+    """Calculate when to leave for upcoming calendar events with locations.
+
+    Args:
+        origin: Your starting address (home/office). If empty, uses INBOX_HOME_ADDRESS env var.
+        mode: "driving" | "transit" | "walking" | "bicycling"
+        buffer_minutes: Extra buffer time on top of travel estimate.
+        lookahead_hours: Only check events within this many hours ahead.
+    """
+    # Try live location first, then env var, then error
+    home = origin
+    if not home:
+        home = await asyncio.to_thread(get_current_location)
+    if not home:
+        raise HTTPException(
+            400,
+            "No origin. Set INBOX_HOME_ADDRESS env var, grant Location Services, or pass ?origin=",
+        )
+
+    # Fetch today's events from all calendar accounts
+    events = await asyncio.to_thread(calendar_events, state.cal_services)
+    departures = await asyncio.to_thread(
+        departure_times_for_events,
+        events,
+        home,
+        mode,
+        buffer_minutes,
+        lookahead_hours,
+    )
+    return [
+        {
+            "event_summary": d.event_summary,
+            "event_start": d.event_start.isoformat(),
+            "event_location": d.event_location,
+            "travel_minutes": d.travel_minutes,
+            "departure_time": d.departure_time.isoformat(),
+            "distance_text": d.distance_text,
+            "duration_text": d.duration_text,
+            "mode": d.mode,
+        }
+        for d in departures
+    ]
+
+
+@app.get("/maps/travel-time")
+async def get_travel_time(
+    origin: str,
+    destination: str,
+    mode: str = "driving",
+    avoid: str | None = None,
+    units: str = "imperial",
+):
+    """Get travel time between two locations.
+
+    Args:
+        avoid: "tolls", "highways", "ferries", or combo like "tolls|highways".
+        units: "imperial" (miles) or "metric" (km).
+    """
+    result = await asyncio.to_thread(
+        maps_travel_time, origin, destination, mode, None, avoid, units
+    )
+    if not result:
+        raise HTTPException(502, "Could not get travel time — check Maps API key and addresses")
+    return result
+
+
+# ── WhatsApp ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/whatsapp/contacts", response_model=list[ConversationOut])
+async def list_whatsapp_contacts(limit: int = 20):
+    """List WhatsApp conversations via macOS Accessibility API (read-only).
+    WhatsApp app must be running. Returns empty list if app is not running or AX tree inspection fails.
+    """
+    contacts = await asyncio.to_thread(whatsapp_contacts, limit)
+    return [
+        ConversationOut(
+            id=c.id,
+            name=c.name,
+            source=c.source,
+            snippet=c.snippet,
+            unread=c.unread,
+            last_ts=c.last_ts.isoformat(),
+            guid=c.guid,
+            is_group=c.is_group,
+            members=c.members,
+        )
+        for c in contacts
+    ]
+
+
+@app.get("/whatsapp/messages/{chat_name}", response_model=list[MessageOut])
+async def get_whatsapp_messages(chat_name: str, limit: int = 50):
+    """Fetch WhatsApp messages for a conversation.
+    chat_name: Name of the conversation.
+    limit: Max messages to return.
+    Placeholder: returns empty list pending AX tree navigation implementation.
+    """
+    messages = await asyncio.to_thread(whatsapp_thread, chat_name, limit)
+    return [
+        MessageOut(
+            sender=m.sender,
+            body=m.body,
+            ts=m.ts.isoformat(),
+            is_me=m.is_me,
+            source=m.source,
+            attachments=m.attachments,
+            message_id=m.message_id,
+        )
+        for m in messages
+    ]
 
 
 # ── GitHub ───────────────────────────────────────────────────────────────────
@@ -1610,7 +2354,7 @@ async def format_spreadsheet(spreadsheet_id: str, req: FormatRequest):
 
 def _get_docs_service_for_account(account: str = "") -> tuple[str, object]:
     """Get docs service for account, return (account_email, service). Raises HTTPException on failure."""
-    acct = account or (next(iter(state.docs_services)) if state.docs_services else "")
+    acct = account or _default_google_account(state.docs_services)
     if not acct or acct not in state.docs_services:
         raise HTTPException(400, "No docs service available")
     return acct, state.docs_services[acct]
@@ -1712,6 +2456,11 @@ async def search_endpoint(req: SearchRequest):
         limit=req.limit,
         gmail_services=state.gmail_services,
         cal_services=state.cal_services,
+        from_addr=req.from_addr,
+        before=req.before,
+        after=req.after,
+        has_attachment=req.has_attachment,
+        is_unread=req.is_unread,
     )
     return result
 
@@ -2061,7 +2810,7 @@ async def test_notification(req: NotificationTestRequest):
 
 def _get_cal_service_for_account(account: str = "") -> tuple[str, object]:
     """Get calendar service for account, raising HTTPException if unavailable."""
-    acct = account or (next(iter(state.cal_services)) if state.cal_services else "")
+    acct = account or _default_google_account(state.cal_services)
     svc = state.cal_services.get(acct)
     if not svc:
         raise HTTPException(404, "No calendar account available")
@@ -2347,4 +3096,5 @@ async def extract_memory_endpoint(text: str, source: str = "manual", auto_save: 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")
+    port = int(os.environ.get("INBOX_SERVER_PORT", PORT))
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")

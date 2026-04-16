@@ -290,12 +290,19 @@ class InboxClient:
         r.raise_for_status()
         return r.json().get("ok", False)
 
+    def reminder_uncomplete(self, reminder_id: str) -> bool:
+        r = self._client.post(f"/reminders/{reminder_id}/uncomplete")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
     def reminder_create(
         self,
         title: str,
         list_name: str = "Reminders",
         due_date: str = "",
         notes: str = "",
+        priority: int = 0,
+        flagged: bool = False,
     ) -> bool:
         r = self._client.post(
             "/reminders",
@@ -304,6 +311,8 @@ class InboxClient:
                 "list_name": list_name,
                 "due_date": due_date,
                 "notes": notes,
+                "priority": priority,
+                "flagged": flagged,
             },
         )
         r.raise_for_status()
@@ -315,6 +324,8 @@ class InboxClient:
         title: str | None = None,
         due_date: str | None = None,
         notes: str | None = None,
+        priority: int | None = None,
+        flagged: bool | None = None,
     ) -> bool:
         payload: dict = {}
         if title is not None:
@@ -323,6 +334,10 @@ class InboxClient:
             payload["due_date"] = due_date
         if notes is not None:
             payload["notes"] = notes
+        if priority is not None:
+            payload["priority"] = priority
+        if flagged is not None:
+            payload["flagged"] = flagged
         r = self._client.put(f"/reminders/{reminder_id}", json=payload)
         r.raise_for_status()
         return r.json().get("ok", False)
@@ -331,6 +346,278 @@ class InboxClient:
         r = self._client.delete(f"/reminders/{reminder_id}")
         r.raise_for_status()
         return r.json().get("ok", False)
+
+    # ── Google Tasks ─────────────────────────────────────────────────────
+
+    def list_task_lists(self, account: str = "") -> list[dict]:
+        params = {"account": account} if account else {}
+        r = self._client.get("/tasks/lists", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def list_tasks(
+        self,
+        list_id: str = "@default",
+        show_completed: bool = False,
+        limit: int = 100,
+        account: str = "",
+    ) -> list[dict]:
+        params = {
+            "list_id": list_id,
+            "show_completed": show_completed,
+            "limit": limit,
+        }
+        if account:
+            params["account"] = account
+        r = self._client.get("/tasks", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def create_task(
+        self,
+        title: str,
+        list_id: str = "@default",
+        due: str = "",
+        notes: str = "",
+        account: str = "",
+    ) -> bool:
+        params = {}
+        if account:
+            params["account"] = account
+        r = self._client.post(
+            "/tasks",
+            json={"title": title, "list_id": list_id, "due": due, "notes": notes},
+            params=params,
+        )
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def complete_task(self, task_id: str, list_id: str = "@default", account: str = "") -> bool:
+        params = {}
+        if account:
+            params["account"] = account
+        r = self._client.post(
+            f"/tasks/{task_id}/complete", params={**{"list_id": list_id}, **params}
+        )
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def update_task(
+        self,
+        task_id: str,
+        list_id: str = "@default",
+        title: str | None = None,
+        due: str | None = None,
+        notes: str | None = None,
+        account: str = "",
+    ) -> bool:
+        payload: dict = {}
+        if title is not None:
+            payload["title"] = title
+        if due is not None:
+            payload["due"] = due
+        if notes is not None:
+            payload["notes"] = notes
+        params = {"list_id": list_id}
+        if account:
+            params["account"] = account
+        r = self._client.put(f"/tasks/{task_id}", json=payload, params=params)
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def delete_task(self, task_id: str, list_id: str = "@default", account: str = "") -> bool:
+        params = {"list_id": list_id}
+        if account:
+            params["account"] = account
+        r = self._client.delete(f"/tasks/{task_id}", params=params)
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    # ── WhatsApp ─────────────────────────────────────────────────────────
+
+    # ── Departure Times ────────────────────────────────────────────────
+
+    def departure_times(
+        self,
+        origin: str = "",
+        mode: str = "driving",
+        buffer_minutes: int = 10,
+        lookahead_hours: int = 24,
+    ) -> list[dict]:
+        params = {
+            "mode": mode,
+            "buffer_minutes": buffer_minutes,
+            "lookahead_hours": lookahead_hours,
+        }
+        if origin:
+            params["origin"] = origin
+        r = self._client.get("/calendar/departure-times", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def travel_time(self, origin: str, destination: str, mode: str = "driving") -> dict:
+        r = self._client.get(
+            "/maps/travel-time", params={"origin": origin, "destination": destination, "mode": mode}
+        )
+        r.raise_for_status()
+        return r.json()
+
+    # ── WhatsApp ─────────────────────────────────────────────────────────
+
+    def whatsapp_contacts(self, limit: int = 20) -> list[dict]:
+        r = self._client.get("/whatsapp/contacts", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
+    def whatsapp_messages(self, chat_name: str, limit: int = 50) -> list[dict]:
+        r = self._client.get(f"/whatsapp/messages/{chat_name}", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
+    # ── Scheduled Messages ───────────────────────────────────────────────
+
+    def list_scheduled(self, status: str = "pending") -> list[dict]:
+        r = self._client.get("/scheduled", params={"status": status})
+        r.raise_for_status()
+        return r.json()
+
+    def schedule_message(
+        self,
+        source: str,
+        conv_id: str,
+        text: str,
+        send_at: str,
+        account: str = "",
+    ) -> dict:
+        r = self._client.post(
+            "/scheduled",
+            json={
+                "source": source,
+                "conv_id": conv_id,
+                "text": text,
+                "send_at": send_at,
+                "account": account,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def cancel_scheduled(self, msg_id: int) -> bool:
+        r = self._client.delete(f"/scheduled/{msg_id}")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    # ── Follow-up Reminders ──────────────────────────────────────────────
+
+    def list_followups(self, status: str = "active") -> list[dict]:
+        r = self._client.get("/followups", params={"status": status})
+        r.raise_for_status()
+        return r.json()
+
+    def create_followup(
+        self,
+        source: str,
+        conv_id: str,
+        remind_after: str,
+        reminder_title: str,
+        thread_id: str = "",
+        reminder_list: str = "Reminders",
+    ) -> dict:
+        r = self._client.post(
+            "/followups",
+            json={
+                "source": source,
+                "conv_id": conv_id,
+                "thread_id": thread_id,
+                "remind_after": remind_after,
+                "reminder_title": reminder_title,
+                "reminder_list": reminder_list,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def cancel_followup(self, fid: int) -> bool:
+        r = self._client.delete(f"/followups/{fid}")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    # ── Task ↔ Message Links ────────────────────────────────────────────
+
+    def list_task_links(
+        self,
+        message_id: str = "",
+        message_source: str = "",
+        task_id: str = "",
+        task_source: str = "",
+    ) -> list[dict]:
+        params = {}
+        if message_id:
+            params["message_id"] = message_id
+            params["message_source"] = message_source
+        if task_id:
+            params["task_id"] = task_id
+            params["task_source"] = task_source
+        r = self._client.get("/tasks/links", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def link_task_to_message(
+        self,
+        task_id: str,
+        task_source: str,
+        message_id: str,
+        message_source: str,
+        thread_id: str = "",
+        account: str = "",
+    ) -> dict:
+        r = self._client.post(
+            "/tasks/links",
+            json={
+                "task_id": task_id,
+                "task_source": task_source,
+                "message_id": message_id,
+                "message_source": message_source,
+                "thread_id": thread_id,
+                "account": account,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def unlink_task(self, link_id: int) -> bool:
+        r = self._client.delete(f"/tasks/links/{link_id}")
+        r.raise_for_status()
+        return r.json().get("ok", False)
+
+    def create_task_from_message(
+        self,
+        message_id: str,
+        message_source: str,
+        title: str,
+        task_type: str = "google_tasks",
+        list_id: str = "@default",
+        list_name: str = "Reminders",
+        notes: str = "",
+        thread_id: str = "",
+        account: str = "",
+    ) -> dict:
+        r = self._client.post(
+            "/tasks/from-message",
+            json={
+                "message_id": message_id,
+                "message_source": message_source,
+                "title": title,
+                "task_type": task_type,
+                "list_id": list_id,
+                "list_name": list_name,
+                "notes": notes,
+                "thread_id": thread_id,
+                "account": account,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
 
     # ── GitHub ──────────────────────────────────────────────────────────
 
@@ -505,10 +792,30 @@ class InboxClient:
 
     # ── Search ───────────────────────────────────────────────────────────
 
-    def search(self, q: str, sources: list[str] | None = None, limit: int = 50) -> dict:
+    def search(
+        self,
+        q: str,
+        sources: list[str] | None = None,
+        limit: int = 50,
+        from_addr: str = "",
+        before: str = "",
+        after: str = "",
+        has_attachment: bool = False,
+        is_unread: bool = False,
+    ) -> dict:
         payload: dict = {"q": q, "limit": limit}
         if sources is not None:
             payload["sources"] = sources
+        if from_addr:
+            payload["from_addr"] = from_addr
+        if before:
+            payload["before"] = before
+        if after:
+            payload["after"] = after
+        if has_attachment:
+            payload["has_attachment"] = True
+        if is_unread:
+            payload["is_unread"] = True
         r = self._client.post("/search", json=payload)
         r.raise_for_status()
         return r.json()

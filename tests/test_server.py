@@ -23,7 +23,7 @@ def client():
     with (
         patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
-        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
         TestClient(inbox_server.app, raise_server_exceptions=False) as c,
     ):
         # Reset state after lifespan has run (lifespan sets from mocked return)
@@ -98,7 +98,7 @@ class TestAuth:
         with (
             patch.dict(os.environ, {"INBOX_SERVER_TOKEN": "secret-token"}, clear=False),
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             TestClient(inbox_server.app, raise_server_exceptions=False) as client,
         ):
             resp = client.get("/health")
@@ -110,7 +110,7 @@ class TestAuth:
         with (
             patch.dict(os.environ, {"INBOX_SERVER_TOKEN": "secret-token"}, clear=False),
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             TestClient(inbox_server.app, raise_server_exceptions=False) as client,
         ):
             resp = client.get("/health", headers={"Authorization": "Bearer secret-token"})
@@ -122,7 +122,7 @@ class TestAuth:
         with (
             patch.dict(os.environ, {"INBOX_SERVER_TOKEN": "secret-token"}, clear=False),
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             TestClient(inbox_server.app, raise_server_exceptions=False) as client,
         ):
             resp = client.get("/health", headers={"X-API-Key": "secret-token"})
@@ -135,7 +135,7 @@ class TestLifespanCleanup:
 
         with (
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             patch("inbox_server.close_sqlite_connections") as mock_close,
             TestClient(inbox_server.app, raise_server_exceptions=False),
         ):
