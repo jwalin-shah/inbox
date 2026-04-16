@@ -17,13 +17,15 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pydantic import BaseModel as PydanticBaseModel
+
+import contextlib
 
 import httpx
 from google.auth.transport.requests import Request
@@ -48,6 +50,8 @@ REMINDERS_DIR = (
 APPLE_EPOCH = datetime(2001, 1, 1)
 
 GITHUB_TOKEN_FILE = BASE_DIR / "github_token.txt"
+GOOGLE_MAPS_KEY_FILE = BASE_DIR / "google_maps_key.txt"
+GEMINI_API_KEY_FILE = BASE_DIR / "gemini_api_key.txt"
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -58,6 +62,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/tasks",
 ]
 
 ATTACHMENT_PLACEHOLDER = "\ufffc"
@@ -143,6 +148,18 @@ class Reminder:
     priority: int = 0
     flagged: bool = False
     creation_date: datetime | None = None
+
+
+@dataclass
+class GoogleTask:
+    id: str
+    title: str
+    status: str  # "needsAction" | "completed"
+    list_id: str
+    list_title: str
+    due: datetime | None = None
+    notes: str = ""
+    completed: datetime | None = None
 
 
 @dataclass
@@ -406,9 +423,14 @@ def _load_creds(token_path: Path) -> Credentials | None:
 
 
 def google_auth_all() -> tuple[
-    dict[str, object], dict[str, object], dict[str, object], dict[str, object], dict[str, object]
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
 ]:
-    """Auth all accounts from tokens/ dir. Returns (gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs)."""
+    """Auth all accounts from tokens/ dir. Returns (gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs, tasks_svcs)."""
     TOKENS_DIR.mkdir(exist_ok=True)
 
     # Migrate legacy token.json — if it's missing scopes, re-auth
@@ -435,6 +457,7 @@ def google_auth_all() -> tuple[
     drive_svcs: dict[str, object] = {}
     sheets_svcs: dict[str, object] = {}
     docs_svcs: dict[str, object] = {}
+    tasks_svcs: dict[str, object] = {}
 
     for token_path in sorted(TOKENS_DIR.glob("*.json")):
         creds = _load_creds(token_path)
@@ -479,7 +502,13 @@ def google_auth_all() -> tuple[
         except Exception:  # logged below
             _log_service_failure("google_auth_all.docs_service", email=email)
 
-    return gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs
+        try:
+            tasks_svc = build("tasks", "v1", credentials=creds)
+            tasks_svcs[email] = tasks_svc
+        except Exception:  # logged below
+            _log_service_failure("google_auth_all.tasks_service", email=email)
+
+    return gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs, tasks_svcs
 
 
 def add_google_account() -> str | None:
@@ -2006,6 +2035,74 @@ def parse_quick_event(text: str) -> dict:
     }
 
 
+# ── WhatsApp (via macOS Accessibility API) ───────────────────────────────────
+
+
+def _whatsapp_pid() -> int | None:
+    """Find WhatsApp.app PID via NSRunningApplication.
+    Returns None if WhatsApp is not running or Objective-C imports fail.
+    """
+    try:
+        from Foundation import NSWorkspace
+
+        ws = NSWorkspace.sharedWorkspace()
+        apps = ws.runningApplications()
+        for app in apps:
+            if app.bundleIdentifier() == "net.whatsapp.WhatsApp":
+                return app.processIdentifier()
+    except Exception:
+        pass
+    return None
+
+
+def _whatsapp_accessibility_tree() -> list[Contact]:
+    """Query WhatsApp Mac app via AXUIElement to extract conversations.
+    Returns list of Contact objects with source='whatsapp'.
+    Gracefully returns [] if app is not running or AX tree is not accessible.
+    """
+    try:
+        pid = _whatsapp_pid()
+        if not pid:
+            return []
+
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+        )
+
+        app_ref = AXUIElementCreateApplication(pid)
+        if not app_ref:
+            return []
+
+        # Query main window and conversation list
+        # WhatsApp Catalyst structure (subject to change):
+        # - Main window contains a list of conversations
+        # - Each conversation has: name, last message snippet
+        # For now, return empty list as placeholder (AX tree inspection needed)
+        return []
+    except Exception:
+        _log_service_failure("_whatsapp_accessibility_tree")
+        return []
+
+
+def whatsapp_contacts(limit: int = 20) -> list[Contact]:
+    """List WhatsApp conversations via macOS Accessibility API (read-only).
+    WhatsApp app must be running. Returns Contact objects with source='whatsapp'.
+    """
+    contacts = _whatsapp_accessibility_tree()
+    return contacts[:limit]
+
+
+def whatsapp_thread(chat_name: str, limit: int = 50) -> list[Msg]:
+    """Fetch WhatsApp messages for a given conversation.
+    chat_name: Name of the conversation to fetch.
+    limit: Max number of messages to return.
+    Returns empty list as this requires live interaction with WhatsApp app UI.
+    """
+    # Placeholder: would require clicking conversation, scrolling history, extracting messages
+    # For now, return empty since real implementation needs careful AX tree navigation
+    return []
+
+
 # ── Apple Reminders ─────────────────────────────────────────────────────────
 
 
@@ -2283,13 +2380,54 @@ def reminder_complete(title: str, list_name: str = "") -> bool:
     )
 
 
+def reminder_uncomplete(title: str, list_name: str = "") -> bool:
+    """Mark a reminder as incomplete via AppleScript.
+
+    Args:
+        title: The title of the reminder to uncomplete.
+        list_name: Optional list name for disambiguation when duplicate titles exist.
+
+    Returns:
+        True if the operation succeeded, False otherwise.
+    """
+    find_clause = _applescript_find_reminder(title, list_name)
+    script = f"""
+    tell application "Reminders"
+        try
+            {find_clause}
+            set completed of theReminder to false
+            return "ok"
+        on error
+            return "fail"
+        end try
+    end tell
+    """
+    return _run_applescript_with_retry(
+        script, "reminder_uncomplete", title=title, list_name=list_name
+    )
+
+
 def reminder_create(
     title: str,
     list_name: str = "Reminders",
     due_date: str = "",
     notes: str = "",
+    priority: int = 0,
+    flagged: bool = False,
 ) -> bool:
-    """Create a new reminder via AppleScript."""
+    """Create a new reminder via AppleScript.
+
+    Args:
+        title: The reminder title.
+        list_name: The list name (defaults to "Reminders").
+        due_date: Human-readable due date string (e.g., "April 15, 2025 02:00:00 PM").
+        notes: Reminder notes/body text.
+        priority: Priority level (0=none, 1=low, 5=medium, 9=high).
+        flagged: Whether the reminder is flagged.
+
+    Returns:
+        True if creation succeeded, False otherwise.
+    """
     safe_title = _escape_applescript(title)
     safe_notes = _escape_applescript(notes)
     safe_list = _escape_applescript(list_name)
@@ -2307,6 +2445,18 @@ def reminder_create(
             set due date of theReminder to date dStr
         """
 
+    # Build priority and flagged clauses
+    priority_clause = ""
+    flagged_clause = ""
+    if priority != 0:
+        priority_clause = f"set priority of theReminder to {priority}"
+    if flagged:
+        flagged_clause = "set flagged of theReminder to true"
+
+    post_create = "\n        ".join(
+        filter(None, [due_clause.strip(), priority_clause, flagged_clause])
+    )
+
     script = f"""
     tell application "Reminders"
         try
@@ -2315,7 +2465,7 @@ def reminder_create(
             set targetList to default list
         end try
         set theReminder to make new reminder in targetList with properties {{{props}}}
-        {due_clause}
+        {post_create}
         return "ok"
     end tell
     """
@@ -2326,6 +2476,8 @@ def reminder_create(
         list_name=list_name,
         due_date=due_date,
         notes_present=bool(notes),
+        priority=priority,
+        flagged=flagged,
     )
 
 
@@ -2335,8 +2487,10 @@ def reminder_edit(
     due_date: str | None = None,
     notes: str | None = None,
     list_name: str = "",
+    priority: int | None = None,
+    flagged: bool | None = None,
 ) -> bool:
-    """Edit an existing reminder's title, due_date, and/or notes via AppleScript.
+    """Edit an existing reminder's properties via AppleScript.
 
     Args:
         current_title: The current title of the reminder to find.
@@ -2344,6 +2498,8 @@ def reminder_edit(
         due_date: New due date string (or None to keep current).
         notes: New notes/body text (or None to keep current).
         list_name: Optional list name for disambiguation when duplicate titles exist.
+        priority: New priority level (or None to keep current). 0=none, 1=low, 5=medium, 9=high.
+        flagged: New flagged state (or None to keep current).
 
     Returns:
         True if the edit succeeded, False otherwise.
@@ -2364,6 +2520,13 @@ def reminder_edit(
     if notes is not None:
         safe_notes = _escape_applescript(notes)
         set_clauses.append(f"set body of theReminder to ({safe_notes})")
+
+    if priority is not None:
+        set_clauses.append(f"set priority of theReminder to {priority}")
+
+    if flagged is not None:
+        flagged_str = "true" if flagged else "false"
+        set_clauses.append(f"set flagged of theReminder to {flagged_str}")
 
     set_block = "\n            ".join(set_clauses) if set_clauses else ""
 
@@ -2386,6 +2549,8 @@ def reminder_edit(
         due_date=due_date,
         notes_present=notes is not None,
         list_name=list_name,
+        priority=priority,
+        flagged=flagged,
     )
 
 
@@ -2412,6 +2577,563 @@ def reminder_delete(title: str, list_name: str = "") -> bool:
     end tell
     """
     return _run_applescript_with_retry(script, "reminder_delete", title=title, list_name=list_name)
+
+
+# ── Google Tasks ────────────────────────────────────────────────────────────
+
+
+def tasks_lists(service) -> list[dict]:
+    """List all Google Task lists."""
+    try:
+        result = service.tasklists().list(maxResults=50).execute()
+        return result.get("items", [])
+    except Exception:
+        _log_service_failure("tasks_lists")
+        return []
+
+
+def tasks_list(
+    service, list_id: str = "@default", show_completed: bool = False, limit: int = 100
+) -> list[GoogleTask]:
+    """List tasks in a Google Task list."""
+    try:
+        result = (
+            service.tasks()
+            .list(
+                tasklist=list_id,
+                showCompleted=show_completed,
+                maxResults=limit,
+            )
+            .execute()
+        )
+        tasks = []
+        list_title = ""
+
+        # Get list title
+        try:
+            list_meta = service.tasklists().get(tasklist=list_id).execute()
+            list_title = list_meta.get("title", list_id)
+        except Exception:
+            list_title = list_id
+
+        for item in result.get("items", []):
+            due = None
+            if item.get("due"):
+                with contextlib.suppress(Exception):
+                    due = datetime.fromisoformat(item["due"].replace("Z", "+00:00"))
+
+            completed = None
+            if item.get("completed"):
+                with contextlib.suppress(Exception):
+                    completed = datetime.fromisoformat(item["completed"].replace("Z", "+00:00"))
+
+            tasks.append(
+                GoogleTask(
+                    id=item["id"],
+                    title=item.get("title", ""),
+                    status=item.get("status", "needsAction"),
+                    list_id=list_id,
+                    list_title=list_title,
+                    due=due,
+                    notes=item.get("notes", ""),
+                    completed=completed,
+                )
+            )
+        return tasks
+    except Exception:
+        _log_service_failure("tasks_list", list_id=list_id)
+        return []
+
+
+def task_create(
+    service,
+    title: str,
+    list_id: str = "@default",
+    due: str = "",
+    notes: str = "",
+) -> bool:
+    """Create a Google Task."""
+    try:
+        body = {"title": title}
+        if notes:
+            body["notes"] = notes
+        if due:
+            body["due"] = due
+        service.tasks().insert(tasklist=list_id, body=body).execute()
+        return True
+    except Exception:
+        _log_service_failure("task_create", title=title, list_id=list_id)
+        return False
+
+
+def task_complete(service, task_id: str, list_id: str = "@default") -> bool:
+    """Mark a Google Task as complete."""
+    try:
+        service.tasks().patch(
+            tasklist=list_id,
+            task=task_id,
+            body={"status": "completed"},
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure("task_complete", task_id=task_id, list_id=list_id)
+        return False
+
+
+def task_delete(service, task_id: str, list_id: str = "@default") -> bool:
+    """Delete a Google Task."""
+    try:
+        service.tasks().delete(tasklist=list_id, task=task_id).execute()
+        return True
+    except Exception:
+        _log_service_failure("task_delete", task_id=task_id, list_id=list_id)
+        return False
+
+
+def task_update(
+    service,
+    task_id: str,
+    list_id: str = "@default",
+    title: str | None = None,
+    due: str | None = None,
+    notes: str | None = None,
+) -> bool:
+    """Update a Google Task."""
+    try:
+        body = {}
+        if title is not None:
+            body["title"] = title
+        if due is not None:
+            body["due"] = due
+        if notes is not None:
+            body["notes"] = notes
+        if not body:
+            return True
+        service.tasks().patch(
+            tasklist=list_id,
+            task=task_id,
+            body=body,
+        ).execute()
+        return True
+    except Exception:
+        _log_service_failure("task_update", task_id=task_id, list_id=list_id)
+        return False
+
+
+# ── Gemini AI ──────────────────────────────────────────────────────────────
+
+
+_gemini_model = None
+
+
+def _get_gemini_model(model_name: str = "gemini-2.5-flash"):
+    """Get or create a Gemini GenerativeModel instance (cached singleton)."""
+    global _gemini_model
+    if _gemini_model is not None:
+        return _gemini_model
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key and GEMINI_API_KEY_FILE.exists():
+        api_key = GEMINI_API_KEY_FILE.read_text().strip()
+    if not api_key:
+        return None
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        _gemini_model = genai.GenerativeModel(model_name)
+        return _gemini_model
+    except Exception:
+        _log_service_failure("_get_gemini_model")
+        return None
+
+
+def gemini_summarize(messages: list[dict], max_tokens: int = 300) -> str | None:
+    """Summarize a conversation thread using Gemini.
+
+    Args:
+        messages: List of message dicts with 'sender', 'body', 'ts' keys.
+        max_tokens: Max output length.
+
+    Returns:
+        Summary string, or None on failure.
+    """
+    model = _get_gemini_model()
+    if not model:
+        return None
+    try:
+        thread_text = "\n".join(
+            f"[{m.get('sender', '?')}]: {m.get('body', '')[:500]}"
+            for m in messages[-20:]  # Last 20 messages max
+        )
+        response = model.generate_content(
+            f"Summarize this conversation thread concisely. Focus on key decisions, action items, and important information:\n\n{thread_text}",
+            generation_config={"max_output_tokens": max_tokens, "temperature": 0.3},
+        )
+        return response.text.strip() if response.text else None
+    except Exception:
+        _log_service_failure("gemini_summarize", message_count=len(messages))
+        return None
+
+
+def gemini_smart_reply(messages: list[dict], num_replies: int = 3) -> list[str]:
+    """Generate smart reply suggestions for a conversation.
+
+    Args:
+        messages: List of message dicts with 'sender', 'body', 'ts' keys.
+        num_replies: Number of reply suggestions to generate.
+
+    Returns:
+        List of reply suggestion strings.
+    """
+    model = _get_gemini_model()
+    if not model:
+        return []
+    try:
+        thread_text = "\n".join(
+            f"[{m.get('sender', '?')}]: {m.get('body', '')[:500]}" for m in messages[-10:]
+        )
+        response = model.generate_content(
+            f"Based on this conversation, suggest {num_replies} brief, natural reply options. "
+            f"Return ONLY the replies, one per line, numbered 1-{num_replies}. "
+            f"Keep each reply under 2 sentences.\n\n{thread_text}",
+            generation_config={"max_output_tokens": 200, "temperature": 0.7},
+        )
+        if not response.text:
+            return []
+        lines = [
+            line.strip().lstrip("0123456789.-) ")
+            for line in response.text.strip().split("\n")
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        return [ln for ln in lines if ln][:num_replies]
+    except Exception:
+        _log_service_failure("gemini_smart_reply", message_count=len(messages))
+        return []
+
+
+def gemini_categorize(emails: list[dict]) -> list[dict]:
+    """Categorize emails by priority and topic using Gemini.
+
+    Args:
+        emails: List of email dicts with 'name', 'snippet', 'id' keys.
+
+    Returns:
+        List of dicts: [{"id": str, "priority": "high"|"medium"|"low", "category": str}]
+    """
+    model = _get_gemini_model()
+    if not model:
+        return []
+    try:
+        email_text = "\n".join(
+            f"ID:{e.get('id', '')} FROM:{e.get('name', '')} SNIPPET:{e.get('snippet', '')[:200]}"
+            for e in emails[:30]  # Max 30 emails per batch
+        )
+        response = model.generate_content(
+            "Categorize each email by priority (high/medium/low) and topic category "
+            "(e.g., Finance, Work, Personal, Newsletter, Promotion, Urgent, Social). "
+            "Return one line per email: ID|priority|category\n\n" + email_text,
+            generation_config={"max_output_tokens": 500, "temperature": 0.2},
+        )
+        if not response.text:
+            return []
+        results = []
+        for line in response.text.strip().split("\n"):
+            parts = line.strip().split("|")
+            if len(parts) >= 3:
+                results.append(
+                    {
+                        "id": parts[0].strip(),
+                        "priority": parts[1].strip().lower(),
+                        "category": parts[2].strip(),
+                    }
+                )
+        return results
+    except Exception:
+        _log_service_failure("gemini_categorize", email_count=len(emails))
+        return []
+
+
+def gemini_digest(
+    emails: list[dict] | None = None,
+    events: list[dict] | None = None,
+    tasks: list[dict] | None = None,
+    reminders: list[dict] | None = None,
+    notifications: list[dict] | None = None,
+) -> str | None:
+    """Generate a morning digest/briefing across all sources using Gemini.
+
+    Args:
+        emails: Recent unread emails (name, snippet).
+        events: Today's calendar events (summary, start, location).
+        tasks: Pending Google Tasks (title, due).
+        reminders: Active Apple Reminders (title, due_date).
+        notifications: GitHub notifications (title, repo, type).
+
+    Returns:
+        Formatted briefing string, or None on failure.
+    """
+    model = _get_gemini_model()
+    if not model:
+        return None
+    try:
+        sections = []
+        if emails:
+            email_text = "\n".join(
+                f"- {e.get('name', '?')}: {e.get('snippet', '')[:150]}" for e in emails[:15]
+            )
+            sections.append(f"UNREAD EMAILS ({len(emails)}):\n{email_text}")
+        if events:
+            event_text = "\n".join(
+                f"- {e.get('start', '')[:16]} {e.get('summary', '')} @ {e.get('location', '')}"
+                for e in events[:10]
+            )
+            sections.append(f"TODAY'S EVENTS ({len(events)}):\n{event_text}")
+        if tasks:
+            task_text = "\n".join(
+                f"- {t.get('title', '')} (due: {t.get('due', '')})" for t in tasks[:10]
+            )
+            sections.append(f"PENDING TASKS ({len(tasks)}):\n{task_text}")
+        if reminders:
+            rem_text = "\n".join(
+                f"- {r.get('title', '')} (due: {r.get('due_date', '')})" for r in reminders[:10]
+            )
+            sections.append(f"REMINDERS ({len(reminders)}):\n{rem_text}")
+        if notifications:
+            notif_text = "\n".join(
+                f"- [{n.get('repo', '')}] {n.get('title', '')}" for n in notifications[:10]
+            )
+            sections.append(f"GITHUB ({len(notifications)}):\n{notif_text}")
+
+        if not sections:
+            return "Nothing pending — inbox zero! 🎉"
+
+        combined = "\n\n".join(sections)
+        response = model.generate_content(
+            "You are a personal assistant. Generate a concise morning briefing from these items. "
+            "Highlight what needs immediate attention, group related items, mention any conflicts or deadlines. "
+            "Be direct and actionable. Use bullet points.\n\n" + combined,
+            generation_config={"max_output_tokens": 500, "temperature": 0.4},
+        )
+        return response.text.strip() if response.text else None
+    except Exception:
+        _log_service_failure("gemini_digest")
+        return None
+
+
+def gemini_extract_action_items(messages: list[dict]) -> list[str]:
+    """Extract action items from a conversation thread.
+
+    Args:
+        messages: List of message dicts.
+
+    Returns:
+        List of action item strings.
+    """
+    model = _get_gemini_model()
+    if not model:
+        return []
+    try:
+        thread_text = "\n".join(
+            f"[{m.get('sender', '?')}]: {m.get('body', '')[:500]}" for m in messages[-15:]
+        )
+        response = model.generate_content(
+            "Extract all action items, todos, and commitments from this conversation. "
+            "Return one per line, starting with a dash. Only include concrete, actionable items.\n\n"
+            + thread_text,
+            generation_config={"max_output_tokens": 300, "temperature": 0.2},
+        )
+        if not response.text:
+            return []
+        return [
+            line.strip().lstrip("- •")
+            for line in response.text.strip().split("\n")
+            if line.strip() and line.strip()[0] in "-•"
+        ]
+    except Exception:
+        _log_service_failure("gemini_extract_action_items")
+        return []
+
+
+# ── Location ───────────────────────────────────────────────────────────────
+
+
+def get_current_location() -> str | None:
+    """Get current location via macOS Core Location.
+
+    Returns lat,lng string (e.g. '37.5485,-121.9886') or None if unavailable.
+    Requires Location Services permission for Terminal/Python.
+    Falls back to INBOX_HOME_ADDRESS env var.
+    """
+    try:
+        import CoreLocation  # type: ignore[import-untyped]
+
+        manager = CoreLocation.CLLocationManager.alloc().init()
+        manager.startUpdatingLocation()
+        import time
+
+        time.sleep(1)  # Give it a moment to get a fix
+        location = manager.location()
+        if location:
+            coord = location.coordinate()
+            manager.stopUpdatingLocation()
+            return f"{coord.latitude},{coord.longitude}"
+        manager.stopUpdatingLocation()
+    except Exception:
+        pass
+    # Fallback to env var
+    return os.environ.get("INBOX_HOME_ADDRESS", "").strip() or None
+
+
+# ── Google Maps / Departure Times ──────────────────────────────────────────
+
+
+def _google_cloud_api_key() -> str | None:
+    """Get Google Cloud API key from env var or file. Single key for Maps, Translate, Vision, etc."""
+    key = os.environ.get("GOOGLE_CLOUD_API_KEY", "").strip()
+    if key:
+        return key
+    # Fallback to Maps-specific env var or file
+    key = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+    if key:
+        return key
+    if GOOGLE_MAPS_KEY_FILE.exists():
+        key = GOOGLE_MAPS_KEY_FILE.read_text().strip()
+        return key if key else None
+    return None
+
+
+@dataclass
+class DepartureInfo:
+    event_summary: str
+    event_start: datetime
+    event_location: str
+    travel_minutes: int
+    departure_time: datetime
+    distance_text: str = ""
+    duration_text: str = ""
+    mode: str = "driving"
+
+
+def maps_travel_time(
+    origin: str,
+    destination: str,
+    mode: str = "driving",
+    arrival_time: datetime | None = None,
+    avoid: str | None = None,
+    units: str = "imperial",
+) -> dict | None:
+    """Get travel time between two locations via Google Maps Distance Matrix API.
+
+    Args:
+        origin: Start address or lat,lng.
+        destination: End address or lat,lng.
+        mode: "driving" | "transit" | "walking" | "bicycling".
+        arrival_time: Desired arrival time (for traffic estimates).
+        avoid: "tolls" | "highways" | "ferries" | "indoor" or combo like "tolls|highways".
+        units: "imperial" (miles) or "metric" (km). Default imperial.
+
+    Returns:
+        Dict with keys: duration_seconds, duration_text, distance_text, or None on failure.
+    """
+    api_key = _google_cloud_api_key()
+    if not api_key:
+        return None
+    try:
+        params = {
+            "origins": origin,
+            "destinations": destination,
+            "mode": mode,
+            "units": units,
+            "key": api_key,
+        }
+        if avoid:
+            params["avoid"] = avoid
+        if arrival_time:
+            # Google uses "arrival_time" param for transit, "departure_time" for driving
+            if mode == "transit":
+                params["arrival_time"] = str(int(arrival_time.timestamp()))
+            else:
+                # For driving: request departure_time=now to get traffic-aware estimate
+                params["departure_time"] = "now"
+        resp = httpx.get(
+            "https://maps.googleapis.com/maps/api/distancematrix/json",
+            params=params,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "OK":
+            return None
+        row = data.get("rows", [{}])[0]
+        element = row.get("elements", [{}])[0]
+        if element.get("status") != "OK":
+            return None
+        duration = element.get("duration_in_traffic") or element.get("duration", {})
+        return {
+            "duration_seconds": duration.get("value", 0),
+            "duration_text": duration.get("text", ""),
+            "distance_text": element.get("distance", {}).get("text", ""),
+        }
+    except Exception:
+        _log_service_failure("maps_travel_time", origin=origin, destination=destination)
+        return None
+
+
+def departure_times_for_events(
+    events: list,
+    origin: str,
+    mode: str = "driving",
+    buffer_minutes: int = 10,
+    lookahead_hours: int = 24,
+) -> list[DepartureInfo]:
+    """Calculate departure times for upcoming calendar events with locations.
+
+    Args:
+        events: List of CalendarEvent objects.
+        origin: User's starting location (home address or lat,lng).
+        mode: Travel mode for Distance Matrix API.
+        buffer_minutes: Extra buffer to add to travel time.
+        lookahead_hours: Only check events within this many hours.
+
+    Returns:
+        List of DepartureInfo for events that have locations.
+    """
+    now = datetime.now(UTC).astimezone()
+    cutoff = now + timedelta(hours=lookahead_hours)
+    results = []
+
+    for event in events:
+        location = getattr(event, "location", "") or ""
+        if not location.strip():
+            continue
+        start = event.start if isinstance(event.start, datetime) else now
+        if start.tzinfo is None:
+            start = start.astimezone()
+        if start < now or start > cutoff:
+            continue
+
+        travel = maps_travel_time(origin, location, mode=mode, arrival_time=start)
+        if not travel:
+            continue
+
+        travel_minutes = travel["duration_seconds"] // 60
+        departure = start - timedelta(minutes=travel_minutes + buffer_minutes)
+
+        results.append(
+            DepartureInfo(
+                event_summary=event.summary,
+                event_start=start,
+                event_location=location,
+                travel_minutes=travel_minutes,
+                departure_time=departure,
+                distance_text=travel.get("distance_text", ""),
+                duration_text=travel.get("duration_text", ""),
+                mode=mode,
+            )
+        )
+
+    results.sort(key=lambda d: d.departure_time)
+    return results
 
 
 # ── GitHub ──────────────────────────────────────────────────────────────────
@@ -4017,8 +4739,21 @@ def search_all(
     limit: int = 50,
     gmail_services: dict | None = None,
     cal_services: dict | None = None,
+    from_addr: str = "",
+    before: str = "",
+    after: str = "",
+    has_attachment: bool = False,
+    is_unread: bool = False,
 ) -> dict:
-    """Search across all requested sources.  Returns ranked results dict."""
+    """Search across all requested sources.  Returns ranked results dict.
+
+    Filters (optional):
+        from_addr: sender filter — prepended as from:X to Gmail query, filtered post-hoc for iMessage
+        before: ISO date — upper bound cutoff (Gmail: before:YYYY/MM/DD; SQLite: ts filter)
+        after: ISO date — lower bound cutoff (Gmail: after:YYYY/MM/DD; SQLite: ts filter)
+        has_attachment: Gmail only — prepends has:attachment to Gmail query
+        is_unread: Gmail only — prepends is:unread to Gmail query
+    """
     if not query or not query.strip():
         return {"query": query, "total": 0, "results": []}
 
@@ -4028,11 +4763,36 @@ def search_all(
     want_all = "all" in sources
     results: list[dict] = []
 
+    # Build enhanced gmail query with filter modifiers
+    gmail_query = query
+    gmail_modifiers = []
+    if from_addr:
+        gmail_modifiers.append(f"from:{from_addr}")
+    if has_attachment:
+        gmail_modifiers.append("has:attachment")
+    if is_unread:
+        gmail_modifiers.append("is:unread")
+    if before:
+        # Gmail uses YYYY/MM/DD format
+        try:
+            before_dt = datetime.fromisoformat(before)
+            gmail_modifiers.append(f"before:{before_dt.strftime('%Y/%m/%d')}")
+        except Exception:
+            pass
+    if after:
+        try:
+            after_dt = datetime.fromisoformat(after)
+            gmail_modifiers.append(f"after:{after_dt.strftime('%Y/%m/%d')}")
+        except Exception:
+            pass
+    if gmail_modifiers:
+        gmail_query = " ".join(gmail_modifiers) + " " + query
+
     if want_all or "imessage" in sources:
         results.extend(_search_imessage(query, limit))
 
     if want_all or "gmail" in sources:
-        results.extend(_search_gmail(gmail_services, query, limit))
+        results.extend(_search_gmail(gmail_services, gmail_query, limit))
 
     if want_all or "notes" in sources:
         results.extend(_search_notes(query, limit))
@@ -4042,6 +4802,39 @@ def search_all(
 
     if want_all or "calendar" in sources:
         results.extend(_search_calendar(cal_services, query, limit))
+
+    # Post-hoc filters for non-Gmail sources (datetime range + from_addr for imessage)
+    before_dt = None
+    after_dt = None
+    if before:
+        with contextlib.suppress(Exception):
+            before_dt = datetime.fromisoformat(before)
+    if after:
+        with contextlib.suppress(Exception):
+            after_dt = datetime.fromisoformat(after)
+
+    def _keep(r: dict) -> bool:
+        ts = r.get("timestamp", "")
+        if ts and (before_dt or after_dt):
+            try:
+                rts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                # Strip tz for naive comparison
+                if rts.tzinfo:
+                    rts = rts.replace(tzinfo=None)
+                if before_dt and rts > before_dt:
+                    return False
+                if after_dt and rts < after_dt:
+                    return False
+            except Exception:
+                pass
+        # from_addr filter for non-gmail sources
+        if from_addr and r.get("source") in ("imessage", "calendar"):
+            sender = (r.get("sender") or "").lower()
+            if from_addr.lower() not in sender:
+                return False
+        return True
+
+    results = [r for r in results if _keep(r)]
 
     # Rank by timestamp desc (most recent first)
     results.sort(key=lambda r: r.get("timestamp", ""), reverse=True)

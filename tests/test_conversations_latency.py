@@ -26,7 +26,7 @@ def client():
     with (
         patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
-        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
         TestClient(inbox_server.app, raise_server_exceptions=False) as c,
     ):
         inbox_server.state.gmail_services = {}
@@ -228,7 +228,7 @@ class TestPreWarmConversations:
             patch("inbox_server.init_contacts", return_value=0),
             patch(
                 "inbox_server.google_auth_all",
-                return_value=({"me@gmail.com": gmail_svc}, {}, {}, {}),
+                return_value=({"me@gmail.com": gmail_svc}, {}, {}, {}, {}, {}),
             ),
             patch(
                 "inbox_server.imsg_contacts",
@@ -254,7 +254,7 @@ class TestPreWarmConversations:
 
         with (
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             TestClient(inbox_server.app, raise_server_exceptions=False),
         ):
             # conv_cache should still be empty since no pre-warm env var is set
@@ -270,7 +270,7 @@ class TestPreWarmConversations:
         with (
             patch.dict(os.environ, {"INBOX_PRE_WARM_CONVERSATIONS": "1"}),
             patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {})),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             patch("inbox_server.imsg_contacts", return_value=[]),
             # gmail_contacts won't be called since no gmail_services
             TestClient(inbox_server.app, raise_server_exceptions=False),

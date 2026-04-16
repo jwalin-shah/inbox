@@ -174,6 +174,8 @@ class InboxBackend:
         list_name: str = "Reminders",
         due_date: str = "",
         notes: str = "",
+        priority: int = 0,
+        flagged: bool = False,
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
@@ -183,27 +185,275 @@ class InboxBackend:
                 "list_name": list_name,
                 "due_date": due_date,
                 "notes": notes,
+                "priority": priority,
+                "flagged": flagged,
             },
         )
 
     async def complete_reminder(self, reminder_id: str) -> dict[str, Any]:
         return await self._request("POST", f"/reminders/{reminder_id}/complete")
 
+    async def uncomplete_reminder(self, reminder_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/reminders/{reminder_id}/uncomplete")
+
+    async def list_task_lists(self, account: str = "") -> list[dict[str, Any]]:
+        params = {"account": account} if account else {}
+        return await self._request("GET", "/tasks/lists", params=params)
+
+    async def list_tasks(
+        self,
+        list_id: str = "@default",
+        show_completed: bool = False,
+        limit: int = 100,
+        account: str = "",
+    ) -> list[dict[str, Any]]:
+        params = {
+            "list_id": list_id,
+            "show_completed": str(show_completed).lower(),
+            "limit": limit,
+        }
+        if account:
+            params["account"] = account
+        return await self._request("GET", "/tasks", params=params)
+
+    async def create_task(
+        self,
+        title: str,
+        list_id: str = "@default",
+        due: str = "",
+        notes: str = "",
+        account: str = "",
+    ) -> dict[str, Any]:
+        params = {}
+        if account:
+            params["account"] = account
+        return await self._request(
+            "POST",
+            "/tasks",
+            json={"title": title, "list_id": list_id, "due": due, "notes": notes},
+            params=params,
+        )
+
+    async def complete_task(
+        self, task_id: str, list_id: str = "@default", account: str = ""
+    ) -> dict[str, Any]:
+        params = {"list_id": list_id}
+        if account:
+            params["account"] = account
+        return await self._request("POST", f"/tasks/{task_id}/complete", params=params)
+
+    async def update_task(
+        self,
+        task_id: str,
+        list_id: str = "@default",
+        title: str | None = None,
+        due: str | None = None,
+        notes: str | None = None,
+        account: str = "",
+    ) -> dict[str, Any]:
+        payload: dict = {}
+        if title is not None:
+            payload["title"] = title
+        if due is not None:
+            payload["due"] = due
+        if notes is not None:
+            payload["notes"] = notes
+        params = {"list_id": list_id}
+        if account:
+            params["account"] = account
+        return await self._request("PUT", f"/tasks/{task_id}", json=payload, params=params)
+
+    async def delete_task(
+        self, task_id: str, list_id: str = "@default", account: str = ""
+    ) -> dict[str, Any]:
+        params = {"list_id": list_id}
+        if account:
+            params["account"] = account
+        return await self._request("DELETE", f"/tasks/{task_id}", params=params)
+
+    async def departure_times(
+        self,
+        origin: str = "",
+        mode: str = "driving",
+        buffer_minutes: int = 10,
+        lookahead_hours: int = 24,
+    ) -> list[dict[str, Any]]:
+        params = {
+            "mode": mode,
+            "buffer_minutes": buffer_minutes,
+            "lookahead_hours": lookahead_hours,
+        }
+        if origin:
+            params["origin"] = origin
+        return await self._request("GET", "/calendar/departure-times", params=params)
+
+    async def travel_time(
+        self, origin: str, destination: str, mode: str = "driving"
+    ) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/maps/travel-time",
+            params={"origin": origin, "destination": destination, "mode": mode},
+        )
+
+    async def whatsapp_contacts(self, limit: int = 20) -> list[dict[str, Any]]:
+        return await self._request("GET", "/whatsapp/contacts", params={"limit": limit})
+
+    async def whatsapp_messages(self, chat_name: str, limit: int = 50) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET", f"/whatsapp/messages/{chat_name}", params={"limit": limit}
+        )
+
+    async def list_scheduled(self, status: str = "pending") -> list[dict[str, Any]]:
+        return await self._request("GET", "/scheduled", params={"status": status})
+
+    async def schedule_message(
+        self,
+        source: str,
+        conv_id: str,
+        text: str,
+        send_at: str,
+        account: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/scheduled",
+            json={
+                "source": source,
+                "conv_id": conv_id,
+                "text": text,
+                "send_at": send_at,
+                "account": account,
+            },
+        )
+
+    async def cancel_scheduled(self, msg_id: int) -> dict[str, Any]:
+        return await self._request("DELETE", f"/scheduled/{msg_id}")
+
+    async def list_followups(self, status: str = "active") -> list[dict[str, Any]]:
+        return await self._request("GET", "/followups", params={"status": status})
+
+    async def create_followup(
+        self,
+        source: str,
+        conv_id: str,
+        remind_after: str,
+        reminder_title: str,
+        thread_id: str = "",
+        reminder_list: str = "Reminders",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/followups",
+            json={
+                "source": source,
+                "conv_id": conv_id,
+                "thread_id": thread_id,
+                "remind_after": remind_after,
+                "reminder_title": reminder_title,
+                "reminder_list": reminder_list,
+            },
+        )
+
+    async def cancel_followup(self, fid: int) -> dict[str, Any]:
+        return await self._request("DELETE", f"/followups/{fid}")
+
+    async def list_task_links(
+        self,
+        message_id: str = "",
+        message_source: str = "",
+        task_id: str = "",
+        task_source: str = "",
+    ) -> list[dict[str, Any]]:
+        params: dict = {}
+        if message_id:
+            params["message_id"] = message_id
+            params["message_source"] = message_source
+        if task_id:
+            params["task_id"] = task_id
+            params["task_source"] = task_source
+        return await self._request("GET", "/tasks/links", params=params)
+
+    async def link_task_to_message(
+        self,
+        task_id: str,
+        task_source: str,
+        message_id: str,
+        message_source: str,
+        thread_id: str = "",
+        account: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/tasks/links",
+            json={
+                "task_id": task_id,
+                "task_source": task_source,
+                "message_id": message_id,
+                "message_source": message_source,
+                "thread_id": thread_id,
+                "account": account,
+            },
+        )
+
+    async def unlink_task(self, link_id: int) -> dict[str, Any]:
+        return await self._request("DELETE", f"/tasks/links/{link_id}")
+
+    async def create_task_from_message(
+        self,
+        message_id: str,
+        message_source: str,
+        title: str,
+        task_type: str = "google_tasks",
+        list_id: str = "@default",
+        list_name: str = "Reminders",
+        notes: str = "",
+        thread_id: str = "",
+        account: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/tasks/from-message",
+            json={
+                "message_id": message_id,
+                "message_source": message_source,
+                "title": title,
+                "task_type": task_type,
+                "list_id": list_id,
+                "list_name": list_name,
+                "notes": notes,
+                "thread_id": thread_id,
+                "account": account,
+            },
+        )
+
     async def search_all(
         self,
         query: str,
         sources: list[str] | None = None,
         limit: int = 50,
+        from_addr: str = "",
+        before: str = "",
+        after: str = "",
+        has_attachment: bool = False,
+        is_unread: bool = False,
     ) -> dict[str, Any]:
-        return await self._request(
-            "POST",
-            "/search",
-            json={
-                "q": query,
-                "sources": sources or ["all"],
-                "limit": limit,
-            },
-        )
+        payload: dict = {
+            "q": query,
+            "sources": sources or ["all"],
+            "limit": limit,
+        }
+        if from_addr:
+            payload["from_addr"] = from_addr
+        if before:
+            payload["before"] = before
+        if after:
+            payload["after"] = after
+        if has_attachment:
+            payload["has_attachment"] = True
+        if is_unread:
+            payload["is_unread"] = True
+        return await self._request("POST", "/search", json=payload)
 
     async def list_gmail_labels(self, account: str = "") -> list[dict[str, Any]]:
         return await self._request(

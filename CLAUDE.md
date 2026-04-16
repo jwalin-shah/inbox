@@ -18,6 +18,7 @@ inbox_client.py   — sync HTTP client for the server API
 mcp_backend.py    — MCP server backend for Claude integration
 mcp_server.py     — MCP server (stdio-based protocol)
 inbox.py          — Textual TUI (thin client, auto-starts server)
+scheduler.py      — background scheduler for recurring tasks (reminders, email cleanup, etc.)
 contacts.py       — reads macOS AddressBook SQLite DBs, resolves phone→name
 ambient_notes.py  — writes ambient captures to Obsidian vault (~/vault/daily/)
 ambient_daemon.py — background daemon for audio capture → ASR → extraction → notes
@@ -137,6 +138,13 @@ POST /notifications/test  {"title", "body"}
 - **o** — open notification URL in browser (GitHub tab only)
 - **Tab** — accept autocomplete suggestion (in compose input)
 - **Ctrl+Q** — quit
+- **Vim mode** (when no input focused):
+  - **j** — cursor down
+  - **k** — cursor up
+  - **g** — jump to top
+  - **Shift+G** — jump to bottom
+  - **/** — search
+  - **?** — vim help
 
 ## Google Calendar
 - Creates, reads, updates, deletes calendar events
@@ -193,12 +201,18 @@ POST /notifications/test  {"title", "body"}
 - Sends route through the correct account's service
 - Scopes: `gmail.readonly` + `gmail.send` + `calendar` + `drive` + `spreadsheets` + `documents` (full read/write)
 - **Note**: New `documents` scope added for Docs integration; users must re-auth once via `/accounts/reauth`
+- Token locking via `token.json.lock` prevents concurrent access conflicts
 
 ## MCP Server
 - **mcp_server.py** — stdio-based MCP server for Claude integration
 - **mcp_backend.py** — backend client for the MCP server, calls inbox API
 - Exposes all inbox functionality (conversations, calendar, reminders, search, Gmail operations) via MCP tools
 - Agents can use the MCP interface directly without hitting the server HTTP API
+
+## Scheduler
+- **scheduler.py** — background task scheduler for recurring operations (cleanup, reminders, etc.)
+- Persistent task state stored in `.inbox_scheduler.sqlite3`
+- Runs concurrently with server, survives restarts
 
 ## LLM + Audio stack
 - **LLM**: Qwen3.5-0.8B-MLX-4bit (~500MB) — shared singleton for extraction + autocomplete
@@ -209,6 +223,10 @@ POST /notifications/test  {"title", "body"}
 - **Ambient notes**: Written to Obsidian vault at `~/vault/daily/` as markdown; captures logged with preview
 - **Keyboard injection**: pyobjc CGEvent (dictation mode, needs Accessibility permission)
 - **Ambient auto-start**: Ambient listening starts automatically on server startup (gracefully fails if dependencies unavailable)
+- **Gemini API**: Optional LLM backend via `gemini_api_key.txt` for fallback or specific tasks
+
+## External integrations
+- **Google Maps** (optional): API key in `google_maps_key.txt` for location-based features
 
 ## Key design decisions
 - **Client-server split** — server handles data, TUI and agents are both clients
@@ -223,13 +241,14 @@ POST /notifications/test  {"title", "body"}
 - **Notes via SQLite** for listing, AppleScript for full body (protobuf parsing is too complex)
 - **Flattened module structure** — LLM and audio logic integrated into main services rather than nested directories
 - **Tab state preservation** — switching between tabs preserves active conversation/event selection so returning to a tab shows the same context
+- **Vim mode** — optional navigation via j/k/g/G in focused lists/tables, respects focused text input (doesn't interfere with compose)
 
 ## Data sources
 - **iMessage**: `~/Library/Messages/chat.db` (read-only SQLite)
 - **AddressBook**: `~/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb`
 - **Apple Notes**: `~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite`
 - **Apple Reminders**: `~/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite`
-- **Gmail/Calendar/Drive/Sheets/Docs**: Google API via OAuth tokens in `tokens/`
+- **Gmail/Calendar/Drive/Sheets/Docs**: Google API via OAuth tokens in `tokens/` (token locking via `token.json.lock`)
 - **GitHub**: REST API via personal access token in `github_token.txt`
 
 ## Testing
