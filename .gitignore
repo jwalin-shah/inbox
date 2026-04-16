@@ -17,6 +17,7 @@ tokens/
 github_token.txt
 google_maps_key.txt
 gemini_api_key.txt
+config/inbox.env
 *.key
 *.secret
 

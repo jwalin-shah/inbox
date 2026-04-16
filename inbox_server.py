@@ -150,8 +150,14 @@ from services import (
     task_update,
     tasks_list,
     tasks_lists,
+    whatsapp_check_accessibility,
     whatsapp_contacts,
+    whatsapp_contacts_all,
+    whatsapp_launch,
+    whatsapp_scroll_sidebar,
+    whatsapp_send,
     whatsapp_thread,
+    whatsapp_thread_full,
 )
 from services import (
     autocomplete as services_autocomplete,
@@ -1990,6 +1996,84 @@ async def get_travel_time(
 
 
 # ── WhatsApp ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/whatsapp/status")
+async def whatsapp_status():
+    """Return WhatsApp app state + Accessibility permission status."""
+    from services import _whatsapp_pid
+
+    pid = await asyncio.to_thread(_whatsapp_pid)
+    trusted = await asyncio.to_thread(whatsapp_check_accessibility, False)
+    return {"running": pid is not None, "pid": pid, "accessibility_granted": trusted}
+
+
+@app.post("/whatsapp/launch")
+async def launch_whatsapp(prompt_permission: bool = False):
+    """Launch WhatsApp.app. If prompt_permission=True, also shows the macOS Accessibility dialog."""
+    running = await asyncio.to_thread(whatsapp_launch, 5.0)
+    trusted = await asyncio.to_thread(whatsapp_check_accessibility, prompt_permission)
+    return {"running": running, "accessibility_granted": trusted}
+
+
+@app.post("/whatsapp/send")
+async def send_whatsapp(payload: dict):
+    """Send a WhatsApp message. Body: {"chat_name": str, "text": str}."""
+    chat = payload.get("chat_name", "").strip()
+    text = payload.get("text", "").strip()
+    if not chat or not text:
+        raise HTTPException(400, "chat_name and text required")
+    ok = await asyncio.to_thread(whatsapp_send, chat, text)
+    if not ok:
+        raise HTTPException(
+            502, "send failed (app not running, chat not visible, or permission missing)"
+        )
+    return {"sent": True, "chat_name": chat}
+
+
+@app.post("/whatsapp/scroll")
+async def scroll_whatsapp(pages: int = 1):
+    """Scroll the WhatsApp sidebar down N pages so more chats render."""
+    done = await asyncio.to_thread(whatsapp_scroll_sidebar, pages)
+    return {"pages_scrolled": done}
+
+
+@app.get("/whatsapp/contacts/all", response_model=list[ConversationOut])
+async def list_all_whatsapp_contacts(max_pages: int = 10):
+    """Scroll the sidebar to collect all reachable chats (deduplicated)."""
+    contacts = await asyncio.to_thread(whatsapp_contacts_all, max_pages)
+    return [
+        ConversationOut(
+            id=c.id,
+            name=c.name,
+            source=c.source,
+            snippet=c.snippet,
+            unread=c.unread,
+            last_ts=c.last_ts.isoformat(),
+            guid=c.guid,
+            is_group=c.is_group,
+            members=c.members,
+        )
+        for c in contacts
+    ]
+
+
+@app.get("/whatsapp/messages/{chat_name}/full", response_model=list[MessageOut])
+async def get_whatsapp_messages_full(chat_name: str, max_loads: int = 10, limit: int = 500):
+    """Fetch full WhatsApp chat history via repeated 'Load more messages'."""
+    messages = await asyncio.to_thread(whatsapp_thread_full, chat_name, max_loads, limit)
+    return [
+        MessageOut(
+            sender=m.sender,
+            body=m.body,
+            ts=m.ts.isoformat(),
+            is_me=m.is_me,
+            source=m.source,
+            attachments=m.attachments,
+            message_id=m.message_id,
+        )
+        for m in messages
+    ]
 
 
 @app.get("/whatsapp/contacts", response_model=list[ConversationOut])

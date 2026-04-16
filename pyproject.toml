@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.26.0",
     "outlines>=0.1.0",
     "pydantic>=2.12.5",
+    "pyobjc-framework-applicationservices>=12.1",
     "pyobjc-framework-Quartz>=10.0",
     "python-multipart>=0.0.24",
     "rich>=14.3.3",

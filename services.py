@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pydantic import BaseModel as PydanticBaseModel
@@ -2055,30 +2055,210 @@ def _whatsapp_pid() -> int | None:
     return None
 
 
-def _whatsapp_accessibility_tree() -> list[Contact]:
-    """Query WhatsApp Mac app via AXUIElement to extract conversations.
-    Returns list of Contact objects with source='whatsapp'.
-    Gracefully returns [] if app is not running or AX tree is not accessible.
-    """
+def _ax_attr(el: Any, name: str) -> Any:
+    """Safe AX attribute getter. Returns None on failure."""
+    try:
+        from ApplicationServices import AXUIElementCopyAttributeValue
+
+        err, val = AXUIElementCopyAttributeValue(el, name, None)
+        if err != 0:
+            return None
+        return val
+    except Exception:
+        return None
+
+
+def _ax_children(el: Any) -> list[Any]:
+    kids = _ax_attr(el, "AXChildren")
+    return list(kids) if kids else []
+
+
+def _ax_walk(
+    el: Any, predicate, depth: int = 0, max_depth: int = 12, out: list | None = None
+) -> list[Any]:
+    """Pre-order walk collecting elements matching predicate."""
+    if out is None:
+        out = []
+    if depth > max_depth or el is None:
+        return out
+    try:
+        if predicate(el):
+            out.append(el)
+        for c in _ax_children(el):
+            _ax_walk(c, predicate, depth + 1, max_depth, out)
+    except Exception:
+        pass
+    return out
+
+
+def whatsapp_check_accessibility(prompt: bool = False) -> bool:
+    """Check if this process has Accessibility permission. If prompt=True, shows system dialog."""
+    try:
+        if prompt:
+            from ApplicationServices import AXIsProcessTrustedWithOptions
+            from CoreFoundation import (
+                CFDictionaryCreate,
+                kCFTypeDictionaryKeyCallBacks,
+                kCFTypeDictionaryValueCallBacks,
+            )
+
+            key = "AXTrustedCheckOptionPrompt"
+            opts = CFDictionaryCreate(
+                None,
+                [key],
+                [True],
+                1,
+                kCFTypeDictionaryKeyCallBacks,
+                kCFTypeDictionaryValueCallBacks,
+            )
+            return bool(AXIsProcessTrustedWithOptions(opts))
+        from ApplicationServices import AXIsProcessTrusted
+
+        return bool(AXIsProcessTrusted())
+    except Exception:
+        return False
+
+
+def whatsapp_launch(wait_seconds: float = 3.0) -> bool:
+    """Launch WhatsApp.app if not running. Returns True if app is running after call."""
+    try:
+        import subprocess
+        import time
+
+        if _whatsapp_pid():
+            return True
+        subprocess.run(["open", "-a", "WhatsApp"], check=False, timeout=10)
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            if _whatsapp_pid():
+                return True
+            time.sleep(0.25)
+        return _whatsapp_pid() is not None
+    except Exception:
+        _log_service_failure("whatsapp_launch")
+        return False
+
+
+def _whatsapp_app_ref() -> Any:
+    """Return the AX application ref for WhatsApp, or None."""
     try:
         pid = _whatsapp_pid()
         if not pid:
+            return None
+        from ApplicationServices import AXUIElementCreateApplication
+
+        return AXUIElementCreateApplication(pid)
+    except Exception:
+        return None
+
+
+def _whatsapp_main_window() -> Any:
+    app_ref = _whatsapp_app_ref()
+    if not app_ref:
+        return None
+    windows = _ax_attr(app_ref, "AXWindows") or []
+    # Prefer focused window, else first
+    for w in windows:
+        if _ax_attr(w, "AXMain"):
+            return w
+    return windows[0] if windows else None
+
+
+def _collect_text(el: Any, limit: int = 5) -> list[str]:
+    """Gather AXValue/AXTitle text from descendants (breadth-first, capped)."""
+    out: list[str] = []
+    stack = [(el, 0)]
+    while stack and len(out) < limit:
+        cur, d = stack.pop(0)
+        if d > 4:
+            continue
+        for attr in ("AXValue", "AXTitle", "AXDescription"):
+            v = _ax_attr(cur, attr)
+            if isinstance(v, str) and v.strip():
+                out.append(v.strip())
+                break
+        for c in _ax_children(cur):
+            stack.append((c, d + 1))
+    return out
+
+
+_WA_LRM = "\u200e"  # Left-to-right mark WhatsApp prefixes to most strings
+
+
+def _wa_strip(s: str) -> str:
+    return (s or "").replace(_WA_LRM, "").strip()
+
+
+def _wa_find_chat_list(window: Any) -> Any:
+    """Find the AXGroup whose AXDescription is 'List of chats'."""
+
+    def pred(el: Any) -> bool:
+        return _wa_strip(_ax_attr(el, "AXDescription") or "") == "List of chats"
+
+    hits = _ax_walk(window, pred, max_depth=15)
+    return hits[0] if hits else None
+
+
+def _wa_parse_row(row: Any) -> tuple[str, int, str] | None:
+    """Parse a sidebar chat button.
+    AXDescription: '<Name>' or '<Name>, N unread messages' (+ optional ', Announcement group')
+    AXValue: preview like 'Message from X, ...' or 'Your message, ...'
+    Returns (name, unread_count, preview) or None.
+    """
+    desc = _wa_strip(_ax_attr(row, "AXDescription") or "")
+    val = _wa_strip(_ax_attr(row, "AXValue") or "")
+    if not desc:
+        return None
+    name = desc
+    unread = 0
+    import re
+
+    m = re.search(r",\s*(\d+)\s+unread\s+messages?", desc)
+    if m:
+        unread = int(m.group(1))
+        name = desc[: m.start()].rstrip(", ").strip()
+    # Strip other trailing qualifiers (e.g. "Announcement group")
+    name = name.split(", ")[0].strip()
+    return name, unread, val
+
+
+def _whatsapp_accessibility_tree() -> list[Contact]:
+    """Walk WhatsApp AX tree and extract sidebar conversations.
+    Only rows currently rendered in the sidebar are returned (WhatsApp lazily
+    loads rows as you scroll).
+    """
+    try:
+        if not whatsapp_check_accessibility(prompt=False):
+            return []
+        window = _whatsapp_main_window()
+        if not window:
+            return []
+        chat_list = _wa_find_chat_list(window)
+        if not chat_list:
             return []
 
-        from ApplicationServices import (
-            AXUIElementCreateApplication,
-        )
-
-        app_ref = AXUIElementCreateApplication(pid)
-        if not app_ref:
-            return []
-
-        # Query main window and conversation list
-        # WhatsApp Catalyst structure (subject to change):
-        # - Main window contains a list of conversations
-        # - Each conversation has: name, last message snippet
-        # For now, return empty list as placeholder (AX tree inspection needed)
-        return []
+        contacts: list[Contact] = []
+        seen: set[str] = set()
+        for row in _ax_children(chat_list):
+            if _ax_attr(row, "AXRole") != "AXButton":
+                continue
+            parsed = _wa_parse_row(row)
+            if not parsed:
+                continue
+            name, unread, preview = parsed
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            contacts.append(
+                Contact(
+                    id=name,
+                    name=name,
+                    source="whatsapp",
+                    snippet=preview,
+                    unread=unread,
+                )
+            )
+        return contacts
     except Exception:
         _log_service_failure("_whatsapp_accessibility_tree")
         return []
@@ -2086,21 +2266,368 @@ def _whatsapp_accessibility_tree() -> list[Contact]:
 
 def whatsapp_contacts(limit: int = 20) -> list[Contact]:
     """List WhatsApp conversations via macOS Accessibility API (read-only).
-    WhatsApp app must be running. Returns Contact objects with source='whatsapp'.
+    WhatsApp app must be running and Accessibility permission must be granted.
     """
     contacts = _whatsapp_accessibility_tree()
     return contacts[:limit]
 
 
-def whatsapp_thread(chat_name: str, limit: int = 50) -> list[Msg]:
-    """Fetch WhatsApp messages for a given conversation.
-    chat_name: Name of the conversation to fetch.
-    limit: Max number of messages to return.
-    Returns empty list as this requires live interaction with WhatsApp app UI.
+def _whatsapp_select_chat(chat_name: str) -> bool:
+    """Click the sidebar AXButton whose parsed name matches chat_name."""
+    try:
+        from ApplicationServices import AXUIElementPerformAction
+
+        window = _whatsapp_main_window()
+        if not window:
+            return False
+        chat_list = _wa_find_chat_list(window)
+        if not chat_list:
+            return False
+        target_lower = chat_name.strip().lower()
+        for row in _ax_children(chat_list):
+            role = _ax_attr(row, "AXRole")
+            if role not in ("AXButton", "AXStaticText"):
+                continue
+            parsed = _wa_parse_row(row)
+            if not parsed:
+                continue
+            if parsed[0].lower() == target_lower:
+                # AXStaticText = already-selected row, no press needed
+                if role == "AXButton":
+                    AXUIElementPerformAction(row, "AXPress")
+                return True
+        return False
+    except Exception:
+        _log_service_failure("_whatsapp_select_chat", chat_name=chat_name)
+        return False
+
+
+def _wa_activate_app() -> bool:
+    """Bring WhatsApp to front so synthesized keystrokes hit its window.
+    Uses osascript because NSRunningApplication.activateWithOptions_ is unreliable
+    from background Python processes on recent macOS.
     """
-    # Placeholder: would require clicking conversation, scrolling history, extracting messages
-    # For now, return empty since real implementation needs careful AX tree navigation
-    return []
+    try:
+        import subprocess
+
+        if not _whatsapp_pid():
+            return False
+        subprocess.run(
+            ["osascript", "-e", 'tell application "WhatsApp" to activate'],
+            check=False,
+            timeout=3,
+            capture_output=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _cg_type_text(text: str) -> None:
+    """Type a unicode string via synthesized keyboard events at HID level."""
+    import Quartz
+
+    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    # Chunk into pieces CGEventKeyboardSetUnicodeString can carry (<= 20 chars per event)
+    for i in range(0, len(text), 20):
+        chunk = text[i : i + 20]
+        down = Quartz.CGEventCreateKeyboardEvent(src, 0, True)
+        Quartz.CGEventKeyboardSetUnicodeString(down, len(chunk), chunk)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+        up = Quartz.CGEventCreateKeyboardEvent(src, 0, False)
+        Quartz.CGEventKeyboardSetUnicodeString(up, len(chunk), chunk)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+
+
+def _cg_press_key(keycode: int) -> None:
+    import Quartz
+
+    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    down = Quartz.CGEventCreateKeyboardEvent(src, keycode, True)
+    up = Quartz.CGEventCreateKeyboardEvent(src, keycode, False)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+
+
+def whatsapp_send(chat_name: str, text: str) -> bool:
+    """Send a WhatsApp message via AX + CGEvent.
+    Activates app, selects chat, focuses compose field, types text via
+    synthesized keystrokes (AXValue set is ignored by Catalyst), presses Return.
+    """
+    try:
+        if not whatsapp_check_accessibility(prompt=False):
+            return False
+        if not text.strip():
+            return False
+        from ApplicationServices import AXUIElementSetAttributeValue
+
+        if not _wa_activate_app():
+            return False
+        import time
+
+        time.sleep(0.25)
+        if not _whatsapp_select_chat(chat_name):
+            return False
+        time.sleep(0.6)
+        window = _whatsapp_main_window()
+        if not window:
+            return False
+
+        def is_compose(el: Any) -> bool:
+            if _ax_attr(el, "AXRole") != "AXTextArea":
+                return False
+            return _wa_strip(_ax_attr(el, "AXDescription") or "") == "Compose message"
+
+        areas = _ax_walk(window, is_compose, max_depth=25)
+        if not areas:
+            return False
+        AXUIElementSetAttributeValue(areas[0], "AXFocused", True)
+        time.sleep(0.2)
+
+        _cg_type_text(text)
+        time.sleep(0.25)
+        _cg_press_key(36)  # Return
+        return True
+    except Exception:
+        _log_service_failure("whatsapp_send", chat_name=chat_name)
+        return False
+
+
+def whatsapp_scroll_sidebar(pages: int = 1) -> int:
+    """Scroll the conversation sidebar down N pages so more chats render.
+    Returns number of pages actually scrolled (0 if unavailable)."""
+    try:
+        if not whatsapp_check_accessibility(prompt=False):
+            return 0
+        from ApplicationServices import AXUIElementPerformAction
+
+        window = _whatsapp_main_window()
+        if not window:
+            return 0
+        chat_list = _wa_find_chat_list(window)
+        if not chat_list:
+            return 0
+        done = 0
+        import time
+
+        for _ in range(max(1, pages)):
+            err = AXUIElementPerformAction(chat_list, "AXScrollDownByPage")
+            if err != 0:
+                break
+            done += 1
+            time.sleep(0.2)
+        return done
+    except Exception:
+        _log_service_failure("whatsapp_scroll_sidebar")
+        return 0
+
+
+def whatsapp_contacts_all(max_pages: int = 10) -> list[Contact]:
+    """Scroll the sidebar to the top, then page down collecting every visible chat.
+    Deduplicates by name. Stops when a scroll yields no new chats or page cap hit.
+    """
+    try:
+        if not whatsapp_check_accessibility(prompt=False):
+            return []
+        from ApplicationServices import AXUIElementPerformAction
+
+        window = _whatsapp_main_window()
+        if not window:
+            return []
+        chat_list = _wa_find_chat_list(window)
+        if not chat_list:
+            return []
+        import time
+
+        # Rewind to top
+        for _ in range(max_pages):
+            err = AXUIElementPerformAction(chat_list, "AXScrollUpByPage")
+            if err != 0:
+                break
+            time.sleep(0.1)
+
+        seen: dict[str, Contact] = {}
+        stagnant = 0
+        for _ in range(max_pages):
+            for c in whatsapp_contacts(limit=200):
+                if c.name and c.name not in seen:
+                    seen[c.name] = c
+            before = len(seen)
+            err = AXUIElementPerformAction(chat_list, "AXScrollDownByPage")
+            if err != 0:
+                break
+            time.sleep(0.3)
+            for c in whatsapp_contacts(limit=200):
+                if c.name and c.name not in seen:
+                    seen[c.name] = c
+            if len(seen) == before:
+                stagnant += 1
+                if stagnant >= 2:
+                    break
+            else:
+                stagnant = 0
+        return list(seen.values())
+    except Exception:
+        _log_service_failure("whatsapp_contacts_all")
+        return []
+
+
+def whatsapp_thread_full(chat_name: str, max_loads: int = 10, limit: int = 500) -> list[Msg]:
+    """Fetch chat messages, repeatedly pressing 'Load more messages' for history.
+    max_loads: cap on how many times to press the load-more button.
+    """
+    try:
+        if not whatsapp_check_accessibility(prompt=False):
+            return []
+        from ApplicationServices import AXUIElementPerformAction
+
+        if not _wa_activate_app():
+            return []
+        import time
+
+        if not _whatsapp_select_chat(chat_name):
+            return []
+        time.sleep(0.6)
+
+        for _ in range(max_loads):
+            window = _whatsapp_main_window()
+            if not window:
+                break
+
+            def is_load_more(el: Any) -> bool:
+                if _ax_attr(el, "AXRole") != "AXStaticText":
+                    return False
+                return "Load more messages" in (_ax_attr(el, "AXDescription") or "")
+
+            hits = _ax_walk(window, is_load_more, max_depth=25)
+            if not hits:
+                break
+            # The clickable is typically a parent AXButton of the static text; press static too
+            err = AXUIElementPerformAction(hits[0], "AXPress")
+            if err != 0:
+                # Try parent
+                from ApplicationServices import AXUIElementCopyAttributeValue
+
+                p_err, parent = AXUIElementCopyAttributeValue(hits[0], "AXParent", None)
+                if parent is not None:
+                    AXUIElementPerformAction(parent, "AXPress")
+            time.sleep(0.8)
+
+        return whatsapp_thread(chat_name, limit=limit)
+    except Exception:
+        _log_service_failure("whatsapp_thread_full", chat_name=chat_name)
+        return []
+
+
+def _wa_parse_message(desc: str, chat_name: str) -> tuple[str, str, datetime, bool] | None:
+    """Parse an AXDescription for a message row.
+    Format examples:
+      'Message from <sender>, <body...>, <Month><DD>,at<HH:MM>, Received in <chat>'
+      'Your message, <body...>, <Month><DD>,at<HH:MM>, Sent to <chat>'
+    Returns (sender, body, ts, is_me) or None if not parseable.
+    """
+    import re
+    from datetime import datetime as _dt
+
+    s = _wa_strip(desc)
+    if not s:
+        return None
+    # Anchor on the date+time token ", Month<DD>,at<HH>:<MM>"
+    m = re.search(r",\s*([A-Za-z]+)\s*(\d{1,2}),at(\d{1,2}):(\d{2})", s)
+    if not m:
+        return None
+    head = s[: m.start()].strip()
+    month_s, day_s, hh, mm = m.group(1), m.group(2), m.group(3), m.group(4)
+    # Strip "Replying to X.\n" preamble (quoted-reply context)
+    if head.startswith("Replying to "):
+        nl = head.find("\n")
+        if nl >= 0:
+            head = head[nl + 1 :].strip()
+    if head.startswith("Message from "):
+        rest = head[len("Message from ") :]
+        parts = rest.split(", ", 1)
+        sender = parts[0].strip()
+        body = parts[1].strip() if len(parts) > 1 else ""
+        is_me = False
+    elif head.startswith("Your message"):
+        sender = "me"
+        body = head[len("Your message") :].lstrip(", ").strip()
+        is_me = True
+    elif head.startswith("message, "):
+        # Direct-chat received msg: "message, <body>"
+        sender = chat_name
+        body = head[len("message, ") :].strip()
+        is_me = False
+    else:
+        return None
+    try:
+        now = _dt.now()
+        dt = _dt.strptime(f"{month_s} {day_s} {hh}:{mm} {now.year}", "%B %d %H:%M %Y")
+        if dt > now:
+            dt = dt.replace(year=now.year - 1)
+    except Exception:
+        dt = _dt.now()
+    return sender, body, dt, is_me
+
+
+def whatsapp_thread(chat_name: str, limit: int = 50) -> list[Msg]:
+    """Fetch visible WhatsApp messages for a conversation.
+    Selects the chat in the sidebar, then scrapes AXStaticText rows whose
+    AXDescription matches the WhatsApp message-row format. Only returns
+    currently visible messages (no history scrollback).
+    """
+    try:
+        if not whatsapp_check_accessibility(prompt=False):
+            return []
+        window = _whatsapp_main_window()
+        if not window:
+            return []
+
+        _whatsapp_select_chat(chat_name)
+        import time
+
+        time.sleep(0.8)
+
+        # Refresh window (selection may change tree)
+        window = _whatsapp_main_window()
+        if not window:
+            return []
+
+        def is_msg_text(el: Any) -> bool:
+            if _ax_attr(el, "AXRole") != "AXStaticText":
+                return False
+            desc = _ax_attr(el, "AXDescription") or ""
+            s = _wa_strip(desc)
+            # Strip optional 'Replying to X.\n' preamble before matching
+            if s.startswith("Replying to "):
+                nl = s.find("\n")
+                if nl >= 0:
+                    s = s[nl + 1 :]
+            return (
+                s.startswith("Message from ")
+                or s.startswith("Your message")
+                or s.startswith("message, ")
+            )
+
+        nodes = _ax_walk(window, is_msg_text, max_depth=20)
+        msgs: list[Msg] = []
+        seen: set[str] = set()
+        for n in nodes:
+            desc = _ax_attr(n, "AXDescription") or ""
+            parsed = _wa_parse_message(desc, chat_name)
+            if not parsed:
+                continue
+            sender, body, ts, is_me = parsed
+            key = f"{sender}|{body}|{ts.isoformat()}"
+            if key in seen:
+                continue
+            seen.add(key)
+            msgs.append(Msg(sender=sender, body=body, ts=ts, is_me=is_me, source="whatsapp"))
+        msgs.sort(key=lambda m: m.ts)
+        return msgs[-limit:]
+    except Exception:
+        _log_service_failure("whatsapp_thread", chat_name=chat_name)
+        return []
 
 
 # ── Apple Reminders ─────────────────────────────────────────────────────────
