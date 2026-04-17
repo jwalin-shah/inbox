@@ -53,6 +53,37 @@ def client_with_gmail():
             yield c, state, mock_svc
 
 
+def _mock_gmail_service_for_ids(
+    *, message_ids: set[str] | None = None, thread_ids: set[str] | None = None
+):
+    """Create a mock Gmail service that only recognizes selected messages/threads."""
+    message_ids = message_ids or set()
+    thread_ids = thread_ids or set()
+    mock_svc = MagicMock()
+
+    def _messages_get(*args, **kwargs):
+        msg_id = kwargs.get("id")
+        request = MagicMock()
+        if msg_id in message_ids:
+            request.execute.return_value = {"id": msg_id}
+        else:
+            request.execute.side_effect = Exception("not found")
+        return request
+
+    def _threads_get(*args, **kwargs):
+        thread_id = kwargs.get("id")
+        request = MagicMock()
+        if thread_id in thread_ids:
+            request.execute.return_value = {"id": thread_id}
+        else:
+            request.execute.side_effect = Exception("not found")
+        return request
+
+    mock_svc.users().messages().get.side_effect = _messages_get
+    mock_svc.users().threads().get.side_effect = _threads_get
+    return mock_svc
+
+
 # ── Archive ──────────────────────────────────────────────────────────────────
 
 
@@ -239,6 +270,76 @@ class TestGmailCompose:
         assert resp.status_code == 404
 
 
+class TestGmailReplyRouting:
+    def test_reply_auto_routes_to_message_owner(self, client):
+        c, state = client
+        owner_svc = _mock_gmail_service_for_ids(message_ids={"owner-msg"})
+        other_svc = _mock_gmail_service_for_ids()
+        state.gmail_services = {
+            "default@gmail.com": other_svc,
+            "owner@gmail.com": owner_svc,
+        }
+
+        with patch("inbox_server.gmail_reply", return_value=True) as mock_reply:
+            resp = c.post(
+                "/messages/gmail/reply",
+                json={
+                    "msg_id": "owner-msg",
+                    "body": "test body",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "account": "owner@gmail.com"}
+        assert mock_reply.call_args[0][0] is owner_svc
+
+    def test_reply_auto_routes_to_thread_owner(self, client):
+        c, state = client
+        owner_svc = _mock_gmail_service_for_ids(thread_ids={"owner-thread"})
+        other_svc = _mock_gmail_service_for_ids()
+        state.gmail_services = {
+            "default@gmail.com": other_svc,
+            "owner@gmail.com": owner_svc,
+        }
+
+        with patch("inbox_server.gmail_reply", return_value=True) as mock_reply:
+            resp = c.post(
+                "/messages/gmail/reply",
+                json={
+                    "msg_id": "",
+                    "thread_id": "owner-thread",
+                    "body": "test body",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "account": "owner@gmail.com"}
+        assert mock_reply.call_args[0][0] is owner_svc
+
+    def test_reply_explicit_account_bypasses_auto_routing(self, client):
+        c, state = client
+        explicit_svc = _mock_gmail_service_for_ids()
+        owner_svc = _mock_gmail_service_for_ids(message_ids={"owner-msg"})
+        state.gmail_services = {
+            "explicit@gmail.com": explicit_svc,
+            "owner@gmail.com": owner_svc,
+        }
+
+        with patch("inbox_server.gmail_reply", return_value=True) as mock_reply:
+            resp = c.post(
+                "/messages/gmail/reply",
+                json={
+                    "account": "explicit@gmail.com",
+                    "msg_id": "owner-msg",
+                    "body": "test body",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "account": "explicit@gmail.com"}
+        assert mock_reply.call_args[0][0] is explicit_svc
+
+
 # ── Gmail conversations by label ─────────────────────────────────────────────
 
 
@@ -274,6 +375,38 @@ class TestGmailConversationsByLabel:
         # Verify INBOX was used as default
         call_kwargs = mock_fn.call_args
         assert call_kwargs[1]["label_id"] == "INBOX"
+
+
+class TestConversationsAccountFiltering:
+    def test_list_conversations_respects_gmail_account_filter(self, client):
+        c, state = client
+        state.gmail_services = {
+            "one@gmail.com": MagicMock(),
+            "two@gmail.com": MagicMock(),
+        }
+
+        from services import Contact
+
+        def _contacts_for_account(service, account_email, limit=20):
+            return [
+                Contact(
+                    id=f"{account_email}-msg",
+                    name=account_email,
+                    source="gmail",
+                    snippet="subject",
+                    unread=0,
+                    last_ts=datetime(2026, 4, 10),
+                    gmail_account=account_email,
+                )
+            ]
+
+        with patch("inbox_server.gmail_contacts", side_effect=_contacts_for_account):
+            resp = c.get("/conversations", params={"source": "gmail", "account": "two@gmail.com"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["gmail_account"] == "two@gmail.com"
 
 
 # ── Messages with attachments ────────────────────────────────────────────────

@@ -5,7 +5,6 @@ cwd = "/Users/jwalinshah/projects/inbox"
 
 [mcp_servers.inbox.env]
 INBOX_SERVER_URL = "http://127.0.0.1:9849"
-INBOX_SERVER_TOKEN = "replace-with-your-inbox-server-token"
 
 [mcp_servers.inbox_readonly]
 command = "uv"
@@ -14,4 +13,3 @@ cwd = "/Users/jwalinshah/projects/inbox"
 
 [mcp_servers.inbox_readonly.env]
 INBOX_SERVER_URL = "http://127.0.0.1:9849"
-INBOX_SERVER_TOKEN = "replace-with-your-inbox-server-token"

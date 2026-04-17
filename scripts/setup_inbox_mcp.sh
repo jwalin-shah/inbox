@@ -19,6 +19,7 @@ copy_env_template() {
     echo "config/inbox.env already exists"
   else
     cp "$ENV_EXAMPLE" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
     echo "created config/inbox.env from template"
   fi
 }
@@ -73,8 +74,10 @@ Gemini CLI:
     $ROOT_DIR/config/gemini-settings.inbox.example.json
 
 Codex:
-  Merge this into ~/.codex/config.toml using your local MCP server section format:
+  Sync the MCP sections from:
     $ROOT_DIR/config/codex.inbox.example.toml
+  Keep INBOX_SERVER_TOKEN in your shell environment or secret store rather than
+  embedding it in ~/.codex/config.toml.
 
 Remote safer endpoint:
   Expose the read-only MCP service first via Caddy:

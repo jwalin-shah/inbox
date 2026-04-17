@@ -24,7 +24,7 @@ LABEL_QUERIES = {
 def main():
     """Tag emails by category using existing labels."""
     # Auth
-    gmail_svcs, _, _, _, _ = google_auth_all()
+    gmail_svcs, _, _, _, _, _ = google_auth_all()
     if not gmail_svcs:
         print("ERROR: No Gmail accounts authenticated")
         return 1

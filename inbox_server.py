@@ -1079,7 +1079,7 @@ async def health():
 # ── Conversations ────────────────────────────────────────────────────────────
 
 
-async def _fetch_conversations(source: str, limit: int) -> list[Contact]:
+async def _fetch_conversations(source: str, limit: int, account: str = "") -> list[Contact]:
     """Fetch conversations from all requested sources in parallel.
 
     iMessage and Gmail fetches run concurrently via asyncio.gather().
@@ -1091,7 +1091,12 @@ async def _fetch_conversations(source: str, limit: int) -> list[Contact]:
         fetch_tasks.append(asyncio.create_task(asyncio.to_thread(imsg_contacts, limit=limit)))
 
     if source in ("all", "gmail"):
-        for email, svc in state.gmail_services.items():
+        targets = (
+            {account: state.gmail_services[account]}
+            if account and account in state.gmail_services
+            else state.gmail_services
+        )
+        for email, svc in targets.items():
             fetch_tasks.append(
                 asyncio.create_task(asyncio.to_thread(gmail_contacts, svc, email, limit=limit))
             )
@@ -1108,8 +1113,8 @@ async def _fetch_conversations(source: str, limit: int) -> list[Contact]:
 
 
 @app.get("/conversations", response_model=list[ConversationOut])
-async def list_conversations(source: str = "all", limit: int = 50):
-    results = await _fetch_conversations(source, limit)
+async def list_conversations(source: str = "all", limit: int = 50, account: str = ""):
+    results = await _fetch_conversations(source, limit, account)
 
     results.sort(key=lambda c: c.last_ts, reverse=True)
 
@@ -1184,6 +1189,51 @@ def _get_gmail_service_for_account(account: str = "") -> tuple[str, object]:
     if not svc:
         raise HTTPException(404, "No Gmail account available")
     return acct, svc
+
+
+def _gmail_message_or_thread_exists(service: object, msg_id: str = "", thread_id: str = "") -> bool:
+    """Return True if the Gmail message or thread exists in the given mailbox."""
+    try:
+        if msg_id:
+            (
+                service.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=msg_id,
+                    format="metadata",
+                    metadataHeaders=["Message-ID"],
+                )
+                .execute()
+            )
+            return True
+        if thread_id:
+            service.users().threads().get(userId="me", id=thread_id, format="metadata").execute()
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _get_gmail_service_for_message(
+    msg_id: str = "",
+    thread_id: str = "",
+    account: str = "",
+) -> tuple[str, object]:
+    """Resolve the mailbox that owns a Gmail message/thread, falling back conservatively."""
+    if account:
+        return _get_gmail_service_for_account(account)
+
+    for cache_id in filter(None, [msg_id, thread_id]):
+        contact = state.conv_cache.get(_cache_key("gmail", cache_id))
+        if contact and contact.gmail_account in state.gmail_services:
+            return contact.gmail_account, state.gmail_services[contact.gmail_account]
+
+    for acct, svc in state.gmail_services.items():
+        if _gmail_message_or_thread_exists(svc, msg_id=msg_id, thread_id=thread_id):
+            return acct, svc
+
+    return _get_gmail_service_for_account("")
 
 
 def _get_sheets_service_for_account(account: str = "") -> tuple[str, object]:
@@ -1316,7 +1366,7 @@ async def compose_email(req: ComposeRequest):
 
 @app.post("/messages/gmail/reply")
 async def reply_gmail(req: GmailReplyRequest):
-    acct, svc = _get_gmail_service_for_account(req.account)
+    acct, svc = _get_gmail_service_for_message(req.msg_id, req.thread_id, req.account)
     ok = await asyncio.to_thread(
         gmail_reply,
         svc,
@@ -2845,12 +2895,13 @@ async def add_account():
     if not email:
         raise HTTPException(400, "Failed to add account — no credentials.json")
     # Reload all services
-    gmail, cal, drive, sheets, docs = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets, docs, tasks = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
     state.sheets_services = sheets
     state.docs_services = docs
+    state.tasks_services = tasks
     return {"email": email}
 
 
@@ -2861,12 +2912,13 @@ async def reauth_account(req: AccountRequest):
     email = await asyncio.to_thread(reauth_google_account, req.email)
     if not email:
         raise HTTPException(400, "Re-auth failed")
-    gmail, cal, drive, sheets, docs = await asyncio.to_thread(google_auth_all)
+    gmail, cal, drive, sheets, docs, tasks = await asyncio.to_thread(google_auth_all)
     state.gmail_services = gmail
     state.cal_services = cal
     state.drive_services = drive
     state.sheets_services = sheets
     state.docs_services = docs
+    state.tasks_services = tasks
     return {"email": email}
 
 
