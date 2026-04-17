@@ -1,0 +1,9 @@
+Task goal:
+{goal}
+
+Session id: {session_id}
+
+Execution notes:
+- use the selected profile boundaries
+- keep intermediate output concise
+- store durable session state under agents/sessions/
