@@ -21,6 +21,7 @@ from starlette.routing import Mount, Route
 import ambient_notes
 from mcp_backend import InboxBackend, InboxBackendError
 from memory_store import MemoryStore
+from tools_registry import register_all as _register_registry_tools
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -91,20 +92,6 @@ async def health(_request: Request) -> JSONResponse:
             "auth_enabled": bool(_public_token()),
         }
     )
-
-
-@mcp.tool()
-async def list_inbox_threads(limit: int = 20, account: str = "") -> list[dict]:
-    """List recent Gmail inbox threads across linked accounts."""
-    return await backend.list_inbox_threads(limit=limit, account=account)
-
-
-@mcp.tool()
-async def search_email(
-    query: str, limit: int = 20, account: str = "", label: str = ""
-) -> list[dict]:
-    """Search Gmail across linked accounts using Gmail query syntax."""
-    return await backend.search_email(query=query, limit=limit, account=account, label=label)
 
 
 @mcp.tool()
@@ -259,6 +246,9 @@ async def list_gmail_labels(account: str = "") -> list[dict]:
 async def check_calendar_conflicts(start: str, end: str, account: str = "") -> dict:
     """Find calendar conflicts in a time range. Returns list of conflicting events."""
     return await backend.check_calendar_conflicts(start=start, end=end, account=account)
+
+
+_register_registry_tools(mcp, backend, readonly_only=True)
 
 
 app = Starlette(

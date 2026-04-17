@@ -30,6 +30,7 @@ from starlette.routing import Mount, Route
 import ambient_notes
 from mcp_backend import InboxBackend, InboxBackendError
 from memory_store import MemoryStore
+from tools_registry import register_all as _register_registry_tools
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -108,47 +109,9 @@ async def health(_request: Request) -> JSONResponse:
 
 
 @mcp.tool()
-async def list_inbox_threads(limit: int = 20, account: str = "") -> list[dict]:
-    """List recent Gmail inbox threads across linked accounts."""
-    return await backend.list_inbox_threads(limit=limit, account=account)
-
-
-@mcp.tool()
-async def search_email(
-    query: str, limit: int = 20, account: str = "", label: str = ""
-) -> list[dict]:
-    """Search Gmail across linked accounts using Gmail query syntax."""
-    return await backend.search_email(query=query, limit=limit, account=account, label=label)
-
-
-@mcp.tool()
 async def get_email_thread(message_id: str, thread_id: str = "") -> list[dict]:
     """Fetch a Gmail thread by message id and optional thread id."""
     return await backend.get_email_thread(message_id=message_id, thread_id=thread_id)
-
-
-@mcp.tool()
-async def send_email_reply(
-    message_id: str,
-    body: str,
-    confirm: bool = False,
-    thread_id: str = "",
-    to: str = "",
-    subject: str = "",
-    message_id_header: str = "",
-    account: str = "",
-) -> dict:
-    """Send a Gmail reply. This tool is confirmation-gated."""
-    _require_confirmation(confirm, "send_email_reply")
-    return await backend.send_email_reply(
-        msg_id=message_id,
-        body=body,
-        thread_id=thread_id,
-        to=to,
-        subject=subject,
-        message_id_header=message_id_header,
-        account=account,
-    )
 
 
 @mcp.tool()
@@ -699,6 +662,9 @@ async def extract_and_save_memory(
     if auto_save:
         _require_confirmation(confirm, "extract_and_save_memory")
     return await backend.extract_memory(text=text, source=source, auto_save=auto_save)
+
+
+_register_registry_tools(mcp, backend, readonly_only=False)
 
 
 app = Starlette(
