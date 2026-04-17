@@ -18,7 +18,7 @@ Primary checkout `~/projects/inbox` (port 9849) is the daily-driver inbox — ke
 Layout:
 ```
 ~/projects/inbox/                         — main branch, port 9849, daily driver
-~/projects/inbox-dev/                     — feat/evals branch, port 9850, active dev
+~/projects/inbox-<topic>/                 — feature-branch worktree, port 9850+, active dev
 ~/projects/inbox/.claude/worktrees/dev/   — worktree-dev branch (legacy, for agent runs)
 ```
 
@@ -64,10 +64,6 @@ memory_store.py   — persistent memory storage for conversations and state
 tokens/           — per-account Google OAuth tokens (auto-created)
 credentials.json  — Google OAuth client secret (never commit)
 github_token.txt  — GitHub personal access token (never commit)
-evals/            — evaluation framework for benchmarking LLM performance
-  runners/        — LLM runner implementations (Claude, Codex, Gemini)
-  judges/         — evaluation judges (score model outputs)
-  run_evals.py    — evaluation test runner
 ```
 
 ## Utility scripts
@@ -255,31 +251,6 @@ POST /notifications/test  {"title", "body"}
 - **scheduler.py** — background task scheduler for recurring operations (cleanup, reminders, etc.)
 - Persistent task state stored in `.inbox_scheduler.sqlite3`
 - Runs concurrently with server, survives restarts
-
-## Evaluation Framework
-- **evals/** — benchmarking suite for LLM performance
-- **runners/** — pluggable LLM runners: Claude (Claude API), Codex (OpenAI), Gemini (Google)
-- **judges/** — evaluation judges score model outputs against test cases
-- **run_evals.py** — test runner orchestrates judge + runner pairs, produces results
-- Enables comparing LLM performance across multiple models on shared test sets
-
-Run a suite (must `cd evals/` — `run_evals.py` uses `sys.path` insert, not package imports):
-```bash
-cd ~/projects/inbox-dev/evals
-uv run python run_evals.py --suite tasks/inbox-search.json --agent claude
-uv run python run_evals.py --suite tasks/inbox-search.json --agent claude,codex,gemini  # side-by-side
-```
-Results land in `evals/results/` (gitignored), timestamped per suite+agent. The orchestrator auto-diffs against the previous run for the same suite and surfaces regressions (≥1 point overall drop).
-
-Known gaps (work-in-progress for the `feat/evals` worktree):
-- `anthropic` SDK is not in `pyproject.toml` yet — add via `uv add anthropic` before running the Claude runner
-- Only one task suite exists (`tasks/inbox-search.json`); need real test cases for email categorization, calendar conflict detection, reminder extraction, etc.
-- No CI hookup — runs are manual
-
-Required env per runner:
-- Claude: `ANTHROPIC_API_KEY`
-- Codex: OpenAI Codex CLI installed and authed (`codex_home/` per worktree)
-- Gemini: `gemini_api_key.txt` at repo root (also used by services.py)
 
 ## LLM + Audio stack
 - **LLM**: Qwen3.5-0.8B-MLX-4bit (~500MB) — shared singleton for extraction + autocomplete
