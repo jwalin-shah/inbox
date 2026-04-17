@@ -10,6 +10,44 @@ uv run python inbox.py          # starts server automatically + TUI
 uv run python inbox_server.py   # server only (for agent access)
 ```
 
+Server port is configurable via `INBOX_SERVER_PORT` (default 9849). Client honors `INBOX_SERVER_URL` (default `http://127.0.0.1:$INBOX_SERVER_PORT`). Setting either lets a second copy run alongside the primary instance — see Worktree dev workflow.
+
+## Worktree dev workflow
+Primary checkout `~/projects/inbox` (port 9849) is the daily-driver inbox — keep it running. All in-progress development happens in a separate git worktree on its own branch and port so the primary never gets disrupted.
+
+Layout:
+```
+~/projects/inbox/                         — main branch, port 9849, daily driver
+~/projects/inbox-dev/                     — feat/evals branch, port 9850, active dev
+~/projects/inbox/.claude/worktrees/dev/   — worktree-dev branch (legacy, for agent runs)
+```
+
+Create a new dev worktree:
+```bash
+cd ~/projects/inbox
+git worktree add ~/projects/inbox-<topic> -b feat/<topic> main
+```
+
+Run the dev copy on an alt port (won't collide with 9849):
+```bash
+cd ~/projects/inbox-dev
+./dev.sh                  # TUI+server on 9850 (sets INBOX_SERVER_PORT/URL)
+./dev.sh inbox_server.py  # server only
+```
+
+`dev.sh` exports `INBOX_SERVER_PORT=9850` and `INBOX_SERVER_URL=http://127.0.0.1:9850`. Pick a different port per worktree if running more than one (9851, 9852, …).
+
+Tear down when merged:
+```bash
+git worktree remove ~/projects/inbox-<topic>
+git branch -d feat/<topic>
+```
+
+Caveats:
+- macOS data-source paths (iMessage, Notes, Reminders, AddressBook) are shared across worktrees — both copies read the same SQLite DBs. Avoid concurrent mutations from both UIs.
+- Google token files in `tokens/` live per-checkout (gitignored). The dev worktree starts with no tokens — re-auth via `Ctrl+A` or copy `tokens/` over from primary if you want shared accounts.
+- MCP backend (`mcp_backend.py`) defaults to 9849. To point an agent at the dev server, set `INBOX_SERVER_URL=http://127.0.0.1:9850` in its env.
+
 ## Architecture
 ```
 services.py       — data access layer (iMessage, Gmail, Calendar, Sheets, Docs, Notes, Reminders, GitHub, Drive, auth, LLM, audio)
@@ -224,6 +262,24 @@ POST /notifications/test  {"title", "body"}
 - **judges/** — evaluation judges score model outputs against test cases
 - **run_evals.py** — test runner orchestrates judge + runner pairs, produces results
 - Enables comparing LLM performance across multiple models on shared test sets
+
+Run a suite (must `cd evals/` — `run_evals.py` uses `sys.path` insert, not package imports):
+```bash
+cd ~/projects/inbox-dev/evals
+uv run python run_evals.py --suite tasks/inbox-search.json --agent claude
+uv run python run_evals.py --suite tasks/inbox-search.json --agent claude,codex,gemini  # side-by-side
+```
+Results land in `evals/results/` (gitignored), timestamped per suite+agent. The orchestrator auto-diffs against the previous run for the same suite and surfaces regressions (≥1 point overall drop).
+
+Known gaps (work-in-progress for the `feat/evals` worktree):
+- `anthropic` SDK is not in `pyproject.toml` yet — add via `uv add anthropic` before running the Claude runner
+- Only one task suite exists (`tasks/inbox-search.json`); need real test cases for email categorization, calendar conflict detection, reminder extraction, etc.
+- No CI hookup — runs are manual
+
+Required env per runner:
+- Claude: `ANTHROPIC_API_KEY`
+- Codex: OpenAI Codex CLI installed and authed (`codex_home/` per worktree)
+- Gemini: `gemini_api_key.txt` at repo root (also used by services.py)
 
 ## LLM + Audio stack
 - **LLM**: Qwen3.5-0.8B-MLX-4bit (~500MB) — shared singleton for extraction + autocomplete
