@@ -1020,7 +1020,13 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(close_sqlite_connections)
 
 
-app = FastAPI(title="Inbox API", lifespan=lifespan)
+app = FastAPI(
+    title="Inbox API",
+    lifespan=lifespan,
+    docs_url="/api-docs",
+    redoc_url="/api-redoc",
+    openapi_url="/api-openapi.json",
+)
 
 
 def _auth_token() -> str:
