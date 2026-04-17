@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import subprocess
 import threading
 import time
 import webbrowser
@@ -972,6 +973,88 @@ class BriefingModal(ModalScreen):
 
         with Vertical():
             yield Static(t)
+
+
+class AssistantPromptModal(ModalScreen[str | None]):
+    DEFAULT_CSS = """
+    AssistantPromptModal {
+        align: center middle;
+    }
+    AssistantPromptModal > Vertical {
+        width: 72;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    #assistant-query {
+        width: 1fr;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [("escape", "cancel", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(
+                "[bold cyan]Ask Inbox Assistant[/]\n"
+                "[dim]Readonly local Codex session with Inbox MCP attached.[/]"
+            )
+            yield Input(placeholder="Ask about the current selection…", id="assistant-query")
+
+    def on_mount(self) -> None:
+        self.query_one("#assistant-query", Input).focus()
+
+    @on(Input.Submitted, "#assistant-query")
+    def on_query_submitted(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        self.dismiss(query or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class AssistantResultModal(ModalScreen):
+    DEFAULT_CSS = """
+    AssistantResultModal {
+        align: center middle;
+    }
+    AssistantResultModal > Vertical {
+        width: 88;
+        height: auto;
+        max-height: 85%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    #assistant-result-body {
+        height: 1fr;
+        overflow-y: auto;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, query: str, result_text: str, status_line: str) -> None:
+        super().__init__()
+        self._query = query
+        self._result_text = result_text
+        self._status_line = status_line
+
+    def compose(self) -> ComposeResult:
+        header = Text()
+        header.append("Inbox Assistant\n", style="bold cyan")
+        header.append(f"{self._query}\n", style="white")
+        header.append(self._status_line, style="dim")
+        with Vertical():
+            yield Static(header)
+            with ScrollableContainer(id="assistant-result-body"):
+                yield Static(Text(self._result_text))
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
 
 
 # ── Main App ─────────────────────────────────────────────────────────────────
@@ -3740,6 +3823,96 @@ class InboxApp(App):
         """Fetch and show the morning briefing modal."""
         self.query_one("#status", Static).update("[yellow]Loading briefing...[/]")
         self._do_fetch_briefing()
+
+    def action_ask_assistant(self) -> None:
+        """Prompt for a readonly assistant query against the current Inbox context."""
+        self.push_screen(AssistantPromptModal(), self._on_assistant_prompt)
+
+    def _on_assistant_prompt(self, query: str | None) -> None:
+        if not query:
+            return
+        self.query_one("#status", Static).update("[yellow]Running Inbox assistant...[/]")
+        self._do_run_readonly_assistant(query, self._assistant_context())
+
+    def _assistant_context(self) -> str:
+        parts = [f"Active tab: {self._active_filter}"]
+        selected: dict | None = None
+
+        if self._active_filter in ("all", "imessage", "gmail"):
+            selected = self.active_conv
+        elif self._active_filter == "calendar":
+            selected = self.active_event
+        elif self._active_filter == "reminders":
+            selected = self.active_reminder
+        elif self._active_filter == "github":
+            selected = self.active_notification
+        elif self._active_filter == "drive":
+            selected = self.active_drive_file
+
+        if not selected:
+            return "\n".join(parts)
+
+        summary_lines = []
+        for key in (
+            "source",
+            "name",
+            "id",
+            "thread_id",
+            "snippet",
+            "summary",
+            "title",
+            "body",
+            "location",
+            "start",
+            "end",
+            "gmail_account",
+            "email",
+            "url",
+        ):
+            value = selected.get(key)
+            if value:
+                summary_lines.append(f"{key}: {value}")
+        if summary_lines:
+            parts.append("Selected item:")
+            parts.extend(summary_lines[:12])
+        return "\n".join(parts)
+
+    @work(thread=True, exit_on_error=False)
+    def _do_run_readonly_assistant(self, query: str, context_text: str) -> None:
+        try:
+            from agents.runner import Supervisor
+
+            result = Supervisor().run_codex_exec(
+                profile_name="readonly",
+                goal=query,
+                context_text=context_text,
+            )
+        except subprocess.TimeoutExpired:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Inbox assistant timed out[/]",
+            )
+            return
+        except FileNotFoundError:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                "[red]Codex CLI not found on PATH[/]",
+            )
+            return
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[red]Inbox assistant failed: {exc}[/]",
+            )
+            return
+
+        self.call_from_thread(self._show_assistant_result, query, result)
+
+    def _show_assistant_result(self, query: str, result) -> None:
+        status = "succeeded" if result.success else "failed"
+        self.query_one("#status", Static).update(f"[dim]Inbox assistant {status}[/]")
+        status_line = f"Session {result.session_id} · {status}"
+        self.push_screen(AssistantResultModal(query, result.message, status_line))
 
     @work(thread=True, exit_on_error=False)
     def _do_fetch_briefing(self) -> None:

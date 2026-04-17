@@ -251,6 +251,13 @@ def build_commands(app: Any) -> list[CommandDict]:
             "Action",
             act("action_mark_all_notifications_read"),
         ),
+        make_command(
+            "ask_inbox_assistant",
+            "Ask Inbox Assistant",
+            "Run a readonly local assistant against the current Inbox context",
+            "AI",
+            act("action_ask_assistant"),
+        ),
         # Create
         make_command(
             "new_event",

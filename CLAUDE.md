@@ -26,6 +26,10 @@ memory_store.py   — persistent memory storage for conversations and state
 tokens/           — per-account Google OAuth tokens (auto-created)
 credentials.json  — Google OAuth client secret (never commit)
 github_token.txt  — GitHub personal access token (never commit)
+evals/            — evaluation framework for benchmarking LLM performance
+  runners/        — LLM runner implementations (Claude, Codex, Gemini)
+  judges/         — evaluation judges (score model outputs)
+  run_evals.py    — evaluation test runner
 ```
 
 ## Utility scripts
@@ -213,6 +217,13 @@ POST /notifications/test  {"title", "body"}
 - **scheduler.py** — background task scheduler for recurring operations (cleanup, reminders, etc.)
 - Persistent task state stored in `.inbox_scheduler.sqlite3`
 - Runs concurrently with server, survives restarts
+
+## Evaluation Framework
+- **evals/** — benchmarking suite for LLM performance
+- **runners/** — pluggable LLM runners: Claude (Claude API), Codex (OpenAI), Gemini (Google)
+- **judges/** — evaluation judges score model outputs against test cases
+- **run_evals.py** — test runner orchestrates judge + runner pairs, produces results
+- Enables comparing LLM performance across multiple models on shared test sets
 
 ## LLM + Audio stack
 - **LLM**: Qwen3.5-0.8B-MLX-4bit (~500MB) — shared singleton for extraction + autocomplete
