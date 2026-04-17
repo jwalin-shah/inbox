@@ -5,6 +5,7 @@ Used by the TUI and agents to interact with inbox data.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -12,7 +13,8 @@ from pathlib import Path
 
 import httpx
 
-SERVER_URL = "http://127.0.0.1:9849"
+_DEFAULT_PORT = int(os.environ.get("INBOX_SERVER_PORT", "9849"))
+SERVER_URL = os.environ.get("INBOX_SERVER_URL", f"http://127.0.0.1:{_DEFAULT_PORT}")
 SERVER_SCRIPT = Path(__file__).parent / "inbox_server.py"
 
 
