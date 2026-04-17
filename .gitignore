@@ -43,3 +43,12 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# Agent runtime artifacts
+agents/codex_home/
+agents/sessions/
+agents/logs/
+
+# Eval runtime artifacts
+evals/results/
+evals/__pycache__/
