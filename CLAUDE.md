@@ -35,7 +35,14 @@ cd ~/projects/inbox-dev
 ./dev.sh inbox_server.py  # server only
 ```
 
-`dev.sh` exports `INBOX_SERVER_PORT=9850` and `INBOX_SERVER_URL=http://127.0.0.1:9850`. Pick a different port per worktree if running more than one (9851, 9852, …).
+`dev.sh` defaults to `INBOX_SERVER_PORT=9850` and `INBOX_SERVER_URL=http://127.0.0.1:9850`. Override per worktree if needed:
+
+```bash
+INBOX_SERVER_PORT=9851 ./dev.sh
+INBOX_SERVER_PORT=9851 ./dev.sh inbox_server.py
+```
+
+If the server URL is not overridden explicitly, `dev.sh` derives `INBOX_SERVER_URL` from `INBOX_SERVER_PORT`.
 
 Tear down when merged:
 ```bash
@@ -47,6 +54,26 @@ Caveats:
 - macOS data-source paths (iMessage, Notes, Reminders, AddressBook) are shared across worktrees — both copies read the same SQLite DBs. Avoid concurrent mutations from both UIs.
 - Google token files in `tokens/` live per-checkout (gitignored). The dev worktree starts with no tokens — re-auth via `Ctrl+A` or copy `tokens/` over from primary if you want shared accounts.
 - MCP backend (`mcp_backend.py`) defaults to 9849. To point an agent at the dev server, set `INBOX_SERVER_URL=http://127.0.0.1:9850` in its env.
+
+## Primary vs Dev MCP routing
+
+Primary should keep using `http://127.0.0.1:9849`.
+
+When testing a dev worktree, point the assistant client at the dev backend instead:
+
+```json
+{
+  "env": {
+    "INBOX_SERVER_URL": "http://127.0.0.1:9850",
+    "INBOX_SERVER_TOKEN": "${INBOX_SERVER_TOKEN}"
+  }
+}
+```
+
+Rules:
+- never reuse a primary MCP config when you intend to test dev
+- if an agent is supposed to exercise dev, verify both `cwd` and `INBOX_SERVER_URL`
+- if requests appear to "work" but reflect the wrong data, assume the client is still pointed at 9849 first
 
 ## Architecture
 ```
@@ -100,6 +127,7 @@ POST /search  {"q", "sources": [str], "limit"}
 GET  /gmail/labels?account=...
 POST /gmail/batch-modify  {"msg_ids": [str], "add_label_ids": [str], "remove_label_ids": [str], "account"}
 POST /gmail/filters  {"from_filter", "subject_filter", "add_label_ids": [str], "remove_label_ids": [str], "account"}
+POST /preflight/write  {"operation", "args"}  # validates write op before execution
 GET  /calendar/events?date=YYYY-MM-DD
 POST /calendar/events  {"summary", "start", "end", "attendees", ...}
 POST /calendar/events/quick  {"text": "Meeting 2pm-3pm @ Office"}
@@ -218,6 +246,7 @@ POST /notifications/test  {"title", "body"}
 - **Label management**: list labels, batch modify labels on messages, create filters
 - **Cross-source search**: `/search` endpoint queries iMessage, Gmail, Calendar, Notes with unified results
 - **Batch operations**: apply/remove multiple labels across many messages
+- **Thread enrichment**: Gmail threads normalized with AI-generated summaries and action item extraction
 
 ## GitHub
 - Personal access token in `github_token.txt` (needs `notifications` + `repo` scopes)
@@ -240,6 +269,7 @@ POST /notifications/test  {"title", "body"}
 - Scopes: `gmail.readonly` + `gmail.send` + `calendar` + `drive` + `spreadsheets` + `documents` (full read/write)
 - **Note**: New `documents` scope added for Docs integration; users must re-auth once via `/accounts/reauth`
 - Token locking via `token.json.lock` prevents concurrent access conflicts
+- **Account routing**: Write endpoints use account-specific service helpers (_get_cal_service_for_account, _get_drive_service_for_account, etc.) with fallback logic when account not specified
 
 ## MCP Server
 - **mcp_server.py** — stdio-based MCP server for Claude integration
@@ -280,6 +310,8 @@ POST /notifications/test  {"title", "body"}
 - **Flattened module structure** — LLM and audio logic integrated into main services rather than nested directories
 - **Tab state preservation** — switching between tabs preserves active conversation/event selection so returning to a tab shows the same context
 - **Vim mode** — optional navigation via j/k/g/G in focused lists/tables, respects focused text input (doesn't interfere with compose)
+- **Preflight validation** — Write operations validated against scope/permission checks before execution to catch errors early
+- **Gmail account routing policy** — When account not specified for writes, uses fallback logic to select default (prioritizes message owner account for replies)
 
 ## Data sources
 - **iMessage**: `~/Library/Messages/chat.db` (read-only SQLite)

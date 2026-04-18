@@ -62,6 +62,83 @@ Best practice:
 
 Both point to the same private Inbox backend.
 
+## Primary vs Dev Testing
+
+Use two separate backend targets when you want to test a worktree without disturbing daily use.
+
+Recommended split:
+- primary checkout: `~/projects/inbox` -> `http://127.0.0.1:9849`
+- dev checkout: `~/projects/inbox-<topic>` -> `http://127.0.0.1:9850` by default
+
+Start the dev backend from the worktree:
+
+```bash
+cd ~/projects/inbox-<topic>
+./dev.sh inbox_server.py
+```
+
+Or run the full dev TUI + backend:
+
+```bash
+cd ~/projects/inbox-<topic>
+./dev.sh
+```
+
+Override the default dev port when running multiple worktrees:
+
+```bash
+cd ~/projects/inbox-<topic>
+INBOX_SERVER_PORT=9851 ./dev.sh inbox_server.py
+```
+
+### Critical Rule
+
+Running the dev backend is not enough by itself.
+
+Your MCP client must also point to the dev backend. Otherwise the assistant will silently keep talking to primary on `9849`.
+
+For dev testing, always update:
+- `cwd` to the worktree path
+- `INBOX_SERVER_URL` to the dev backend URL
+- `INBOX_SERVER_TOKEN` so MCP can still reach the private backend
+
+Example dev Codex config:
+
+```toml
+[mcp_servers.inbox]
+command = "uv"
+args = ["run", "python", "inbox_mcp_stdio.py"]
+cwd = "/Users/jwalinshah/projects/inbox-my-branch"
+
+[mcp_servers.inbox.env]
+INBOX_SERVER_URL = "http://127.0.0.1:9850"
+INBOX_SERVER_TOKEN = "${INBOX_SERVER_TOKEN}"
+```
+
+Example dev Cursor/Claude-style env block:
+
+```json
+{
+  "cwd": "/Users/jwalinshah/projects/inbox-my-branch",
+  "env": {
+    "INBOX_SERVER_URL": "http://127.0.0.1:9850",
+    "INBOX_SERVER_TOKEN": "${INBOX_SERVER_TOKEN}"
+  }
+}
+```
+
+### Common Failure Mode
+
+Symptoms:
+- the dev server is running
+- requests succeed
+- but results match the primary environment
+
+Cause:
+- the MCP client is still pointed at `http://127.0.0.1:9849`
+
+Check the client config before debugging the backend.
+
 ## Tokens
 
 Use two different tokens at minimum.

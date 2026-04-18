@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Dev launcher for inbox-dev worktree. Runs server+TUI on port 9850 so the
-# primary ~/projects/inbox instance on 9849 keeps working uninterrupted.
+# Dev launcher for an inbox worktree. Defaults to port 9850 so the primary
+# ~/projects/inbox instance on 9849 keeps working uninterrupted.
 set -euo pipefail
-export INBOX_SERVER_PORT=9851
-export INBOX_SERVER_URL="http://127.0.0.1:9851"
-cd "$(dirname "$0")"
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export INBOX_SERVER_PORT="${INBOX_SERVER_PORT:-9850}"
+export INBOX_SERVER_URL="${INBOX_SERVER_URL:-http://127.0.0.1:${INBOX_SERVER_PORT}}"
+
+cd "$ROOT_DIR"
 exec uv run python "${1:-inbox.py}"

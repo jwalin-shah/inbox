@@ -46,3 +46,6 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# Hook-generated temp files
+CLAUDE.md.new

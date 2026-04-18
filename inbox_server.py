@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
 import os
+import re
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from secrets import compare_digest
@@ -34,6 +36,7 @@ from services import (
     Reminder,
     SheetTab,
     Spreadsheet,
+    ThreadSummary,
     add_google_account,
     ai_briefing,
     ai_extract_actions,
@@ -99,6 +102,7 @@ from services import (
     gmail_send,
     gmail_star,
     gmail_thread,
+    gmail_thread_summary,
     gmail_unstar,
     gmail_unsubscribe,
     google_auth_all,
@@ -210,6 +214,7 @@ class CalendarEventOut(BaseModel):
     recurrence: list[str] = []
     reminders: dict = {}
     recurring_event_id: str = ""
+    workflow: str = ""
 
 
 class CalendarOut(BaseModel):
@@ -340,6 +345,8 @@ class TaskOut(BaseModel):
     due: str | None = None
     notes: str = ""
     completed: str | None = None
+    account: str = ""
+    workflow: str = ""
 
 
 class TaskCreateRequest(BaseModel):
@@ -478,8 +485,81 @@ class DocumentOut(BaseModel):
     account: str = ""
 
 
+class PreflightResult(BaseModel):
+    kind: str
+    resolved_account: str
+    destination: str
+    destination_id: str
+    valid: bool
+    warnings: list[str] = []
+    explanation: str
+
+
+class GmailThreadSummaryOut(BaseModel):
+    thread_id: str
+    owning_account: str
+    participants: list[str]
+    subject: str
+    last_message_at: str
+    labels: list[str]
+    summary: str
+    action_items: list[str]
+    needs_reply: bool
+    workflow: str
+    message_count: int
+    rank: float = 0.0
+    brief: str = ""
+    rich_data: dict[str, str] = {}
+
+
+class ThreadBriefOut(BaseModel):
+    thread_id: str
+    brief: str
+    rank: float
+    workflow: str
+    needs_reply: bool
+
+
 class CreateDocumentRequest(BaseModel):
     title: str
+    account: str = ""
+
+
+class WorkflowEventRequest(BaseModel):
+    kind: str = ""  # "interview" | "deadline" | "meeting"
+    title: str
+    workflow: str = ""
+    start: str
+    end: str
+    location: str = ""
+    description: str = ""
+    attendees: list[dict[str, str]] = []
+    account: str = ""
+
+
+class NeedsActionOut(BaseModel):
+    threads: list[GmailThreadSummaryOut]
+    tasks: list[TaskOut]
+    events: list[CalendarEventOut]
+    workflow_counts: dict[str, int]
+
+
+class WorkflowFolderRequest(BaseModel):
+    workflow: str
+    name: str = ""
+    parent_id: str = ""
+    account: str = ""
+
+
+class WorkflowDocRequest(BaseModel):
+    title: str
+    workflow: str = ""
+    account: str = ""
+
+
+class WorkflowSheetRequest(BaseModel):
+    title: str
+    workflow: str = ""
     account: str = ""
 
 
@@ -645,6 +725,7 @@ def _event_to_out(e: CalendarEvent) -> CalendarEventOut:
         event_id=e.event_id,
         calendar_id=e.calendar_id,
         attendees=e.attendees,
+        workflow=_classify_workflow(f"{e.summary} {e.description}"),
     )
 
 
@@ -672,7 +753,7 @@ def _reminder_to_out(r: Reminder) -> ReminderOut:
     )
 
 
-def _task_to_out(t: GoogleTask) -> TaskOut:
+def _task_to_out(t: GoogleTask, account: str = "") -> TaskOut:
     return TaskOut(
         id=t.id,
         title=t.title,
@@ -682,6 +763,8 @@ def _task_to_out(t: GoogleTask) -> TaskOut:
         due=t.due.isoformat() if t.due else None,
         notes=t.notes,
         completed=t.completed.isoformat() if t.completed else None,
+        account=account,
+        workflow=_classify_workflow(f"{t.title} {t.notes}"),
     )
 
 
@@ -695,6 +778,38 @@ def _gh_notif_to_out(n: GitHubNotification) -> GitHubNotificationOut:
         unread=n.unread,
         updated_at=n.updated_at.isoformat(),
         url=n.url,
+    )
+
+
+def _thread_summary_to_out(ts: ThreadSummary, label_map: dict[str, str]) -> GmailThreadSummaryOut:
+    labels = [label_map.get(lid, lid) for lid in ts.label_ids if not lid.startswith("CATEGORY_")]
+    text = f"{ts.subject} {ts.body_text}"
+    workflow = _classify_workflow(text)
+    needs_reply = not ts.last_sender_is_me
+    action_items = _extract_action_items(ts.body_text)
+    last_iso = ts.last_message_at.isoformat()
+    rank = _rank_thread(last_iso, needs_reply, bool(action_items), workflow, ts.message_count)
+    sender = ts.participants[0] if ts.participants else "Unknown"
+    brief_parts = [f"{sender} \u00b7 {ts.subject[:60].rstrip()}"]
+    if needs_reply:
+        brief_parts.append("[needs reply]")
+    if workflow:
+        brief_parts.append(f"[{workflow}]")
+    return GmailThreadSummaryOut(
+        thread_id=ts.thread_id,
+        owning_account=ts.owning_account,
+        participants=ts.participants,
+        subject=ts.subject,
+        last_message_at=last_iso,
+        labels=labels,
+        summary=ts.last_message_body[:300].strip(),
+        action_items=action_items,
+        needs_reply=needs_reply,
+        workflow=workflow,
+        message_count=ts.message_count,
+        rank=rank,
+        brief=" ".join(brief_parts),
+        rich_data=_extract_rich_data(workflow, text),
     )
 
 
@@ -1442,6 +1557,85 @@ async def search_gmail(
     return [_contact_to_out(c) for c in results[:limit]]
 
 
+# ── Thread summaries ───────────────────────────────────────────────────────────
+
+
+@app.get("/gmail/threads/{thread_id}/summary", response_model=GmailThreadSummaryOut)
+async def get_gmail_thread_summary(thread_id: str, account: str = ""):
+    acct, svc = _get_gmail_service_for_message(thread_id=thread_id, account=account)
+    ts = await asyncio.to_thread(gmail_thread_summary, svc, thread_id, acct)
+    if ts is None:
+        raise HTTPException(404, "Thread not found")
+    label_data = await asyncio.to_thread(gmail_labels, svc)
+    label_map = {lbl["id"]: lbl["name"] for lbl in label_data}
+    return _thread_summary_to_out(ts, label_map)
+
+
+@app.get("/gmail/thread-summaries", response_model=list[GmailThreadSummaryOut])
+async def search_gmail_thread_summaries(
+    q: str = "",
+    workflow: str = "",
+    needs_reply: bool | None = None,
+    account: str = "",
+    limit: int = 20,
+):
+    """Search Gmail and return normalized thread summaries with workflow tags."""
+    acct, svc = _get_gmail_service_for_account(account)
+    contacts = await asyncio.to_thread(gmail_search, svc, acct, q, limit * 3)
+    seen: set[str] = set()
+    summaries: list[GmailThreadSummaryOut] = []
+    for c in contacts:
+        tid = c.thread_id or c.id
+        if tid in seen:
+            continue
+        seen.add(tid)
+        ts = _contact_to_thread_summary(c)
+        if workflow and ts.workflow != workflow:
+            continue
+        if needs_reply is not None and ts.needs_reply != needs_reply:
+            continue
+        summaries.append(ts)
+    summaries.sort(key=lambda t: t.rank, reverse=True)
+    return summaries[:limit]
+
+
+@app.get("/gmail/thread-briefs", response_model=list[ThreadBriefOut])
+async def get_gmail_thread_briefs(
+    q: str = "",
+    workflow: str = "",
+    needs_reply: bool | None = None,
+    account: str = "",
+    limit: int = 20,
+):
+    """Ultra-compact thread list for triage — brief + rank only, no body or participants."""
+    acct, svc = _get_gmail_service_for_account(account)
+    contacts = await asyncio.to_thread(gmail_search, svc, acct, q, limit * 3)
+    seen: set[str] = set()
+    raw: list[GmailThreadSummaryOut] = []
+    for c in contacts:
+        tid = c.thread_id or c.id
+        if tid in seen:
+            continue
+        seen.add(tid)
+        ts = _contact_to_thread_summary(c)
+        if workflow and ts.workflow != workflow:
+            continue
+        if needs_reply is not None and ts.needs_reply != needs_reply:
+            continue
+        raw.append(ts)
+    raw.sort(key=lambda t: t.rank, reverse=True)
+    return [
+        ThreadBriefOut(
+            thread_id=t.thread_id,
+            brief=t.brief,
+            rank=t.rank,
+            workflow=t.workflow,
+            needs_reply=t.needs_reply,
+        )
+        for t in raw[:limit]
+    ]
+
+
 @app.post("/gmail/batch-modify")
 async def batch_modify_gmail(req: GmailBatchModifyRequest):
     acct, svc = _get_gmail_service_for_account(req.account)
@@ -1523,10 +1717,7 @@ async def list_upcoming_events(days: int = 7):
 
 @app.post("/calendar/events")
 async def create_event(req: CreateEventRequest):
-    account = req.account or (next(iter(state.cal_services)) if state.cal_services else "")
-    svc = state.cal_services.get(account)
-    if not svc:
-        raise HTTPException(404, "No calendar account available")
+    account, svc = _get_cal_service_for_account(req.account)
 
     try:
         event_id = await asyncio.to_thread(
@@ -1547,10 +1738,7 @@ async def create_event(req: CreateEventRequest):
 
 @app.post("/calendar/events/quick")
 async def create_quick_event(req: QuickEventRequest):
-    account = req.account or (next(iter(state.cal_services)) if state.cal_services else "")
-    svc = state.cal_services.get(account)
-    if not svc:
-        raise HTTPException(404, "No calendar account available")
+    account, svc = _get_cal_service_for_account(req.account)
 
     parsed = parse_quick_event(req.text)
     try:
@@ -1575,10 +1763,7 @@ async def update_event(
     calendar_id: str = "primary",
     account: str = "",
 ):
-    acct = account or (next(iter(state.cal_services)) if state.cal_services else "")
-    svc = state.cal_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No calendar account available")
+    acct, svc = _get_cal_service_for_account(account)
 
     ok = await asyncio.to_thread(
         calendar_update_event,
@@ -1600,10 +1785,7 @@ async def delete_event(
     calendar_id: str = "primary",
     account: str = "",
 ):
-    acct = account or (next(iter(state.cal_services)) if state.cal_services else "")
-    svc = state.cal_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No calendar account available")
+    acct, svc = _get_cal_service_for_account(account)
 
     ok = await asyncio.to_thread(calendar_delete_event, svc, event_id, calendar_id)
     return {"ok": ok}
@@ -1732,10 +1914,14 @@ async def list_tasks(
     show_completed: bool = False,
     limit: int = 100,
     account: str = "",
+    workflow: str = "",
 ):
-    _, svc = _get_tasks_service_for_account(account)
-    tasks = await asyncio.to_thread(tasks_list, svc, list_id, show_completed, limit)
-    return [_task_to_out(t) for t in tasks]
+    acct, svc = _get_tasks_service_for_account(account)
+    raw = await asyncio.to_thread(tasks_list, svc, list_id, show_completed, limit)
+    out = [_task_to_out(t, acct) for t in raw]
+    if workflow:
+        out = [t for t in out if t.workflow == workflow]
+    return out
 
 
 @app.post("/tasks")
@@ -2238,10 +2424,7 @@ async def list_drive_files(
 async def download_drive_file(file_id: str, account: str = ""):
     from fastapi.responses import Response
 
-    acct = account or (next(iter(state.drive_services)) if state.drive_services else "")
-    svc = state.drive_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Drive account available")
+    acct, svc = _get_drive_service_for_account(account)
     result = await asyncio.to_thread(drive_download, svc, file_id)
     if not result:
         raise HTTPException(404, "File not found or download failed")
@@ -2251,10 +2434,7 @@ async def download_drive_file(file_id: str, account: str = ""):
 
 @app.get("/drive/files/{file_id}", response_model=DriveFileOut)
 async def get_drive_file(file_id: str, account: str = ""):
-    acct = account or (next(iter(state.drive_services)) if state.drive_services else "")
-    svc = state.drive_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Drive account available")
+    acct, svc = _get_drive_service_for_account(account)
     f = await asyncio.to_thread(drive_get, svc, file_id)
     if not f:
         raise HTTPException(404, "File not found")
@@ -2273,10 +2453,7 @@ async def upload_to_drive(
     import tempfile
     from pathlib import Path
 
-    acct = account or (next(iter(state.drive_services)) if state.drive_services else "")
-    svc = state.drive_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Drive account available")
+    acct, svc = _get_drive_service_for_account(account)
 
     # Save upload to temp file, then upload to Drive
     with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename}") as tmp:
@@ -2298,10 +2475,7 @@ async def upload_to_drive(
 
 @app.post("/drive/folder", response_model=DriveFileOut)
 async def create_drive_folder(req: DriveCreateFolderRequest):
-    acct = req.account or (next(iter(state.drive_services)) if state.drive_services else "")
-    svc = state.drive_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Drive account available")
+    acct, svc = _get_drive_service_for_account(req.account)
     result = await asyncio.to_thread(drive_create_folder, svc, req.name, parent_id=req.parent_id)
     if not result:
         raise HTTPException(500, "Failed to create folder")
@@ -2310,10 +2484,7 @@ async def create_drive_folder(req: DriveCreateFolderRequest):
 
 @app.delete("/drive/files/{file_id}")
 async def delete_drive_file(file_id: str, account: str = ""):
-    acct = account or (next(iter(state.drive_services)) if state.drive_services else "")
-    svc = state.drive_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Drive account available")
+    acct, svc = _get_drive_service_for_account(account)
     ok = await asyncio.to_thread(drive_delete, svc, file_id)
     return {"ok": ok}
 
@@ -2500,6 +2671,367 @@ def _get_docs_service_for_account(account: str = "") -> tuple[str, object]:
     return acct, state.docs_services[acct]
 
 
+_WORKFLOW_KEYWORDS: dict[str, list[str]] = {
+    "job_hunt": [
+        "recruiter",
+        "hiring",
+        "offer letter",
+        "interview",
+        "application",
+        "linkedin",
+        "resume",
+        "salary",
+        "compensation",
+        "candidate",
+        "onboarding",
+        "job description",
+        "cover letter",
+        "job offer",
+    ],
+    "legal": [
+        "attorney",
+        "legal counsel",
+        "contract",
+        "lawsuit",
+        "court",
+        "settlement",
+        "nda",
+        "litigation",
+        "subpoena",
+        "non-disclosure",
+    ],
+    "medical": [
+        "appointment",
+        "prescription",
+        "insurance claim",
+        "clinic",
+        "hospital",
+        "lab result",
+        "diagnosis",
+        "patient",
+        "referral",
+        "copay",
+        "doctor",
+        "medical",
+    ],
+    "finance": [
+        "invoice",
+        "payment due",
+        "tax return",
+        "bank statement",
+        "investment",
+        "reimbursement",
+        "payroll",
+        "billing",
+        "receipt",
+        "w-2",
+        "1099",
+    ],
+    "personal_admin": [
+        "dmv",
+        "renew",
+        "renewal",
+        "license plate",
+        "utility bill",
+        "lease",
+        "landlord",
+        "visa application",
+        "passport",
+    ],
+}
+
+_WORKFLOW_DISPLAY: dict[str, str] = {
+    "job_hunt": "Job Hunt",
+    "legal": "Legal",
+    "medical": "Medical",
+    "finance": "Finance",
+    "personal_admin": "Personal Admin",
+}
+
+_KIND_PREFIX: dict[str, str] = {
+    "interview": "[Interview]",
+    "deadline": "[Deadline]",
+    "meeting": "[Meeting]",
+}
+
+_ACTION_ITEM_RE = re.compile(
+    r"(?:please\s+\w[\w\s,]{5,80}|"
+    r"can you\s+\w[\w\s,]{5,80}|"
+    r"could you\s+\w[\w\s,]{5,80}|"
+    r"(?:Review|Send|Complete|Submit|Sign|Confirm|Approve|Update|Schedule|Respond|Reply|Attach|Forward)"
+    r"\s+\w[\w\s,]{3,80})"
+    r"[.!?]?",
+    re.IGNORECASE,
+)
+
+
+def _classify_workflow(text: str) -> str:
+    lower = text.lower()
+    for workflow, keywords in _WORKFLOW_KEYWORDS.items():
+        if any(kw in lower for kw in keywords):
+            return workflow
+    return ""
+
+
+def _extract_action_items(body: str) -> list[str]:
+    matches = _ACTION_ITEM_RE.findall(body)
+    seen: set[str] = set()
+    items: list[str] = []
+    for m in matches:
+        cleaned = m.strip()[:120]
+        key = cleaned.lower()[:40]
+        if key not in seen and cleaned:
+            seen.add(key)
+            items.append(cleaned)
+    return items[:5]
+
+
+_RICH_PATTERNS: dict[str, dict[str, re.Pattern]] = {
+    "job_hunt": {
+        "company": re.compile(
+            r"(?:at|from|with|@)\s+([A-Z][A-Za-z0-9&\s\-]{1,40}?)(?:\s+(?:Inc|LLC|Corp|Ltd|Co)\.?)?"
+            r"(?=[,\s]|$)",
+            re.IGNORECASE,
+        ),
+        "role": re.compile(
+            r"(?:position|role|opening|opportunity|for)\s*[:\-]?\s*([A-Za-z][A-Za-z\s]{4,50}?)"
+            r"(?=\s+(?:at|with|role|position)|[,\.]|$)",
+            re.IGNORECASE,
+        ),
+    },
+    "finance": {
+        "amount": re.compile(r"\$\s*[\d,]+(?:\.\d{2})?"),
+        "due_date": re.compile(
+            r"due\s+(?:on\s+|by\s+)?([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)",
+            re.IGNORECASE,
+        ),
+    },
+    "legal": {
+        "ref": re.compile(
+            r"(?:agreement|contract|nda|case)\s+(?:no\.?\s*)?([A-Z0-9\-]{3,20})",
+            re.IGNORECASE,
+        ),
+    },
+    "medical": {
+        "appointment": re.compile(
+            r"(?:appointment|visit|scheduled)\s+(?:for\s+|on\s+)?([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}[\/-]\d{1,2})",
+            re.IGNORECASE,
+        ),
+    },
+}
+
+
+def _extract_rich_data(workflow: str, text: str) -> dict[str, str]:
+    patterns = _RICH_PATTERNS.get(workflow, {})
+    result: dict[str, str] = {}
+    for key, pat in patterns.items():
+        m = pat.search(text)
+        if m:
+            result[key] = (m.group(1) if m.lastindex else m.group(0)).strip()
+    return result
+
+
+def _rank_thread(
+    last_message_at_iso: str,
+    needs_reply: bool,
+    has_action_items: bool,
+    workflow: str,
+    message_count: int,
+) -> float:
+    """Score a thread — higher = fresher, more actionable, has workflow."""
+    try:
+        last = datetime.fromisoformat(last_message_at_iso)
+        days_old = max(0.0, (datetime.now() - last).total_seconds() / 86400)
+        score = 2.0 * math.exp(-days_old / 7)
+    except Exception:
+        score = 0.0
+    if needs_reply:
+        score += 1.0
+    if has_action_items:
+        score += 0.5
+    if workflow:
+        score += 0.3
+    if message_count > 1:
+        score += 0.2
+    return round(score, 4)
+
+
+def _contact_to_thread_summary(c: Contact) -> GmailThreadSummaryOut:
+    """Build a lightweight GmailThreadSummaryOut from a Contact (no full thread fetch)."""
+    wf = _classify_workflow(c.snippet)
+    nr = c.unread > 0
+    last_iso = c.last_ts.isoformat()
+    rank = _rank_thread(last_iso, nr, False, wf, 0)
+    sender = c.name or "Unknown"
+    brief_parts = [f"{sender} \u00b7 {c.snippet[:60].rstrip()}"]
+    if nr:
+        brief_parts.append("[needs reply]")
+    if wf:
+        brief_parts.append(f"[{wf}]")
+    return GmailThreadSummaryOut(
+        thread_id=c.thread_id or c.id,
+        owning_account=c.gmail_account,
+        participants=[c.name],
+        subject=c.snippet,
+        last_message_at=last_iso,
+        labels=[],
+        summary=c.snippet,
+        action_items=[],
+        needs_reply=nr,
+        workflow=wf,
+        message_count=0,
+        rank=rank,
+        brief=" ".join(brief_parts),
+        rich_data=_extract_rich_data(wf, c.snippet),
+    )
+
+
+def _preflight_google_write(
+    kind: str,
+    account: str = "",
+    folder_id: str = "",
+    list_id: str = "",
+    calendar_id: str = "",
+    title: str = "",
+) -> PreflightResult:
+    """Inspect where a Google write will land without executing it."""
+    warnings: list[str] = []
+
+    if kind in ("doc", "sheet", "drive_folder"):
+        resolved = account or _default_google_account(state.drive_services)
+        if not resolved or resolved not in state.drive_services:
+            return PreflightResult(
+                kind=kind,
+                resolved_account=resolved,
+                destination="Drive",
+                destination_id=folder_id,
+                valid=False,
+                warnings=["No Drive account available"],
+                explanation=f"No Drive service available for account '{resolved}'",
+            )
+        svc = state.drive_services[resolved]
+        destination = "Drive root"
+        dest_id = folder_id or ""
+        if folder_id:
+            try:
+                folder = drive_get(svc, folder_id)
+                if folder:
+                    destination = f"Folder '{folder.name}'"
+                else:
+                    warnings.append(f"Folder '{folder_id}' not found")
+                    return PreflightResult(
+                        kind=kind,
+                        resolved_account=resolved,
+                        destination=f"Unknown folder '{folder_id}'",
+                        destination_id=folder_id,
+                        valid=False,
+                        warnings=warnings,
+                        explanation=f"Folder '{folder_id}' not found in Drive for {resolved}",
+                    )
+            except Exception:
+                warnings.append(f"Could not verify folder '{folder_id}'")
+                destination = f"Folder '{folder_id}' (unverified)"
+        label = f"'{title}' " if title else ""
+        return PreflightResult(
+            kind=kind,
+            resolved_account=resolved,
+            destination=destination,
+            destination_id=dest_id,
+            valid=True,
+            warnings=warnings,
+            explanation=f"Will create {kind} {label}in {destination} using {resolved}",
+        )
+
+    elif kind == "task":
+        resolved = account or _default_google_account(state.tasks_services)
+        if not resolved or resolved not in state.tasks_services:
+            return PreflightResult(
+                kind=kind,
+                resolved_account=resolved,
+                destination="Google Tasks",
+                destination_id=list_id,
+                valid=False,
+                warnings=["No Tasks account available"],
+                explanation=f"No Tasks service available for account '{resolved}'",
+            )
+        svc = state.tasks_services[resolved]
+        destination = "My Tasks"
+        dest_id = list_id or "@default"
+        if list_id and list_id != "@default":
+            try:
+                all_lists = tasks_lists(svc)
+                matched = next(
+                    (
+                        lst
+                        for lst in all_lists
+                        if lst.get("id") == list_id or lst.get("title") == list_id
+                    ),
+                    None,
+                )
+                if matched:
+                    destination = f"Task list '{matched.get('title', list_id)}'"
+                    dest_id = matched.get("id", list_id)
+                else:
+                    warnings.append(f"Task list '{list_id}' not found")
+                    return PreflightResult(
+                        kind=kind,
+                        resolved_account=resolved,
+                        destination=f"Unknown list '{list_id}'",
+                        destination_id=list_id,
+                        valid=False,
+                        warnings=warnings,
+                        explanation=f"Task list '{list_id}' not found for {resolved}",
+                    )
+            except Exception:
+                warnings.append(f"Could not verify task list '{list_id}'")
+                destination = f"List '{list_id}' (unverified)"
+        label = f"'{title}' " if title else ""
+        return PreflightResult(
+            kind=kind,
+            resolved_account=resolved,
+            destination=destination,
+            destination_id=dest_id,
+            valid=True,
+            warnings=warnings,
+            explanation=f"Will create task {label}in {destination} using {resolved}",
+        )
+
+    elif kind == "calendar_event":
+        resolved = account or _default_google_account(state.cal_services)
+        if not resolved or resolved not in state.cal_services:
+            return PreflightResult(
+                kind=kind,
+                resolved_account=resolved,
+                destination="Calendar",
+                destination_id=calendar_id,
+                valid=False,
+                warnings=["No calendar account available"],
+                explanation=f"No calendar service available for account '{resolved}'",
+            )
+        cal_id = calendar_id or "primary"
+        destination = "primary calendar" if cal_id == "primary" else f"Calendar '{cal_id}'"
+        label = f"'{title}' " if title else ""
+        return PreflightResult(
+            kind=kind,
+            resolved_account=resolved,
+            destination=destination,
+            destination_id=cal_id,
+            valid=True,
+            warnings=warnings,
+            explanation=f"Will create event {label}in {destination} using {resolved}",
+        )
+
+    return PreflightResult(
+        kind=kind,
+        resolved_account="",
+        destination="",
+        destination_id="",
+        valid=False,
+        warnings=[f"Unknown kind '{kind}'"],
+        explanation=f"Unknown write kind '{kind}'. Expected: doc, sheet, drive_folder, task, calendar_event",
+    )
+
+
 def _document_to_out(d) -> DocumentOut:  # type: ignore[no-untyped-def]
     return DocumentOut(
         id=d.id,
@@ -2582,6 +3114,23 @@ async def export_doc(document_id: str, format: str = "text/plain", account: str 
     elif format == "text/html":
         mime_type = "text/html; charset=utf-8"
     return Response(content=content, media_type=mime_type)
+
+
+# ── Preflight ───────────────────────────────────────────────────────────────
+
+
+@app.get("/preflight/google-write", response_model=PreflightResult)
+async def preflight_google_write(
+    kind: str,
+    account: str = "",
+    folder_id: str = "",
+    list_id: str = "",
+    calendar_id: str = "",
+    title: str = "",
+):
+    return await asyncio.to_thread(
+        _preflight_google_write, kind, account, folder_id, list_id, calendar_id, title
+    )
 
 
 # ── Search ───────────────────────────────────────────────────────────────────
@@ -3233,6 +3782,178 @@ async def extract_memory_endpoint(text: str, source: str = "manual", auto_save: 
         return {"extracted": extracted, "saved": saved_count}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ── Phase 4: Workflow tools ─────────────────────────────────────────────────
+
+
+@app.get("/gmail/threads/needing-reply", response_model=list[GmailThreadSummaryOut])
+async def get_threads_needing_reply(
+    workflow: str = "",
+    days_stale: int = 3,
+    account: str = "",
+    limit: int = 20,
+):
+    """Unread inbox threads older than days_stale days where a reply is expected."""
+    acct, svc = _get_gmail_service_for_account(account)
+    contacts = await asyncio.to_thread(gmail_search, svc, acct, "is:inbox", limit * 3)
+    cutoff = datetime.now() - timedelta(days=days_stale)
+    seen: set[str] = set()
+    results: list[GmailThreadSummaryOut] = []
+    for c in contacts:
+        tid = c.thread_id or c.id
+        if c.unread == 0 or c.last_ts > cutoff or tid in seen:
+            continue
+        seen.add(tid)
+        ts = _contact_to_thread_summary(c)
+        if workflow and ts.workflow != workflow:
+            continue
+        results.append(ts)
+    results.sort(key=lambda t: t.rank, reverse=True)
+    return results[:limit]
+
+
+@app.post("/calendar/workflow-event", response_model=CalendarEventOut)
+async def create_calendar_workflow_event(req: WorkflowEventRequest):
+    """Create a calendar event with kind prefix in title and workflow tag in description."""
+    account, svc = _get_cal_service_for_account(req.account)
+    prefix = _KIND_PREFIX.get(req.kind, "")
+    title = (
+        f"{prefix} {req.title}".strip()
+        if prefix and not req.title.startswith(prefix)
+        else req.title
+    )
+    workflow = req.workflow or _classify_workflow(req.title)
+    tag = f"#{workflow}" if workflow else ""
+    description = req.description
+    if tag and tag not in description:
+        description = f"{description} {tag}".strip() if description else tag
+    try:
+        event_id = await asyncio.to_thread(
+            calendar_create_event,
+            svc,
+            summary=title,
+            start=datetime.fromisoformat(req.start),
+            end=datetime.fromisoformat(req.end),
+            location=req.location,
+            description=description,
+            all_day=False,
+            attendees=req.attendees,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to create event: {str(e)}") from e
+    return CalendarEventOut(
+        summary=title,
+        start=req.start,
+        end=req.end,
+        location=req.location,
+        description=description,
+        account=account,
+        event_id=event_id or "",
+        workflow=workflow,
+    )
+
+
+@app.get("/inbox/needs-action", response_model=NeedsActionOut)
+async def get_needs_action(workflow: str = "", account: str = ""):
+    """Cross-source rollup: reply-needed threads + overdue tasks + upcoming calendar events."""
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    three_days_out = today + timedelta(days=3)
+
+    threads: list[GmailThreadSummaryOut] = []
+    if state.gmail_services:
+        try:
+            acct, svc = _get_gmail_service_for_account(account)
+            contacts = await asyncio.to_thread(gmail_search, svc, acct, "is:inbox", 40)
+            seen_na: set[str] = set()
+            for c in contacts:
+                tid = c.thread_id or c.id
+                if c.unread == 0 or tid in seen_na:
+                    continue
+                seen_na.add(tid)
+                ts = _contact_to_thread_summary(c)
+                if workflow and ts.workflow != workflow:
+                    continue
+                threads.append(ts)
+                if len(threads) >= 10:
+                    break
+        except Exception:
+            pass
+
+    tasks: list[TaskOut] = []
+    if state.tasks_services:
+        try:
+            acct, svc = _get_tasks_service_for_account(account)
+            raw_tasks = await asyncio.to_thread(tasks_list, svc, "@default", False, 100)
+            for t in raw_tasks:
+                task_out = _task_to_out(t, acct)
+                if workflow and task_out.workflow != workflow:
+                    continue
+                if (t.due and t.due <= today) or (t.status == "needs_action" and not t.due):
+                    tasks.append(task_out)
+                if len(tasks) >= 10:
+                    break
+        except Exception:
+            pass
+
+    events: list[CalendarEventOut] = []
+    if state.cal_services:
+        try:
+            evts = await asyncio.to_thread(
+                calendar_events,
+                state.cal_services,
+                start_date=today,
+                end_date=three_days_out,
+            )
+            for e in evts:
+                ev = _event_to_out(e)
+                if workflow and ev.workflow != workflow:
+                    continue
+                events.append(ev)
+                if len(events) >= 10:
+                    break
+        except Exception:
+            pass
+
+    counts: dict[str, int] = {}
+    for wf in (
+        [t.workflow for t in threads] + [t.workflow for t in tasks] + [e.workflow for e in events]
+    ):
+        if wf:
+            counts[wf] = counts.get(wf, 0) + 1
+
+    return NeedsActionOut(threads=threads, tasks=tasks, events=events, workflow_counts=counts)
+
+
+@app.post("/drive/workflow-folder", response_model=DriveFileOut)
+async def create_drive_workflow_folder(req: WorkflowFolderRequest):
+    """Create a Drive folder using workflow display name and default account."""
+    acct, svc = _get_drive_service_for_account(req.account)
+    folder_name = req.name or _WORKFLOW_DISPLAY.get(req.workflow, req.workflow)
+    result = await asyncio.to_thread(drive_create_folder, svc, folder_name, parent_id=req.parent_id)
+    if not result:
+        raise HTTPException(500, "Failed to create folder")
+    return _drive_to_out(result, account=acct)
+
+
+@app.post("/docs/workflow-doc", response_model=DocumentOut)
+async def create_workflow_doc(req: WorkflowDocRequest):
+    """Create a Google Doc using default account."""
+    acct, docs_svc = _get_docs_service_for_account(req.account)
+    doc = await asyncio.to_thread(docs_create, docs_svc, req.title)
+    if not doc:
+        raise HTTPException(400, "Failed to create document")
+    return _document_to_out(doc)
+
+
+@app.post("/sheets/workflow-sheet", response_model=SpreadsheetOut)
+async def create_workflow_sheet(req: WorkflowSheetRequest):
+    """Create a Google Sheet using default account."""
+    acct, sheets_svc = _get_sheets_service_for_account(req.account)
+    result = await asyncio.to_thread(sheets_create, sheets_svc, req.title, [])
+    if not result:
+        raise HTTPException(400, "Failed to create spreadsheet")
+    return _spreadsheet_to_out(result, acct)
 
 
 if __name__ == "__main__":

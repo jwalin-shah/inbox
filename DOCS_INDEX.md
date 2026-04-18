@@ -7,6 +7,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 **New to inbox?**
 - **[README.md](README.md)** — Overview, features, quick start, key bindings
 - **[CLAUDE.md](CLAUDE.md)** — Detailed project context, architecture, all systems
+- **[CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md)** — Connector architecture direction, normalization plan, phased execution
 
 ## 🎯 Google Sheets (New!)
 
@@ -34,6 +35,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 
 **Contributing or modifying?**
 - **[CLAUDE.md](CLAUDE.md)** — Architecture, key design decisions, data sources
+- **[CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md)** — What to build next for first-class connectors and cleaner model-facing data
 - **[SHEETS_CHANGELOG.md](SHEETS_CHANGELOG.md)** — Recent changes, implementation notes
 - Dev commands:
   ```bash
@@ -49,6 +51,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 |------|---------|
 | [README.md](README.md) | Project overview, quick start, features, key bindings |
 | [CLAUDE.md](CLAUDE.md) | Complete project context, architecture, all endpoints, all systems |
+| [CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md) | Connector strategy, phased implementation, source-of-truth rules |
 | [DOCS_INDEX.md](DOCS_INDEX.md) | This file — documentation navigation |
 
 ### Google Sheets (New)
@@ -62,6 +65,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 | File | Purpose |
 |------|---------|
 | [MCP_V1_PLAN.md](MCP_V1_PLAN.md) | MCP server planning (in progress) |
+| [CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md) | First-class connector roadmap and model-facing data plan |
 
 ## 🚀 Quick Navigation
 
@@ -81,6 +85,9 @@ Complete guide to inbox documentation. Start here to find what you need.
 
 **...understand the architecture**
 → [CLAUDE.md](CLAUDE.md#architecture) (services, data sources, design)
+
+**...plan connector improvements**
+→ [CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md) (phases, tool surface, normalization targets)
 
 **...run the project**
 → [README.md](README.md#quick-start) (installation, setup)
@@ -142,14 +149,16 @@ curl http://localhost:9849/health
 **Path 2: Full Understanding (30 min)**
 1. [README.md](README.md) — Overview
 2. [CLAUDE.md](CLAUDE.md) — Architecture
-3. [SHEETS_CHANGELOG.md](SHEETS_CHANGELOG.md) — Design decisions
-4. [SHEETS.md](SHEETS.md) — API details
+3. [CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md) — Connector direction and execution order
+4. [SHEETS_CHANGELOG.md](SHEETS_CHANGELOG.md) — Design decisions
+5. [SHEETS.md](SHEETS.md) — API details
 
 **Path 3: Development (1 hour)**
 1. [CLAUDE.md](CLAUDE.md) — Architecture, design
-2. [SHEETS_CHANGELOG.md](SHEETS_CHANGELOG.md) — What's new, code structure
-3. Source code (services.py, inbox_server.py)
-4. Tests (tests/)
+2. [CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md) — Prioritized connector work
+3. [SHEETS_CHANGELOG.md](SHEETS_CHANGELOG.md) — What's new, code structure
+4. Source code (services.py, inbox_server.py)
+5. Tests (tests/)
 
 ## 📚 External References
 

@@ -214,6 +214,20 @@ class Document:
     account: str = ""
 
 
+@dataclass
+class ThreadSummary:
+    thread_id: str
+    owning_account: str
+    participants: list[str]
+    subject: str
+    last_message_at: datetime
+    label_ids: list[str]
+    body_text: str
+    last_message_body: str
+    last_sender_is_me: bool
+    message_count: int
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -996,6 +1010,67 @@ def gmail_thread(service, msg_id: str, thread_id: str = "") -> list[Msg]:
     except Exception:  # logged below
         _log_service_failure("gmail_thread", msg_id=msg_id, thread_id=thread_id or msg_id)
         return []
+
+
+def gmail_thread_summary(service, thread_id: str, account_email: str) -> ThreadSummary | None:
+    """Fetch normalized thread metadata for analysis — includes labels, participants, body."""
+    try:
+        me_email = service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        thread = service.users().threads().get(userId="me", id=thread_id, format="full").execute()
+        messages = thread.get("messages", [])
+        if not messages:
+            return None
+
+        subject = ""
+        participants: list[str] = []
+        seen_participants: set[str] = set()
+        label_ids: set[str] = set()
+        body_chunks: list[str] = []
+        last_ts = datetime.now()
+        last_sender_is_me = False
+        last_message_body = ""
+
+        for i, m in enumerate(messages):
+            headers = {h["name"]: h["value"] for h in m["payload"]["headers"]}
+            raw_from = headers.get("From", "Unknown")
+            display_name, email_addr = _parse_email_address(raw_from)
+            if i == 0:
+                subject = headers.get("Subject", "(no subject)")
+
+            if email_addr not in seen_participants:
+                seen_participants.add(email_addr)
+                participants.append(display_name or email_addr)
+
+            for lbl in m.get("labelIds", []):
+                label_ids.add(lbl)
+
+            ts_ms = int(m.get("internalDate", 0))
+            if ts_ms:
+                last_ts = datetime.fromtimestamp(ts_ms / 1000)
+
+            body = _decode_body(m["payload"])
+            if body:
+                body_chunks.append(body)
+                last_message_body = body
+
+            if i == len(messages) - 1:
+                last_sender_is_me = me_email.lower() in email_addr.lower()
+
+        return ThreadSummary(
+            thread_id=thread_id,
+            owning_account=account_email,
+            participants=participants,
+            subject=subject,
+            last_message_at=last_ts,
+            label_ids=sorted(label_ids),
+            body_text="\n\n".join(body_chunks)[:4000],
+            last_message_body=last_message_body[:1000],
+            last_sender_is_me=last_sender_is_me,
+            message_count=len(messages),
+        )
+    except Exception:
+        _log_service_failure("gmail_thread_summary", thread_id=thread_id)
+        return None
 
 
 def gmail_send(service, contact: Contact, body: str) -> bool:
