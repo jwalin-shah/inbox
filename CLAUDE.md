@@ -332,3 +332,36 @@ uv run ruff check --fix .   # lint
 uv run pyright              # type check
 uv run pytest               # unit tests
 ```
+
+## Agent Slash Commands
+
+The inbox skill provides first-class slash commands for agent workflows:
+
+```
+/inbox                 — show command menu
+/inbox morning-brief   — today's calendar + unread + followups + GitHub
+/inbox triage          — score and prioritize inbox threads, output TSV
+/inbox followup        — find threads needing reply, draft starters
+/inbox batch           — bulk archive from TSV with resumable state
+/inbox health          — check server, tokens, urgent threads
+```
+
+Skill router: `.claude/skills/inbox/SKILL.md`
+Modes: `modes/*.md` (each is a self-contained workflow prompt)
+User config: `config/priorities.yml`, `config/_profile.md` (never auto-updated)
+Batch state: `batch/triage-output.tsv`, `batch/archive-state.tsv` (auto-generated, gitignored)
+
+## Session-Start Health Check
+
+On every session start, silently run:
+
+```bash
+curl -sf http://localhost:9849/health
+```
+
+Only surface output if something needs action:
+- Non-200 / connection refused → "Server is down. Start: `uv run python inbox_server.py`"
+- `/accounts` returns empty → "No Google accounts authed. Re-auth via Ctrl+A in TUI."
+- Silent if all good.
+
+Do not report "all good" on every session start — only failures.

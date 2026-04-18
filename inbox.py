@@ -336,6 +336,34 @@ class NotificationItem(ListItem):
         yield Static(t)
 
 
+class IndexedThreadItem(ListItem):
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+
+    def compose(self) -> ComposeResult:
+        d = self.data
+        t = Text()
+        if d.get("needs_reply"):
+            t.append("↩ ", style="bold yellow")
+        else:
+            t.append("• ", style="dim")
+        t.append(d.get("subject", "Untitled"), style="bold white")
+        participants = ", ".join(d.get("participants", [])[:2])
+        meta_parts: list[str] = []
+        if participants:
+            meta_parts.append(participants)
+        workflow = d.get("workflow", "")
+        if workflow:
+            meta_parts.append(workflow)
+        if meta_parts:
+            t.append(f"\n  {' · '.join(meta_parts)}", style="dim")
+        brief = d.get("brief", "") or d.get("summary", "")
+        if brief:
+            t.append(f"\n  {brief[:72]}", style="dim")
+        yield Static(t)
+
+
 class MessageView(Static):
     DEFAULT_CSS = """
     MessageView {
@@ -544,6 +572,28 @@ class DetailView(Static):
             body = d.get("body", d.get("snippet", ""))
             if body:
                 t.append(f"\n{body}\n", style="white")
+
+        elif "thread_id" in d and "owning_account" in d:
+            t.append(f"{d.get('subject', 'Untitled')}\n", style="bold white")
+            t.append("─" * 40 + "\n", style="dim")
+            participants = d.get("participants", [])
+            if participants:
+                t.append(f"Participants: {', '.join(participants)}\n", style="dim")
+            if d.get("owning_account"):
+                t.append(f"Account: {d['owning_account']}\n", style="dim")
+            if d.get("workflow"):
+                t.append(f"Workflow: {d['workflow']}\n", style="cyan")
+            if d.get("needs_reply"):
+                t.append("Needs reply\n", style="bold yellow")
+            if d.get("summary"):
+                t.append(f"\n{d['summary']}\n", style="white")
+            action_items = d.get("action_items", [])
+            if action_items:
+                t.append("\nAction items\n", style="bold yellow")
+                for action in action_items[:5]:
+                    t.append(f"  • {action}\n", style="yellow")
+            if d.get("brief"):
+                t.append(f"\n{d['brief']}\n", style="dim")
 
         yield Static(t)
 
@@ -1104,6 +1154,8 @@ class InboxApp(App):
         Binding("ctrl+6", "filter_rem", "Reminders"),
         Binding("ctrl+7", "filter_gh", "GitHub"),
         Binding("ctrl+8", "filter_drv", "Drive"),
+        Binding("ctrl+9", "filter_actionable", "Actionable"),
+        Binding("ctrl+0", "filter_waiting", "Waiting On"),
         Binding("ctrl+shift+6", "toggle_ambient", "Ambient"),
         Binding("ctrl+a", "add_account", "Add Account"),
         Binding("ctrl+shift+a", "reauth_account", "Re-auth"),
@@ -1135,6 +1187,9 @@ class InboxApp(App):
         # Use longer timeout for first requests (data loading can be slow)
         self.client = InboxClient(timeout=60)
         self.conversations: list[dict] = []
+        self.now_threads: list[dict] = []
+        self.actionable_threads: list[dict] = []
+        self.waiting_threads: list[dict] = []
         self.events: list[dict] = []
         self.notes_data: list[dict] = []
         self.reminders_data: list[dict] = []
@@ -1142,6 +1197,7 @@ class InboxApp(App):
         self.github_data: list[dict] = []
         self.drive_data: list[dict] = []
         self.active_conv: dict | None = None
+        self.active_index_thread: dict | None = None
         self.active_event: dict | None = None
         self.active_reminder: dict | None = None
         self.active_notification: dict | None = None
@@ -1305,7 +1361,9 @@ class InboxApp(App):
         with Horizontal(id="main"):
             with Vertical(id="sidebar"):
                 yield Tabs(
-                    Tab("All", id="tab-all"),
+                    Tab("Now", id="tab-all"),
+                    Tab("Actionable", id="tab-act"),
+                    Tab("Waiting On", id="tab-wait"),
                     Tab("iMessage", id="tab-imsg"),
                     Tab("Gmail", id="tab-gmail"),
                     Tab("Calendar", id="tab-cal"),
@@ -1334,6 +1392,11 @@ class InboxApp(App):
         state: dict = {}
         if tab_name in ("all", "imessage", "gmail"):
             state["active_conv"] = self.active_conv
+            state["active_index_thread"] = self.active_index_thread
+            msg_view = self.query_one("#messages", MessageView)
+            state["messages"] = list(msg_view.messages) if msg_view.messages else []
+        elif tab_name in ("actionable", "waiting"):
+            state["active_index_thread"] = self.active_index_thread
             msg_view = self.query_one("#messages", MessageView)
             state["messages"] = list(msg_view.messages) if msg_view.messages else []
         elif tab_name == "calendar":
@@ -1368,16 +1431,34 @@ class InboxApp(App):
         if tab_name in ("all", "imessage", "gmail"):
             # Restore conversation selection and messages
             saved_conv = state.get("active_conv")
+            saved_index_thread = state.get("active_index_thread")
             saved_msgs = state.get("messages", [])
             self.active_conv = saved_conv
+            self.active_index_thread = saved_index_thread
             self.active_event = None
             self.active_reminder = None
             msg_view = self.query_one("#messages", MessageView)
             if saved_msgs:
                 msg_view.messages = saved_msgs
+            elif saved_index_thread:
+                self._show_index_thread(saved_index_thread)
             elif saved_conv:
                 # Re-load the thread if we have a conv but no cached messages
                 self._load_thread(saved_conv)
+            else:
+                msg_view.messages = []
+        elif tab_name in ("actionable", "waiting"):
+            saved_index_thread = state.get("active_index_thread")
+            saved_msgs = state.get("messages", [])
+            self.active_conv = None
+            self.active_index_thread = saved_index_thread
+            self.active_event = None
+            self.active_reminder = None
+            msg_view = self.query_one("#messages", MessageView)
+            if saved_msgs:
+                msg_view.messages = saved_msgs
+            elif saved_index_thread:
+                self._show_index_thread(saved_index_thread)
             else:
                 msg_view.messages = []
         elif tab_name == "calendar":
@@ -1385,6 +1466,7 @@ class InboxApp(App):
             self._calendar_date = state.get("calendar_date", date.today())
             self._calendar_view_mode = state.get("calendar_view_mode", "day")
             self.active_conv = None
+            self.active_index_thread = None
             self.active_reminder = None
             if self.active_event:
                 self.query_one("#detail-view", DetailView).detail = self.active_event
@@ -1415,6 +1497,7 @@ class InboxApp(App):
         else:
             # For tabs without saved state, just clear active selections
             self.active_conv = None
+            self.active_index_thread = None
             self.active_event = None
             self.active_reminder = None
 
@@ -1422,6 +1505,8 @@ class InboxApp(App):
     def on_tab_activated(self, event: Tabs.TabActivated) -> None:
         tab_map = {
             "tab-all": "all",
+            "tab-act": "actionable",
+            "tab-wait": "waiting",
             "tab-imsg": "imessage",
             "tab-gmail": "gmail",
             "tab-cal": "calendar",
@@ -1471,7 +1556,10 @@ class InboxApp(App):
         else:
             msg_view.remove_class("hidden")
             det_view.add_class("hidden")
-            compose_input.placeholder = "Reply… (Enter to send)"
+            if self._active_filter in ("all", "actionable", "waiting"):
+                compose_input.placeholder = "Open Gmail/iMessage tabs for raw replies"
+            else:
+                compose_input.placeholder = "Reply… (Enter to send)"
 
     def _render_sidebar(self) -> None:
         lv = self.query_one("#contact-list", ListView)
@@ -1599,9 +1687,30 @@ class InboxApp(App):
             return
 
         if self._active_filter == "all":
-            shown = self.conversations
-        else:
-            shown = [c for c in self.conversations if c.get("source") == self._active_filter]
+            for thread in self.now_threads:
+                lv.append(IndexedThreadItem(thread))
+            status = f"[green]{len(self.now_threads)} indexed threads[/]"
+            status += "  [dim]Now view · summaries first[/]"
+            self.query_one("#status", Static).update(status)
+            return
+
+        if self._active_filter == "actionable":
+            for thread in self.actionable_threads:
+                lv.append(IndexedThreadItem(thread))
+            status = f"[green]{len(self.actionable_threads)} actionable threads[/]"
+            status += "  [dim]reply / review / track[/]"
+            self.query_one("#status", Static).update(status)
+            return
+
+        if self._active_filter == "waiting":
+            for thread in self.waiting_threads:
+                lv.append(IndexedThreadItem(thread))
+            status = f"[green]{len(self.waiting_threads)} waiting-on threads[/]"
+            status += "  [dim]open loops being tracked[/]"
+            self.query_one("#status", Static).update(status)
+            return
+
+        shown = [c for c in self.conversations if c.get("source") == self._active_filter]
 
         # Sort so favorites appear first
         def _is_favorite(c: dict) -> bool:
@@ -1626,7 +1735,6 @@ class InboxApp(App):
 
         unread = sum(c.get("unread", 0) for c in shown)
         tab_label = {
-            "all": "All",
             "imessage": "iMessage",
             "gmail": "Gmail",
         }.get(self._active_filter, "")
@@ -1649,7 +1757,16 @@ class InboxApp(App):
         lv = self.query_one("#contact-list", ListView)
         target_index = -1
 
-        if self._active_filter in ("all", "imessage", "gmail") and self.active_conv:
+        if self._active_filter in ("all", "actionable", "waiting") and self.active_index_thread:
+            thread_id = self.active_index_thread.get("thread_id")
+            for i, child in enumerate(lv.children):
+                if (
+                    isinstance(child, IndexedThreadItem)
+                    and child.data.get("thread_id") == thread_id
+                ):
+                    target_index = i
+                    break
+        elif self._active_filter in ("imessage", "gmail") and self.active_conv:
             conv_id = self.active_conv.get("id")
             source = self.active_conv.get("source")
             for i, child in enumerate(lv.children):
@@ -1716,6 +1833,12 @@ class InboxApp(App):
 
     def action_filter_drv(self) -> None:
         self.query_one("#tabs", Tabs).active = "tab-drv"
+
+    def action_filter_actionable(self) -> None:
+        self.query_one("#tabs", Tabs).active = "tab-act"
+
+    def action_filter_waiting(self) -> None:
+        self.query_one("#tabs", Tabs).active = "tab-wait"
 
     # ── Vim mode actions ─────────────────────────────────────────────────
 
@@ -2006,6 +2129,9 @@ class InboxApp(App):
                 reminders,
                 reminder_lists,
                 github_data,
+                now_threads,
+                actionable_threads,
+                waiting_threads,
                 status_override,
                 changed,
             ) = self._collect_poll_data()
@@ -2033,10 +2159,16 @@ class InboxApp(App):
                     reminders,
                     reminder_lists,
                     github_data,
+                    now_threads,
+                    actionable_threads,
+                    waiting_threads,
                     status_override,
                 )
                 return
             self.conversations = convos
+            self.now_threads = now_threads
+            self.actionable_threads = actionable_threads
+            self.waiting_threads = waiting_threads
             self.call_from_thread(self.query_one("#status", Static).update, status_override)
             return
 
@@ -2052,20 +2184,35 @@ class InboxApp(App):
                 reminders,
                 reminder_lists,
                 github_data,
+                now_threads,
+                actionable_threads,
+                waiting_threads,
                 status_override,
             )
             return
 
         self.conversations = convos
+        self.now_threads = now_threads
+        self.actionable_threads = actionable_threads
+        self.waiting_threads = waiting_threads
         if self._poll_had_error:
             self._poll_had_error = False
             self.call_from_thread(self._render_sidebar)
 
     def _do_refresh(self) -> None:
         """Fetch all data from the server (runs in worker thread)."""
-        convos, events, notes, reminders, reminder_lists, github_data, status_override = (
-            self._collect_refresh_data()
-        )
+        (
+            convos,
+            events,
+            notes,
+            reminders,
+            reminder_lists,
+            github_data,
+            now_threads,
+            actionable_threads,
+            waiting_threads,
+            status_override,
+        ) = self._collect_refresh_data()
         self.call_from_thread(
             self._populate,
             convos,
@@ -2074,6 +2221,9 @@ class InboxApp(App):
             reminders,
             reminder_lists,
             github_data,
+            now_threads,
+            actionable_threads,
+            waiting_threads,
             status_override,
         )
 
@@ -2085,6 +2235,9 @@ class InboxApp(App):
         reminders: list[dict] | None = None,
         reminder_lists: list[dict] | None = None,
         github_data: list[dict] | None = None,
+        now_threads: list[dict] | None = None,
+        actionable_threads: list[dict] | None = None,
+        waiting_threads: list[dict] | None = None,
         status_override: str | None = None,
     ) -> None:
         # Check for notification-worthy changes before updating state
@@ -2111,6 +2264,12 @@ class InboxApp(App):
                 self.active_notification = None
                 if self._active_filter == "github":
                     self.query_one("#detail-view", DetailView).detail = None
+        if now_threads is not None:
+            self.now_threads = now_threads
+        if actionable_threads is not None:
+            self.actionable_threads = actionable_threads
+        if waiting_threads is not None:
+            self.waiting_threads = waiting_threads
         self._update_bell_indicator()
         self._render_sidebar()
         if status_override:
@@ -2133,12 +2292,25 @@ class InboxApp(App):
 
     def _collect_auxiliary_data(
         self,
-    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], list[str]]:
+    ) -> tuple[
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[str],
+    ]:
         events = self.events
         notes = self.notes_data
         reminders = self.reminders_data
         reminder_lists = self.reminder_lists
         github_data = self.github_data
+        now_threads = self.now_threads
+        actionable_threads = self.actionable_threads
+        waiting_threads = self.waiting_threads
         errors: list[str] = []
 
         try:
@@ -2166,11 +2338,50 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("GitHub refresh", exc))
 
-        return events, notes, reminders, reminder_lists, github_data, errors
+        try:
+            result = self.client.index_view("recent", limit=20)
+            now_threads = result.get("threads", []) if isinstance(result, dict) else []
+        except Exception as exc:
+            errors.append(_format_request_error("Indexed recent refresh", exc))
+
+        try:
+            result = self.client.index_view("actionable", limit=20)
+            actionable_threads = result.get("threads", []) if isinstance(result, dict) else []
+        except Exception as exc:
+            errors.append(_format_request_error("Indexed actionable refresh", exc))
+
+        try:
+            result = self.client.index_view("waiting-on", limit=20)
+            waiting_threads = result.get("threads", []) if isinstance(result, dict) else []
+        except Exception as exc:
+            errors.append(_format_request_error("Indexed waiting refresh", exc))
+
+        return (
+            events,
+            notes,
+            reminders,
+            reminder_lists,
+            github_data,
+            now_threads,
+            actionable_threads,
+            waiting_threads,
+            errors,
+        )
 
     def _collect_refresh_data(
         self,
-    ) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], str | None]:
+    ) -> tuple[
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        str | None,
+    ]:
         convos = self.conversations
         errors: list[str] = []
 
@@ -2179,9 +2390,17 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("Conversation refresh", exc))
 
-        events, notes, reminders, reminder_lists, github_data, aux_errors = (
-            self._collect_auxiliary_data()
-        )
+        (
+            events,
+            notes,
+            reminders,
+            reminder_lists,
+            github_data,
+            now_threads,
+            actionable_threads,
+            waiting_threads,
+            aux_errors,
+        ) = self._collect_auxiliary_data()
         errors.extend(aux_errors)
         return (
             convos,
@@ -2190,13 +2409,26 @@ class InboxApp(App):
             reminders,
             reminder_lists,
             github_data,
+            now_threads,
+            actionable_threads,
+            waiting_threads,
             self._merge_status_errors(errors),
         )
 
     def _collect_poll_data(
         self,
     ) -> tuple[
-        list[dict], list[dict], list[dict], list[dict], list[dict], list[dict], str | None, bool
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        list[dict],
+        str | None,
+        bool,
     ]:
         try:
             convos = self.client.conversations(limit=100)
@@ -2208,6 +2440,9 @@ class InboxApp(App):
                 self.reminders_data,
                 self.reminder_lists,
                 self.github_data,
+                self.now_threads,
+                self.actionable_threads,
+                self.waiting_threads,
                 self._merge_status_errors([_format_request_error("Auto-refresh", exc)]),
                 False,
             )
@@ -2221,22 +2456,44 @@ class InboxApp(App):
         changed = (
             old_unread != new_unread or old_ids != new_ids or len(self.conversations) != len(convos)
         )
-
+        (
+            events,
+            notes,
+            reminders,
+            reminder_lists,
+            github_data,
+            now_threads,
+            actionable_threads,
+            waiting_threads,
+            errors,
+        ) = self._collect_auxiliary_data()
+        if not changed:
+            old_now_ids = [t.get("thread_id") for t in self.now_threads]
+            new_now_ids = [t.get("thread_id") for t in now_threads]
+            old_action_ids = [t.get("thread_id") for t in self.actionable_threads]
+            new_action_ids = [t.get("thread_id") for t in actionable_threads]
+            old_wait_ids = [t.get("thread_id") for t in self.waiting_threads]
+            new_wait_ids = [t.get("thread_id") for t in waiting_threads]
+            changed = (
+                old_now_ids != new_now_ids
+                or old_action_ids != new_action_ids
+                or old_wait_ids != new_wait_ids
+            )
         if not changed:
             return (
                 convos,
-                self.events,
-                self.notes_data,
-                self.reminders_data,
-                self.reminder_lists,
-                self.github_data,
-                None,
+                events,
+                notes,
+                reminders,
+                reminder_lists,
+                github_data,
+                now_threads,
+                actionable_threads,
+                waiting_threads,
+                self._merge_status_errors(errors),
                 False,
             )
 
-        events, notes, reminders, reminder_lists, github_data, errors = (
-            self._collect_auxiliary_data()
-        )
         return (
             convos,
             events,
@@ -2244,6 +2501,9 @@ class InboxApp(App):
             reminders,
             reminder_lists,
             github_data,
+            now_threads,
+            actionable_threads,
+            waiting_threads,
             self._merge_status_errors(errors),
             True,
         )
@@ -2267,7 +2527,6 @@ class InboxApp(App):
             and self.active_conv
             and self._active_filter
             in (
-                "all",
                 "imessage",
                 "gmail",
             )
@@ -2282,7 +2541,6 @@ class InboxApp(App):
             and self.active_conv
             and self._active_filter
             in (
-                "all",
                 "imessage",
                 "gmail",
             )
@@ -2446,8 +2704,18 @@ class InboxApp(App):
             self._load_note(item.data)
             return
 
+        if isinstance(item, IndexedThreadItem):
+            self.active_index_thread = item.data
+            self.active_conv = None
+            self.active_event = None
+            self.active_reminder = None
+            self.active_notification = None
+            self._show_index_thread(item.data)
+            return
+
         if isinstance(item, ConversationItem):
             self.active_conv = item.data
+            self.active_index_thread = None
             self.active_event = None
             self._load_thread(item.data)
 
@@ -2499,6 +2767,37 @@ class InboxApp(App):
             if len(body) > 100:
                 key = conv.get("id", "") or str(hash(body))
                 self._do_extract_actions(body, key)
+
+    def _show_index_thread(self, thread: dict) -> None:
+        mv = self.query_one("#messages", MessageView)
+        lines = []
+        if thread.get("summary"):
+            lines.append(str(thread["summary"]))
+        if thread.get("action_items"):
+            lines.append("Action items:")
+            lines.extend(f"- {item}" for item in thread["action_items"][:5])
+        if thread.get("brief"):
+            lines.append("")
+            lines.append(str(thread["brief"]))
+        body = "\n".join(lines).strip() or thread.get("subject", "")
+        mv.ai_summary = None
+        mv.messages = [
+            {
+                "body": body,
+                "ts": thread.get("last_message_at", ""),
+                "sender": "Inbox Index",
+                "is_me": False,
+            }
+        ]
+        subject = thread.get("subject", "Untitled")
+        workflow = thread.get("workflow", "")
+        status = f"[bold]{subject}[/]  [dim]indexed"
+        if workflow:
+            status += f" · {workflow}"
+        if thread.get("needs_reply"):
+            status += " · needs reply"
+        status += "[/]"
+        self.query_one("#status", Static).update(status)
 
     @work(thread=True, exit_on_error=False)
     def _load_note(self, note_data: dict) -> None:

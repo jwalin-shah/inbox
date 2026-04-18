@@ -13,6 +13,7 @@ import re
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from secrets import compare_digest
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -21,6 +22,9 @@ from pydantic import BaseModel
 
 import ambient_notes
 from memory_store import MemoryStore
+from message_index_store import MessageIndexStore
+from message_sync import bootstrap as index_bootstrap_sync
+from message_sync import incremental as index_incremental_sync
 from scheduler import SchedulerStore
 from services import (
     MLX_LARGE_MODEL,
@@ -544,6 +548,41 @@ class NeedsActionOut(BaseModel):
     workflow_counts: dict[str, int]
 
 
+class IndexSyncOut(BaseModel):
+    ok: bool
+    mode: str
+    stats: dict[str, dict[str, int]]
+
+
+class IndexSyncStateOut(BaseModel):
+    source: str
+    account: str
+    checkpoint_type: str
+    checkpoint_value: str
+    last_success_at: str
+    last_full_sync_at: str
+    status: str
+    last_run_started_at: str
+    last_error: str
+    metadata: dict[str, Any]
+
+
+class IndexStatusOut(BaseModel):
+    db_path: str
+    threads: list[GmailThreadSummaryOut]
+
+
+class IndexOverviewOut(BaseModel):
+    db_path: str
+    counts: dict[str, int]
+    sync_states: list[IndexSyncStateOut]
+
+
+class IndexedThreadListOut(BaseModel):
+    view: str
+    threads: list[GmailThreadSummaryOut]
+
+
 class WorkflowFolderRequest(BaseModel):
     workflow: str
     name: str = ""
@@ -674,6 +713,7 @@ class ServerState:
         )
         self.dictation: DictationService = DictationService()
         self.scheduler: SchedulerStore = SchedulerStore()
+        self.index_store: MessageIndexStore = MessageIndexStore()
 
 
 state = ServerState()
@@ -2886,6 +2926,79 @@ def _contact_to_thread_summary(c: Contact) -> GmailThreadSummaryOut:
     )
 
 
+def _indexed_thread_to_summary(row: dict[str, object]) -> GmailThreadSummaryOut:
+    subject = str(row.get("latest_subject", "") or row.get("latest_snippet", "") or "")
+    summary = str(row.get("summary", "") or subject)
+    workflow = _classify_workflow(f"{subject}\n{summary}")
+    needs_reply = bool(row.get("needs_reply"))
+    action_items = [str(row["open_loop"])] if row.get("open_loop") else []
+    last_message_at = str(row.get("latest_item_at", ""))
+    rank = _rank_thread(
+        last_message_at,
+        needs_reply,
+        bool(action_items),
+        workflow,
+        int(row.get("message_count", 0) or 0),
+    )
+    sender = str(row.get("latest_sender", "") or "Unknown")
+    brief_parts = [f"{sender} · {summary[:60].rstrip()}"]
+    if needs_reply:
+        brief_parts.append("[needs reply]")
+    if workflow:
+        brief_parts.append(f"[{workflow}]")
+    rich_text = "\n".join(
+        part
+        for part in [
+            subject,
+            summary,
+            str(row.get("open_loop", "")),
+            str(row.get("topic", "")),
+        ]
+        if part
+    )
+    return GmailThreadSummaryOut(
+        thread_id=str(row.get("thread_id", "")),
+        owning_account=str(row.get("account", "")),
+        participants=[str(p) for p in row.get("participants_json", [])],
+        subject=subject,
+        last_message_at=last_message_at,
+        labels=[],
+        summary=summary,
+        action_items=action_items,
+        needs_reply=needs_reply,
+        workflow=workflow,
+        message_count=int(row.get("message_count", 0) or 0),
+        rank=rank,
+        brief=" ".join(brief_parts),
+        rich_data=_extract_rich_data(workflow, rich_text),
+    )
+
+
+def _index_view_rows(view: str, limit: int) -> list[dict[str, object]]:
+    if view == "actionable":
+        return state.index_store.list_threads(
+            limit=limit,
+            actions=("reply", "review", "track"),
+            newest_only=True,
+            sort_mode="priority",
+        )
+    if view == "recent":
+        return state.index_store.list_threads(
+            limit=limit,
+            newest_only=True,
+            sort_mode="recent",
+        )
+    if view == "waiting-on":
+        return state.index_store.list_threads(
+            limit=limit,
+            actions=("track",),
+            has_open_loop=True,
+            newest_only=True,
+            sort_mode="recent",
+        )
+    raise HTTPException(status_code=404, detail=f"Unknown index view: {view}")
+
+
 def _preflight_google_write(
     kind: str,
     account: str = "",
@@ -3861,7 +3974,20 @@ async def get_needs_action(workflow: str = "", account: str = ""):
     three_days_out = today + timedelta(days=3)
 
     threads: list[GmailThreadSummaryOut] = []
-    if state.gmail_services:
+    indexed_threads = state.index_store.list_threads(
+        limit=25, actionable_only=True, newest_only=True
+    )
+    if indexed_threads:
+        for row in indexed_threads:
+            if account and row.get("account") != account:
+                continue
+            ts = _indexed_thread_to_summary(row)
+            if workflow and ts.workflow != workflow:
+                continue
+            threads.append(ts)
+            if len(threads) >= 10:
+                break
+    elif state.gmail_services:
         try:
             acct, svc = _get_gmail_service_for_account(account)
             contacts = await asyncio.to_thread(gmail_search, svc, acct, "is:inbox", 40)
@@ -3923,6 +4049,51 @@ async def get_needs_action(workflow: str = "", account: str = ""):
             counts[wf] = counts.get(wf, 0) + 1
 
     return NeedsActionOut(threads=threads, tasks=tasks, events=events, workflow_counts=counts)
+
+
+@app.get("/index/threads", response_model=IndexStatusOut)
+async def get_index_threads(
+    limit: int = 20, actionable_only: bool = True, newest_only: bool = True
+):
+    rows = state.index_store.list_threads(
+        limit=limit,
+        actionable_only=actionable_only,
+        newest_only=newest_only,
+    )
+    return IndexStatusOut(
+        db_path=str(state.index_store.db_path),
+        threads=[_indexed_thread_to_summary(row) for row in rows],
+    )
+
+
+@app.get("/index/status", response_model=IndexOverviewOut)
+async def get_index_status():
+    return IndexOverviewOut(
+        db_path=str(state.index_store.db_path),
+        counts=state.index_store.index_counts(),
+        sync_states=[IndexSyncStateOut(**row) for row in state.index_store.list_sync_states()],
+    )
+
+
+@app.get("/index/views/{view_name}", response_model=IndexedThreadListOut)
+async def get_index_view(view_name: str, limit: int = 20):
+    rows = _index_view_rows(view_name, limit)
+    return IndexedThreadListOut(
+        view=view_name,
+        threads=[_indexed_thread_to_summary(row) for row in rows],
+    )
+
+
+@app.post("/index/sync/bootstrap", response_model=IndexSyncOut)
+async def post_index_sync_bootstrap():
+    stats = await asyncio.to_thread(index_bootstrap_sync, state.index_store)
+    return IndexSyncOut(ok=True, mode="bootstrap", stats=stats)
+
+
+@app.post("/index/sync/incremental", response_model=IndexSyncOut)
+async def post_index_sync_incremental():
+    stats = await asyncio.to_thread(index_incremental_sync, state.index_store)
+    return IndexSyncOut(ok=True, mode="incremental", stats=stats)
 
 
 @app.post("/drive/workflow-folder", response_model=DriveFileOut)

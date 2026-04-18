@@ -42,6 +42,12 @@ htmlcov/
 .inbox_memory.sqlite3
 .inbox_scheduler.sqlite3
 
+# Batch auto-generated state (keep inputs, ignore outputs)
+batch/triage-output.tsv
+batch/archive-state.tsv
+batch/logs/
+batch/.batch-state.lock
+
 # Editor/IDE
 .idea/
 .vscode/
@@ -49,3 +55,4 @@ htmlcov/
 
 # Hook-generated temp files
 CLAUDE.md.new
+.inbox_index.sqlite3

@@ -1,18 +1,16 @@
 <claude-mem-context>
 # Memory Context
 
-# [inbox] recent context, 2026-04-17 1:53pm PDT
+# [inbox] recent context, 2026-04-18 8:40am PDT
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (16,833t read) | 338,384t work | 95% savings
+Stats: 50 obs (16,813t read) | 407,521t work | 96% savings
 
 ### Apr 16, 2026
-72 6:07p 🟣 Assistant Action Wired into inbox.py TUI — Full Flow: Ctrl+Shift+\ → Codex Exec → Result Modal
-73 " 🟣 AssistantPromptModal + AssistantResultModal Added Inline to inbox.py — Context-Aware Assistant Integration Complete
-75 " 🔵 apply_patch Failed on inbox.py — BriefingModal Lacks action_dismiss, Anchor Context Mismatch
+75 6:07p 🔵 apply_patch Failed on inbox.py — BriefingModal Lacks action_dismiss, Anchor Context Mismatch
 74 " 🟣 agents/ Scaffold: Personal Assistant Control Plane Milestone 1
 76 6:08p 🟣 agents/ Control Plane Scaffold Successfully Written and Syntax-Validated
 77 " 🔵 agents/runner Package Imports Clean — Supervisor repo_root Resolves Correctly
@@ -61,6 +59,9 @@ Stats: 50 obs (16,833t read) | 338,384t work | 95% savings
 559 12:53p ⚖️ Personal Schedule + Todo List Overhaul via Google Tasks
 560 12:54p 🔵 Gmail Reply Routing Broken: Multiple Failure Modes on Cerebras Email Reply
 563 " 🔵 Gmail Reply Root Cause: Account Routing Uses Default, Not Message-Owning Account
+### Apr 18, 2026
+760 8:35a ⚖️ LinkedIn Integration Planning Requested for Inbox Project
+761 8:37a 🔵 Inbox Project Architecture Mapped for LinkedIn Integration Planning
 
-Access 338k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 408k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>

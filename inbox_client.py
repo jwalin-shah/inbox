@@ -81,6 +81,36 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    # ── Indexed inbox views ───────────────────────────────────────────────
+
+    def index_threads(
+        self,
+        *,
+        limit: int = 20,
+        actionable_only: bool = True,
+        newest_only: bool = True,
+    ) -> dict:
+        r = self._client.get(
+            "/index/threads",
+            params={
+                "limit": limit,
+                "actionable_only": actionable_only,
+                "newest_only": newest_only,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def index_status(self) -> dict:
+        r = self._client.get("/index/status")
+        r.raise_for_status()
+        return r.json()
+
+    def index_view(self, view_name: str, *, limit: int = 20) -> dict:
+        r = self._client.get(f"/index/views/{view_name}", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
     # ── Messages ─────────────────────────────────────────────────────────
 
     def messages(
