@@ -121,7 +121,6 @@ GET  /health
 GET  /conversations?source=all|imessage|gmail&limit=50
 GET  /messages/{source}/{conv_id}?thread_id=...
 POST /messages/send  {"conv_id", "source", "text"}
-<<<<<<< Updated upstream
 POST /messages/gmail/{msg_id}/unsubscribe
 POST /messages/gmail/bulk-unsubscribe  {"msg_ids": [str]}
 POST /search  {"q", "sources": [str], "limit"}
@@ -131,10 +130,6 @@ POST /gmail/filters  {"from_filter", "subject_filter", "add_label_ids": [str], "
 POST /preflight/write  {"operation", "args"}  # validates write op before execution
 GET  /calendar/events?date=YYYY-MM-DD
 POST /calendar/events  {"summary", "start", "end", "attendees", ...}
-=======
-GET  /calendar/events?date=YYYY-MM-DD (or ?start=X&end=Y for range)
-POST /calendar/events  {"summary", "start", "end", ...}
->>>>>>> Stashed changes
 POST /calendar/events/quick  {"text": "Meeting 2pm-3pm @ Office"}
 PUT  /calendar/events/{id}
 DELETE /calendar/events/{id}
