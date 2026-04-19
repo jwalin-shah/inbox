@@ -121,6 +121,7 @@ GET  /health
 GET  /conversations?source=all|imessage|gmail&limit=50
 GET  /messages/{source}/{conv_id}?thread_id=...
 POST /messages/send  {"conv_id", "source", "text"}
+<<<<<<< Updated upstream
 POST /messages/gmail/{msg_id}/unsubscribe
 POST /messages/gmail/bulk-unsubscribe  {"msg_ids": [str]}
 POST /search  {"q", "sources": [str], "limit"}
@@ -130,6 +131,10 @@ POST /gmail/filters  {"from_filter", "subject_filter", "add_label_ids": [str], "
 POST /preflight/write  {"operation", "args"}  # validates write op before execution
 GET  /calendar/events?date=YYYY-MM-DD
 POST /calendar/events  {"summary", "start", "end", "attendees", ...}
+=======
+GET  /calendar/events?date=YYYY-MM-DD (or ?start=X&end=Y for range)
+POST /calendar/events  {"summary", "start", "end", ...}
+>>>>>>> Stashed changes
 POST /calendar/events/quick  {"text": "Meeting 2pm-3pm @ Office"}
 PUT  /calendar/events/{id}
 DELETE /calendar/events/{id}
@@ -197,8 +202,12 @@ POST /notifications/test  {"title", "body"}
 - **Ctrl+R** — refresh all data
 - **Ctrl+A** — add Google account (opens browser)
 - **Ctrl+Shift+A** — re-auth current account (new scopes)
-- **Ctrl+N** — new calendar event
-- **Ctrl+D** — delete selected event
+- **Ctrl+N** — new calendar event (Calendar tab only)
+- **Ctrl+D** — delete selected event (Calendar tab only)
+- **Ctrl+G** — jump-to-date overlay with flexible parsing (Calendar tab only)
+- **← / →** — navigate prev/next day or week (Calendar tab only)
+- **v** — cycle calendar views: day → week → agenda (Calendar tab only)
+- **e** — edit selected event inline (Calendar tab only)
 - **r** — mark selected GitHub notification as read (GitHub tab only)
 - **Shift+R** — mark all GitHub notifications as read (GitHub tab only)
 - **o** — open notification URL in browser (GitHub tab only)
@@ -253,6 +262,14 @@ POST /notifications/test  {"title", "body"}
 - Notifications: displayed in TUI with type icons (🔀 PR review, 🐛 issue, 📦 release, 🔔 other) plus unread indicator; mark-read individual or all
 - Pull requests: searches for PRs requesting review from the authed user
 - Token file is gitignored
+
+## Calendar
+- **Range queries**: `GET /calendar/events?start=X&end=Y` for week/agenda views; single-date `?date=X` still works for backward compat
+- **Attendees**: `CalendarEvent.attendees` includes name, email, responseStatus from Google Calendar
+- **Views**: Day (single day), Week (7 columns with today highlighted), Agenda (14-day forward with separators)
+- **Jump-to-date**: Ctrl+G accepts flexible parsing (`YYYY-MM-DD`, `May 1`, `Apr 10, 2026`, `4/10/2026`, etc.)
+- **Inline editing**: e to edit title; Enter saves via PUT, Esc cancels
+- **Multiday events**: All-day events spanning multiple days render on every spanned day in all views
 
 ## Apple Reminders
 - Reads from all Reminders SQLite DBs in `~/Library/Group Containers/group.com.apple.reminders/`
