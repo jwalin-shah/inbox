@@ -4127,6 +4127,55 @@ async def create_workflow_sheet(req: WorkflowSheetRequest):
     return _spreadsheet_to_out(result, acct)
 
 
+# ── Cross-silo query (gemma4-hackathon orchestrator) ──────────────────────────
+
+
+class _QueryRequest(BaseModel):
+    question: str
+    per_silo_limit: int = 10
+    use_real_model: bool = False
+
+
+@app.post("/query")
+async def cross_silo_query(req: _QueryRequest):
+    """Natural-language cross-silo query via gemma4 orchestrator.
+
+    Requires gemma4-hackathon installed as an editable dep:
+        uv pip install -e ~/projects/gemma4-hackathon
+    Returns gracefully with 503 when not installed.
+    """
+    try:
+        import gemma4_hackathon.silos.calendar  # noqa: F401
+        import gemma4_hackathon.silos.gmail  # noqa: F401
+        import gemma4_hackathon.silos.imessage  # noqa: F401  trigger registration
+        import gemma4_hackathon.silos.memory  # noqa: F401
+        import gemma4_hackathon.silos.photos  # noqa: F401
+        from gemma4_hackathon.orchestrator import Orchestrator  # type: ignore
+    except ImportError as exc:
+        raise HTTPException(503, f"gemma4_hackathon not installed: {exc}") from exc
+
+    if req.use_real_model:
+        from gemma4_hackathon.runtime import get_runtime  # type: ignore
+
+        runtime = get_runtime("e4b")
+    else:
+        from gemma4_hackathon.fake_runtime import FakeRuntime  # type: ignore
+
+        runtime = FakeRuntime()
+
+    orch = Orchestrator(runtime)
+    result = await asyncio.to_thread(orch.query, req.question, per_silo_limit=req.per_silo_limit)
+    return {
+        "question": result.question,
+        "answer": result.answer,
+        "plan": result.plan,
+        "citations": [
+            {"silo": r.silo, "id": r.id, "when": r.when.isoformat() if r.when else None}
+            for r in result.retrieved
+        ],
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 

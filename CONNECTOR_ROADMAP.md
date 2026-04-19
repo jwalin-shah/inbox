@@ -349,3 +349,17 @@ Inbox is "first-class" when:
 - write targets are inspectable before mutation
 - dev vs primary routing is explicit
 - connector outputs are compact, typed, and workflow-aware
+
+---
+
+## Future: No-API Connectors via browser-harness
+
+**Watching:** https://github.com/browser-use/browser-harness
+
+Self-healing LLM browser harness built on raw CDP WebSocket (~592 lines Python). Agent writes missing `helpers.py` functions mid-task — no Playwright/Selenium layer.
+
+**Why relevant:** LinkedIn messages, Twitter DMs, and similar sources have no public API. browser-harness would let inbox add these as connectors without scraping fragility of traditional automation.
+
+**Highest-value target:** LinkedIn recruiter thread connector — natural fit given career-ops work.
+
+**Status (2026-04-18):** Brand new (created 2026-04-17). Watch for stability before integrating. Revisit when inbox needs a no-API source connector.
