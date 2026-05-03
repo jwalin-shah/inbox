@@ -7,11 +7,12 @@ import re
 import sqlite3
 import threading
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
+import pytest
 from loguru import logger
 
 import services
@@ -834,3 +835,33 @@ def test_load_favorites_handles_corrupt_file(tmp_path, monkeypatch):
 
     result = load_favorites()
     assert result == set()
+
+
+class _WriteShouldNotRun:
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"live write service was touched: {name}")
+
+
+def test_test_mode_blocks_representative_live_writes(monkeypatch):
+    monkeypatch.setenv("INBOX_TEST_MODE", "1")
+    from inbox_test_mode import LiveWriteBlocked
+
+    contact = services.Contact(
+        id="msg-1",
+        name="Alice",
+        source="gmail",
+        reply_to="alice@example.com",
+        snippet="Hello",
+    )
+
+    with pytest.raises(LiveWriteBlocked, match="Gmail reply"):
+        services.gmail_send(_WriteShouldNotRun(), contact, "hello")
+    with pytest.raises(LiveWriteBlocked, match="calendar event"):
+        services.calendar_create_event(
+            _WriteShouldNotRun(),
+            "Test",
+            datetime(2026, 5, 3, tzinfo=UTC),
+            datetime(2026, 5, 3, 1, tzinfo=UTC),
+        )
+    with pytest.raises(LiveWriteBlocked, match="Apple Reminder"):
+        services.reminder_complete("Test reminder")

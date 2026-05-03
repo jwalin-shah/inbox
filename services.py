@@ -80,6 +80,14 @@ def init_contacts() -> int:
     return _contacts.load()
 
 
+def _assert_live_write_allowed(action: str) -> None:
+    try:
+        from inbox_test_mode import assert_live_writes_allowed
+    except ImportError:
+        return
+    assert_live_writes_allowed(action)
+
+
 # ── Data models ───────────────────────────────────────────────────────────────
 
 
@@ -681,6 +689,7 @@ def imsg_thread(chat_id: str, limit: int = 50) -> list[Msg]:
 
 
 def imsg_send(contact: Contact, text: str) -> bool:
+    _assert_live_write_allowed("send iMessage")
     safe_text = _escape_applescript(text)
 
     if contact.is_group:
@@ -1074,6 +1083,7 @@ def gmail_thread_summary(service, thread_id: str, account_email: str) -> ThreadS
 
 
 def gmail_send(service, contact: Contact, body: str) -> bool:
+    _assert_live_write_allowed("send Gmail reply")
     msg = MIMEText(body)
     msg["to"] = contact.reply_to
     msg["subject"] = f"Re: {contact.snippet}"
@@ -1102,6 +1112,7 @@ def gmail_send(service, contact: Contact, body: str) -> bool:
 
 def gmail_archive(service, msg_id: str) -> bool:
     """Archive a Gmail message by removing the INBOX label."""
+    _assert_live_write_allowed("archive Gmail message")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"removeLabelIds": ["INBOX"]}
@@ -1150,6 +1161,7 @@ def gmail_unsubscribe(service, msg_id: str) -> dict[str, str]:
     Execute unsubscribe via List-Unsubscribe header, then archive the message.
     Returns {"method": "url|mailto|none", "ok": bool}.
     """
+    _assert_live_write_allowed("unsubscribe Gmail message")
     import urllib.parse
 
     import requests
@@ -1189,6 +1201,7 @@ def gmail_unsubscribe(service, msg_id: str) -> dict[str, str]:
 
 def gmail_delete(service, msg_id: str) -> bool:
     """Move a Gmail message to trash."""
+    _assert_live_write_allowed("delete Gmail message")
     try:
         service.users().messages().trash(userId="me", id=msg_id).execute()
         return True
@@ -1199,6 +1212,7 @@ def gmail_delete(service, msg_id: str) -> bool:
 
 def gmail_star(service, msg_id: str) -> bool:
     """Add STARRED label to a Gmail message."""
+    _assert_live_write_allowed("star Gmail message")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"addLabelIds": ["STARRED"]}
@@ -1211,6 +1225,7 @@ def gmail_star(service, msg_id: str) -> bool:
 
 def gmail_unstar(service, msg_id: str) -> bool:
     """Remove STARRED label from a Gmail message."""
+    _assert_live_write_allowed("unstar Gmail message")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"removeLabelIds": ["STARRED"]}
@@ -1223,6 +1238,7 @@ def gmail_unstar(service, msg_id: str) -> bool:
 
 def gmail_mark_read(service, msg_id: str) -> bool:
     """Mark a Gmail message as read by removing UNREAD label."""
+    _assert_live_write_allowed("mark Gmail message read")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
@@ -1235,6 +1251,7 @@ def gmail_mark_read(service, msg_id: str) -> bool:
 
 def gmail_mark_unread(service, msg_id: str) -> bool:
     """Mark a Gmail message as unread by adding UNREAD label."""
+    _assert_live_write_allowed("mark Gmail message unread")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"addLabelIds": ["UNREAD"]}
@@ -1285,6 +1302,7 @@ def gmail_attachment_download(service, msg_id: str, att_id: str) -> bytes | None
 
 def gmail_compose_send(service, to: str, subject: str, body: str) -> bool:
     """Send a new email (not a reply)."""
+    _assert_live_write_allowed("send Gmail message")
     msg = MIMEText(body)
     msg["to"] = to
     msg["subject"] = subject
@@ -1437,6 +1455,7 @@ def gmail_batch_modify(
     remove_label_ids: list[str] | None = None,
 ) -> bool:
     """Apply Gmail labels to multiple messages at once."""
+    _assert_live_write_allowed("modify Gmail labels")
     try:
         service.users().messages().batchModify(
             userId="me",
@@ -1465,6 +1484,7 @@ def gmail_create_filter(
     forward: str = "",
 ) -> dict | None:
     """Create a Gmail filter. Requires gmail.settings.basic scope."""
+    _assert_live_write_allowed("create Gmail filter")
     try:
         action: dict[str, object] = {
             "addLabelIds": add_label_ids or [],
@@ -1712,6 +1732,7 @@ def calendar_create_event(
     recurrence: list[str] | None = None,
     reminders: dict | None = None,
 ) -> str | None:
+    _assert_live_write_allowed("create calendar event")
     try:
         body = _build_event_body(
             summary,
@@ -1755,6 +1776,7 @@ def calendar_update_event(
     calendar_id: str = "primary",
     reminders: dict | None = None,
 ) -> bool:
+    _assert_live_write_allowed("update calendar event")
     try:
         existing = cal_service.events().get(calendarId=calendar_id, eventId=event_id).execute()
         if summary is not None:
@@ -1798,6 +1820,7 @@ def calendar_update_event(
 
 
 def calendar_delete_event(cal_service, event_id: str, calendar_id: str = "primary") -> bool:
+    _assert_live_write_allowed("delete calendar event")
     try:
         cal_service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
         return True
@@ -2965,6 +2988,7 @@ def reminder_complete(title: str, list_name: str = "") -> bool:
     Returns:
         True if the completion succeeded, False otherwise.
     """
+    _assert_live_write_allowed("complete Apple Reminder")
     find_clause = _applescript_find_reminder(title, list_name)
     script = f"""
     tell application "Reminders"
@@ -2992,6 +3016,7 @@ def reminder_uncomplete(title: str, list_name: str = "") -> bool:
     Returns:
         True if the operation succeeded, False otherwise.
     """
+    _assert_live_write_allowed("uncomplete Apple Reminder")
     find_clause = _applescript_find_reminder(title, list_name)
     script = f"""
     tell application "Reminders"
@@ -3030,6 +3055,7 @@ def reminder_create(
     Returns:
         True if creation succeeded, False otherwise.
     """
+    _assert_live_write_allowed("create Apple Reminder")
     safe_title = _escape_applescript(title)
     safe_notes = _escape_applescript(notes)
     safe_list = _escape_applescript(list_name)
@@ -3106,6 +3132,7 @@ def reminder_edit(
     Returns:
         True if the edit succeeded, False otherwise.
     """
+    _assert_live_write_allowed("edit Apple Reminder")
     find_clause = _applescript_find_reminder(current_title, list_name)
     set_clauses: list[str] = []
 
@@ -3166,6 +3193,7 @@ def reminder_delete(title: str, list_name: str = "") -> bool:
     Returns:
         True if the deletion succeeded, False otherwise.
     """
+    _assert_live_write_allowed("delete Apple Reminder")
     find_clause = _applescript_find_reminder(title, list_name)
     script = f"""
     tell application "Reminders"
