@@ -203,6 +203,26 @@ class MessageIndexStore:
                 item.to_dict(),
             )
 
+    def insert_item_if_absent(self, item: IndexedItem) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO items (
+                    source, account, external_id, thread_id, kind, created_at, updated_at,
+                    ingested_at, sender, recipients_json, subject, snippet, body_text,
+                    body_hash, labels_json, raw_pointer, is_deleted, is_read
+                )
+                VALUES (
+                    :source, :account, :external_id, :thread_id, :kind, :created_at, :updated_at,
+                    :ingested_at, :sender, :recipients_json, :subject, :snippet, :body_text,
+                    :body_hash, :labels_json, :raw_pointer, :is_deleted, :is_read
+                )
+                ON CONFLICT(source, account, external_id) DO NOTHING
+                """,
+                item.to_dict(),
+            )
+        return int(cur.rowcount or 0) == 1
+
     def set_sync_state(
         self,
         *,
