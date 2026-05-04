@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 TEST_MODE_ENV = "INBOX_TEST_MODE"
@@ -27,7 +28,7 @@ def test_data_dir() -> Path:
     configured = os.environ.get(TEST_DATA_DIR_ENV, "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path(".inbox-test-data").resolve()
+    return Path(tempfile.gettempdir()) / "inbox-test-data"
 
 
 def test_now() -> str | None:

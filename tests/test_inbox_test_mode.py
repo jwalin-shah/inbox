@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,26 @@ def test_test_mode_uses_configured_test_data_dir(tmp_path, monkeypatch):
     from inbox_test_mode import test_data_dir
 
     assert test_data_dir() == tmp_path
+
+
+def test_services_resolve_local_data_paths_under_test_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("INBOX_TEST_MODE", "1")
+    monkeypatch.setenv("INBOX_TEST_DATA_DIR", str(tmp_path))
+
+    import services
+
+    services = importlib.reload(services)
+    try:
+        assert tmp_path / "token.json" == services.TOKEN_FILE
+        assert tmp_path / "tokens" == services.TOKENS_DIR
+        assert tmp_path / "Library/Messages/chat.db" == services.IMSG_DB
+        assert tmp_path / "config/inbox/notifications.json" == services.NOTIFICATION_CONFIG_PATH
+        assert tmp_path / "config/inbox/favorites.json" == services.FAVORITES_FILE
+        assert tmp_path / "config/inbox/voice.json" == services.VOICE_CONFIG_PATH
+    finally:
+        monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
+        monkeypatch.delenv("INBOX_TEST_DATA_DIR", raising=False)
+        importlib.reload(services)
 
 
 def test_agent_safe_pytest_markers_are_registered(pytestconfig):
