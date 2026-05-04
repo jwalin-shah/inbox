@@ -117,9 +117,9 @@ def sync_gmail_bootstrap(store: MessageIndexStore) -> dict[str, int]:
                     break
                 for stub in messages:
                     full_message = _fetch_gmail_full_message(service, stub["id"])
-                    store.upsert_item(_gmail_item(account, full_message))
+                    if store.insert_item_if_absent(_gmail_item(account, full_message)):
+                        count += 1
                     newest_seen = max(newest_seen, int(full_message.get("internalDate", 0) or 0))
-                    count += 1
                 page_token = response.get("nextPageToken")
                 store.update_sync_progress(
                     source="gmail",
