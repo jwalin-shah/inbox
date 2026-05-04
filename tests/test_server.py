@@ -817,6 +817,164 @@ class TestGmailExtensions:
         assert data["count"] == 2
 
 
+class TestSourceAdapters:
+    def test_gmail_search_uses_fake_source_adapter(self, client):
+        import inbox_server
+
+        class FakeGmailAdapter:
+            def __init__(self):
+                self.calls = []
+
+            def search(
+                self,
+                service,
+                account_email,
+                q="",
+                limit=20,
+                label="",
+                from_filter="",
+                subject_filter="",
+                after="",
+                before="",
+            ):
+                self.calls.append(
+                    {
+                        "service": service,
+                        "account_email": account_email,
+                        "q": q,
+                        "limit": limit,
+                        "label": label,
+                        "from_filter": from_filter,
+                        "subject_filter": subject_filter,
+                        "after": after,
+                        "before": before,
+                    }
+                )
+                return [
+                    Contact(
+                        id="fake-msg",
+                        name="Fake Sender",
+                        source="gmail",
+                        snippet="Fake subject",
+                        reply_to="sender@example.com",
+                        thread_id="fake-thread",
+                        gmail_account=account_email,
+                        last_ts=datetime(2025, 1, 2, 3, 4),
+                    )
+                ]
+
+        fake_adapter = FakeGmailAdapter()
+        inbox_server.state.gmail_services = {"fake@example.com": object()}
+        inbox_server.state.source_adapters.gmail = fake_adapter
+
+        resp = client.get(
+            "/gmail/search",
+            params={
+                "q": "invoice",
+                "account": "fake@example.com",
+                "limit": 5,
+                "label": "INBOX",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["id"] == "fake-msg"
+        assert data[0]["name"] == "Fake Sender"
+        assert data[0]["source"] == "gmail"
+        assert data[0]["gmail_account"] == "fake@example.com"
+        assert fake_adapter.calls[0]["q"] == "invoice"
+        assert fake_adapter.calls[0]["label"] == "INBOX"
+
+    def test_calendar_events_uses_fake_source_adapter(self, client):
+        import inbox_server
+
+        class FakeCalendarAdapter:
+            def __init__(self):
+                self.calls = []
+
+            def events(self, cal_services, date=None, start_date=None, end_date=None):
+                self.calls.append(
+                    {
+                        "cal_services": cal_services,
+                        "date": date,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                    }
+                )
+                return [
+                    CalendarEvent(
+                        summary="Fake Standup",
+                        start=datetime(2025, 6, 15, 9, 0),
+                        end=datetime(2025, 6, 15, 9, 30),
+                        account="fake@example.com",
+                        event_id="fake-event",
+                        calendar_id="primary",
+                    )
+                ]
+
+        fake_adapter = FakeCalendarAdapter()
+        inbox_server.state.cal_services = {"fake@example.com": object()}
+        inbox_server.state.source_adapters.calendar = fake_adapter
+
+        resp = client.get(
+            "/calendar/events",
+            params={
+                "start": "2025-06-15T00:00:00",
+                "end": "2025-06-15T23:59:59",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["summary"] == "Fake Standup"
+        assert data[0]["account"] == "fake@example.com"
+        assert data[0]["event_id"] == "fake-event"
+        assert fake_adapter.calls[0]["start_date"] == datetime(2025, 6, 15, 0, 0)
+        assert fake_adapter.calls[0]["end_date"] == datetime(2025, 6, 15, 23, 59, 59)
+
+    def test_production_source_adapters_delegate_to_service_functions(self, monkeypatch):
+        import inbox_server
+
+        gmail_service = object()
+        cal_service = object()
+        expected_contact = Contact(id="msg", name="Sender", source="gmail")
+        expected_event = CalendarEvent(
+            summary="Calendar Event",
+            start=datetime(2025, 7, 1, 9, 0),
+            end=datetime(2025, 7, 1, 10, 0),
+        )
+
+        def fake_gmail_search(*args):
+            assert args == (
+                gmail_service,
+                "me@example.com",
+                "query",
+                3,
+                "INBOX",
+                "",
+                "",
+                "",
+                "",
+            )
+            return [expected_contact]
+
+        def fake_calendar_events(*args):
+            assert args == ({"me@example.com": cal_service}, None, None, None)
+            return [expected_event]
+
+        monkeypatch.setattr(inbox_server, "gmail_search", fake_gmail_search)
+        monkeypatch.setattr(inbox_server, "calendar_events", fake_calendar_events)
+
+        gmail_adapter = inbox_server.ProductionGmailSourceAdapter()
+        calendar_adapter = inbox_server.ProductionCalendarSourceAdapter()
+
+        assert gmail_adapter.search(gmail_service, "me@example.com", "query", 3, "INBOX") == [
+            expected_contact
+        ]
+        assert calendar_adapter.events({"me@example.com": cal_service}) == [expected_event]
+
+
 class TestCalendarExtensions:
     @patch("inbox_server.calendar_events")
     def test_calendar_upcoming(self, mock_events, client):

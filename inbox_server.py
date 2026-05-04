@@ -12,7 +12,7 @@ import os
 import re
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from secrets import compare_digest
 from typing import Any
@@ -708,6 +708,51 @@ class BulkUnsubscribeRequest(BaseModel):
 # ── Server state ─────────────────────────────────────────────────────────────
 
 
+class ProductionGmailSourceAdapter:
+    def search(
+        self,
+        service: object,
+        account_email: str,
+        q: str = "",
+        limit: int = 20,
+        label: str = "",
+        from_filter: str = "",
+        subject_filter: str = "",
+        after: str = "",
+        before: str = "",
+    ) -> list[Contact]:
+        return gmail_search(
+            service,
+            account_email,
+            q,
+            limit,
+            label,
+            from_filter,
+            subject_filter,
+            after,
+            before,
+        )
+
+
+class ProductionCalendarSourceAdapter:
+    def events(
+        self,
+        cal_services: dict[str, object],
+        date: datetime | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> list[CalendarEvent]:
+        return calendar_events(cal_services, date, start_date, end_date)
+
+
+@dataclass
+class SourceAdapters:
+    gmail: ProductionGmailSourceAdapter = field(default_factory=ProductionGmailSourceAdapter)
+    calendar: ProductionCalendarSourceAdapter = field(
+        default_factory=ProductionCalendarSourceAdapter
+    )
+
+
 class ServerState:
     def __init__(self) -> None:
         self.gmail_services: dict[str, object] = {}
@@ -724,6 +769,7 @@ class ServerState:
         self.dictation: DictationService = DictationService()
         self.scheduler: SchedulerStore = SchedulerStore()
         self.index_store: MessageIndexStore = MessageIndexStore()
+        self.source_adapters: SourceAdapters = SourceAdapters()
 
 
 state = ServerState()
@@ -1644,7 +1690,7 @@ async def search_gmail(
     )
     for email, svc in targets.items():
         contacts = await asyncio.to_thread(
-            gmail_search,
+            state.source_adapters.gmail.search,
             svc,
             email,
             q,
@@ -1794,14 +1840,16 @@ async def list_events(
         start_dt = datetime.fromisoformat(start)
         end_dt = datetime.fromisoformat(end)
         evts = await asyncio.to_thread(
-            calendar_events,
+            state.source_adapters.calendar.events,
             state.cal_services,
             start_date=start_dt,
             end_date=end_dt,
         )
     else:
         dt = datetime.fromisoformat(date) if date else None
-        evts = await asyncio.to_thread(calendar_events, state.cal_services, dt)
+        evts = await asyncio.to_thread(
+            state.source_adapters.calendar.events, state.cal_services, dt
+        )
     state.events_cache = evts
     return [_event_to_out(e) for e in evts]
 
@@ -1812,7 +1860,7 @@ async def list_upcoming_events(days: int = 7):
     start_dt = datetime.now()
     end_dt = start_dt + timedelta(days=days - 1)
     evts = await asyncio.to_thread(
-        calendar_events,
+        state.source_adapters.calendar.events,
         state.cal_services,
         start_date=start_dt,
         end_date=end_dt,
