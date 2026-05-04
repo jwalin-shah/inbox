@@ -10,7 +10,9 @@ import base64
 import math
 import os
 import re
+from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from secrets import compare_digest
 from typing import Any
@@ -173,6 +175,14 @@ from services import (
 
 PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
+GOOGLE_SERVICE_SET = tuple[
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+]
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -720,6 +730,21 @@ state = ServerState()
 memory_store = MemoryStore()
 
 
+@dataclass
+class InboxServerRuntime:
+    server_state: ServerState | None = None
+    init_contacts_func: Callable[[], int] | None = None
+    google_auth_func: Callable[[], GOOGLE_SERVICE_SET] | None = None
+    start_scheduler: bool = True
+    ambient_autostart: bool = True
+    prewarm_conversations: bool | None = None
+    close_sqlite_func: Callable[[], None] | None = None
+
+
+def _empty_google_services() -> GOOGLE_SERVICE_SET:
+    return {}, {}, {}, {}, {}, {}
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -1110,78 +1135,119 @@ async def _scheduler_loop() -> None:
 # ── App lifecycle ────────────────────────────────────────────────────────────
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    n = await asyncio.to_thread(init_contacts)
-    print(f"Loaded {n} contacts")
+def make_lifespan(runtime: InboxServerRuntime | None = None):
+    runtime = runtime or InboxServerRuntime()
 
-    gmail, cal, drive, sheets, docs, tasks = await asyncio.to_thread(google_auth_all)
-    state.gmail_services = gmail
-    state.cal_services = cal
-    state.drive_services = drive
-    state.sheets_services = sheets
-    state.docs_services = docs
-    state.tasks_services = tasks
-    print(
-        f"Gmail accounts: {list(gmail.keys())}, "
-        f"Calendar accounts: {list(cal.keys())}, "
-        f"Drive accounts: {list(drive.keys())}, "
-        f"Sheets accounts: {list(sheets.keys())}, "
-        f"Docs accounts: {list(docs.keys())}, "
-        f"Tasks accounts: {list(tasks.keys())}"
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        global state
+
+        previous_state = state
+        if runtime.server_state is not None:
+            state = runtime.server_state
+
+        init_contacts_func = runtime.init_contacts_func or init_contacts
+        google_auth_func = runtime.google_auth_func or google_auth_all
+        close_sqlite_func = runtime.close_sqlite_func or close_sqlite_connections
+
+        n = await asyncio.to_thread(init_contacts_func)
+        print(f"Loaded {n} contacts")
+
+        gmail, cal, drive, sheets, docs, tasks = await asyncio.to_thread(google_auth_func)
+        state.gmail_services = gmail
+        state.cal_services = cal
+        state.drive_services = drive
+        state.sheets_services = sheets
+        state.docs_services = docs
+        state.tasks_services = tasks
+        print(
+            f"Gmail accounts: {list(gmail.keys())}, "
+            f"Calendar accounts: {list(cal.keys())}, "
+            f"Drive accounts: {list(drive.keys())}, "
+            f"Sheets accounts: {list(sheets.keys())}, "
+            f"Docs accounts: {list(docs.keys())}, "
+            f"Tasks accounts: {list(tasks.keys())}"
+        )
+
+        prewarm = runtime.prewarm_conversations
+        if prewarm is None:
+            prewarm = os.environ.get("INBOX_PRE_WARM_CONVERSATIONS", "").strip() in (
+                "1",
+                "true",
+                "yes",
+            )
+        if prewarm:
+            try:
+                results = await _fetch_conversations("all", limit=50)
+                state.conv_cache.clear()
+                for c in results:
+                    state.conv_cache[_cache_key(c.source, c.id)] = c
+                print(f"Pre-warmed {len(state.conv_cache)} conversations")
+            except Exception:
+                logger.warning("Pre-warm conversations failed (non-fatal)")
+
+        if runtime.ambient_autostart:
+            try:
+                disable_ambient = os.environ.get("INBOX_DISABLE_AMBIENT", "").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                voice_cfg = load_voice_config()
+                if disable_ambient:
+                    print("[ambient] Autostart disabled by INBOX_DISABLE_AMBIENT")
+                elif voice_cfg.get("ambient_autostart", False):
+                    avail, reason = ambient_available()
+                    if avail:
+                        state.ambient.start()
+                        print("[ambient] Auto-started ambient listening")
+                    else:
+                        print(f"[ambient] Autostart skipped: {reason}")
+            except Exception:
+                logger.warning("Ambient autostart failed (non-fatal)")
+
+        scheduler_task = None
+        if runtime.start_scheduler:
+            scheduler_task = asyncio.create_task(_scheduler_loop())
+
+        try:
+            yield
+        finally:
+            if scheduler_task is not None:
+                scheduler_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await scheduler_task
+            state.ambient.stop()
+            await asyncio.to_thread(close_sqlite_func)
+            if runtime.server_state is not None:
+                state = previous_state
+
+    return lifespan
+
+
+def create_app(runtime: InboxServerRuntime | None = None) -> FastAPI:
+    new_app = FastAPI(
+        title="Inbox API",
+        lifespan=make_lifespan(runtime),
+        docs_url="/api-docs",
+        redoc_url="/api-redoc",
+        openapi_url="/api-openapi.json",
     )
 
-    # Pre-warm conversation cache if enabled (reduces cold-start latency)
-    if os.environ.get("INBOX_PRE_WARM_CONVERSATIONS", "").strip() in ("1", "true", "yes"):
-        try:
-            results = await _fetch_conversations("all", limit=50)
-            state.conv_cache.clear()
-            for c in results:
-                state.conv_cache[_cache_key(c.source, c.id)] = c
-            print(f"Pre-warmed {len(state.conv_cache)} conversations")
-        except Exception:
-            logger.warning("Pre-warm conversations failed (non-fatal)")
+    existing_app = globals().get("app")
+    if existing_app is not None:
+        generated_paths = {"/api-docs", "/api-redoc", "/api-openapi.json"}
+        for route in existing_app.router.routes:
+            if getattr(route, "path", "") not in generated_paths:
+                new_app.router.routes.append(route)
+        new_app.user_middleware.extend(existing_app.user_middleware)
+        new_app.exception_handlers.update(existing_app.exception_handlers)
+        new_app.middleware_stack = None
 
-    # Ambient autostart — can be disabled by env and otherwise respects voice config
-    try:
-        disable_ambient = os.environ.get("INBOX_DISABLE_AMBIENT", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        voice_cfg = load_voice_config()
-        if disable_ambient:
-            print("[ambient] Autostart disabled by INBOX_DISABLE_AMBIENT")
-        elif voice_cfg.get("ambient_autostart", False):
-            avail, reason = ambient_available()
-            if avail:
-                state.ambient.start()
-                print("[ambient] Auto-started ambient listening")
-            else:
-                print(f"[ambient] Autostart skipped: {reason}")
-    except Exception:
-        logger.warning("Ambient autostart failed (non-fatal)")
-
-    # Start background scheduler loop (message scheduling + followup reminders)
-    scheduler_task = asyncio.create_task(_scheduler_loop())
-
-    try:
-        yield
-    finally:
-        scheduler_task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await scheduler_task
-        state.ambient.stop()
-        await asyncio.to_thread(close_sqlite_connections)
+    return new_app
 
 
-app = FastAPI(
-    title="Inbox API",
-    lifespan=lifespan,
-    docs_url="/api-docs",
-    redoc_url="/api-redoc",
-    openapi_url="/api-openapi.json",
-)
+app = create_app()
 
 
 def _auth_token() -> str:

@@ -28,31 +28,31 @@ from services import (
 
 @pytest.fixture
 def client():
-    """TestClient with mocked lifespan (no real Google auth / contacts)."""
+    """TestClient with fake runtime state and disabled background loops."""
     import inbox_server
 
-    # Patch lifespan dependencies so real auth doesn't run
+    mock_ambient = MagicMock()
+    mock_ambient.is_running = False
+    mock_dictation = MagicMock()
+    mock_dictation.is_running = False
+    mock_dictation.available = True
+
+    fake_state = inbox_server.ServerState()
+    fake_state.ambient = mock_ambient
+    fake_state.dictation = mock_dictation
+
+    runtime = inbox_server.InboxServerRuntime(
+        server_state=fake_state,
+        init_contacts_func=lambda: 0,
+        google_auth_func=inbox_server._empty_google_services,
+        start_scheduler=False,
+        ambient_autostart=False,
+    )
+
     with (
         patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
-        patch("inbox_server.init_contacts", return_value=0),
-        patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
-        TestClient(inbox_server.app, raise_server_exceptions=False) as c,
+        TestClient(inbox_server.create_app(runtime), raise_server_exceptions=False) as c,
     ):
-        # Reset state after lifespan has run (lifespan sets from mocked return)
-        inbox_server.state.gmail_services = {}
-        inbox_server.state.cal_services = {}
-        inbox_server.state.drive_services = {}
-        inbox_server.state.sheets_services = {}
-        inbox_server.state.conv_cache = {}
-        inbox_server.state.events_cache = []
-        # Replace ambient/dictation with mocks for testing
-        mock_ambient = MagicMock()
-        mock_ambient.is_running = False
-        mock_dictation = MagicMock()
-        mock_dictation.is_running = False
-        mock_dictation.available = True
-        inbox_server.state.ambient = mock_ambient
-        inbox_server.state.dictation = mock_dictation
         yield c
 
 
@@ -261,15 +261,58 @@ class TestLifespanCleanup:
     def test_shutdown_closes_sqlite_connections(self):
         import inbox_server
 
-        with (
-            patch("inbox_server.init_contacts", return_value=0),
-            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
-            patch("inbox_server.close_sqlite_connections") as mock_close,
-            TestClient(inbox_server.app, raise_server_exceptions=False),
-        ):
-            pass
+        with patch("inbox_server.close_sqlite_connections") as mock_close:
+            runtime = inbox_server.InboxServerRuntime(
+                init_contacts_func=lambda: 0,
+                google_auth_func=inbox_server._empty_google_services,
+                start_scheduler=False,
+                ambient_autostart=False,
+                close_sqlite_func=mock_close,
+            )
+            with TestClient(inbox_server.create_app(runtime), raise_server_exceptions=False):
+                pass
 
         mock_close.assert_called_once_with()
+
+    def test_create_app_runtime_uses_fake_state_and_skips_background_loop(self, monkeypatch):
+        import inbox_server
+
+        scheduler_started = False
+
+        async def fake_scheduler_loop():
+            nonlocal scheduler_started
+            scheduler_started = True
+
+        monkeypatch.setattr(inbox_server, "_scheduler_loop", fake_scheduler_loop)
+
+        fake_state = inbox_server.ServerState()
+        fake_state.ambient = MagicMock()
+        fake_state.ambient.is_running = False
+        runtime = inbox_server.InboxServerRuntime(
+            server_state=fake_state,
+            init_contacts_func=lambda: 0,
+            google_auth_func=lambda: (
+                {"fake@example.com": object()},
+                {},
+                {},
+                {},
+                {},
+                {},
+            ),
+            start_scheduler=False,
+            ambient_autostart=False,
+        )
+
+        with (
+            patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
+            patch("services._github_token", return_value=None),
+            TestClient(inbox_server.create_app(runtime), raise_server_exceptions=False) as client,
+        ):
+            resp = client.get("/health")
+            assert resp.status_code == 200
+            assert resp.json()["gmail_accounts"] == ["fake@example.com"]
+
+        assert scheduler_started is False
 
 
 # ── Conversations ───────────────────────────────────────────────────────────
