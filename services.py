@@ -470,7 +470,7 @@ def google_auth_all() -> tuple[
     dict[str, object],
 ]:
     """Auth all accounts from tokens/ dir. Returns (gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs, tasks_svcs)."""
-    TOKENS_DIR.mkdir(exist_ok=True)
+    TOKENS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Migrate legacy token.json — if it's missing scopes, re-auth
     if TOKEN_FILE.exists() and not any(TOKENS_DIR.glob("*.json")):
@@ -552,7 +552,7 @@ def google_auth_all() -> tuple[
 
 def add_google_account() -> str | None:
     _assert_live_write_allowed("add Google account")
-    TOKENS_DIR.mkdir(exist_ok=True)
+    TOKENS_DIR.mkdir(parents=True, exist_ok=True)
     if not CREDS_FILE.exists():
         return None
     flow = InstalledAppFlow.from_client_secrets_file(str(CREDS_FILE), GOOGLE_SCOPES)

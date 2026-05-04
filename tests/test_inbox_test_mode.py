@@ -46,6 +46,24 @@ def test_services_resolve_local_data_paths_under_test_dir(tmp_path, monkeypatch)
         importlib.reload(services)
 
 
+def test_google_auth_all_creates_missing_test_data_parent(tmp_path, monkeypatch):
+    configured = tmp_path / "missing" / "nested"
+    monkeypatch.setenv("INBOX_TEST_MODE", "1")
+    monkeypatch.setenv("INBOX_TEST_DATA_DIR", str(configured))
+
+    import services
+
+    services = importlib.reload(services)
+    try:
+        assert services.google_auth_all() == ({}, {}, {}, {}, {}, {})
+        assert configured / "tokens" == services.TOKENS_DIR
+        assert services.TOKENS_DIR.is_dir()
+    finally:
+        monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
+        monkeypatch.delenv("INBOX_TEST_DATA_DIR", raising=False)
+        importlib.reload(services)
+
+
 def test_agent_safe_pytest_markers_are_registered(pytestconfig):
     marker_lines = pytestconfig.getini("markers")
 
