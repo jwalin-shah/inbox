@@ -53,6 +53,13 @@ reportMissingImports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=. --cov-report=term-missing"
+markers = [
+    "safe: deterministic tests that do not touch live personal data or external write surfaces",
+    "integration: tests that exercise integration behavior beyond a single module",
+    "local_data: tests that require local user data stores and must be explicitly opted into",
+    "slow: tests that are too slow for the default agent-safe loop",
+    "live_write: tests that perform externally visible writes and require explicit human approval",
+]
 
 [tool.bandit]
 exclude_dirs = [".venv", "tests"]

@@ -40,12 +40,29 @@ from contacts import ContactBook
 
 BASE_DIR = Path(__file__).parent
 CREDS_FILE = BASE_DIR / "credentials.json"
-TOKEN_FILE = BASE_DIR / "token.json"  # legacy single-account path
-TOKENS_DIR = BASE_DIR / "tokens"
-IMSG_DB = Path.home() / "Library/Messages/chat.db"
-NOTES_DB = Path.home() / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+try:
+    from inbox_test_mode import is_test_mode, test_data_dir
+except ImportError:
+    _TEST_DATA_DIR = None
+else:
+    _TEST_DATA_DIR = test_data_dir() if is_test_mode() else None
+
+TOKEN_FILE = (_TEST_DATA_DIR / "token.json") if _TEST_DATA_DIR else BASE_DIR / "token.json"
+TOKENS_DIR = (_TEST_DATA_DIR / "tokens") if _TEST_DATA_DIR else BASE_DIR / "tokens"
+IMSG_DB = (
+    _TEST_DATA_DIR / "Library/Messages/chat.db"
+    if _TEST_DATA_DIR
+    else Path.home() / "Library/Messages/chat.db"
+)
+NOTES_DB = (
+    _TEST_DATA_DIR / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+    if _TEST_DATA_DIR
+    else Path.home() / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+)
 REMINDERS_DIR = (
-    Path.home() / "Library/Group Containers/group.com.apple.reminders/Container_v1/Stores"
+    _TEST_DATA_DIR / "Library/Group Containers/group.com.apple.reminders/Container_v1/Stores"
+    if _TEST_DATA_DIR
+    else Path.home() / "Library/Group Containers/group.com.apple.reminders/Container_v1/Stores"
 )
 APPLE_EPOCH = datetime(2001, 1, 1)
 
@@ -78,6 +95,14 @@ _contacts = ContactBook()
 def init_contacts() -> int:
     """Load the contact book. Returns number of contacts loaded."""
     return _contacts.load()
+
+
+def _assert_live_write_allowed(action: str) -> None:
+    try:
+        from inbox_test_mode import assert_live_writes_allowed
+    except ImportError:
+        return
+    assert_live_writes_allowed(action)
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -526,6 +551,7 @@ def google_auth_all() -> tuple[
 
 
 def add_google_account() -> str | None:
+    _assert_live_write_allowed("add Google account")
     TOKENS_DIR.mkdir(exist_ok=True)
     if not CREDS_FILE.exists():
         return None
@@ -539,6 +565,7 @@ def add_google_account() -> str | None:
 
 
 def reauth_google_account(email: str) -> str | None:
+    _assert_live_write_allowed("reauth Google account")
     token_path = TOKENS_DIR / f"{email}.json"
     if token_path.exists():
         token_path.unlink()
@@ -681,6 +708,7 @@ def imsg_thread(chat_id: str, limit: int = 50) -> list[Msg]:
 
 
 def imsg_send(contact: Contact, text: str) -> bool:
+    _assert_live_write_allowed("send iMessage")
     safe_text = _escape_applescript(text)
 
     if contact.is_group:
@@ -1074,6 +1102,7 @@ def gmail_thread_summary(service, thread_id: str, account_email: str) -> ThreadS
 
 
 def gmail_send(service, contact: Contact, body: str) -> bool:
+    _assert_live_write_allowed("send Gmail reply")
     msg = MIMEText(body)
     msg["to"] = contact.reply_to
     msg["subject"] = f"Re: {contact.snippet}"
@@ -1102,6 +1131,7 @@ def gmail_send(service, contact: Contact, body: str) -> bool:
 
 def gmail_archive(service, msg_id: str) -> bool:
     """Archive a Gmail message by removing the INBOX label."""
+    _assert_live_write_allowed("archive Gmail message")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"removeLabelIds": ["INBOX"]}
@@ -1150,6 +1180,7 @@ def gmail_unsubscribe(service, msg_id: str) -> dict[str, str]:
     Execute unsubscribe via List-Unsubscribe header, then archive the message.
     Returns {"method": "url|mailto|none", "ok": bool}.
     """
+    _assert_live_write_allowed("unsubscribe Gmail message")
     import urllib.parse
 
     import requests
@@ -1189,6 +1220,7 @@ def gmail_unsubscribe(service, msg_id: str) -> dict[str, str]:
 
 def gmail_delete(service, msg_id: str) -> bool:
     """Move a Gmail message to trash."""
+    _assert_live_write_allowed("delete Gmail message")
     try:
         service.users().messages().trash(userId="me", id=msg_id).execute()
         return True
@@ -1199,6 +1231,7 @@ def gmail_delete(service, msg_id: str) -> bool:
 
 def gmail_star(service, msg_id: str) -> bool:
     """Add STARRED label to a Gmail message."""
+    _assert_live_write_allowed("star Gmail message")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"addLabelIds": ["STARRED"]}
@@ -1211,6 +1244,7 @@ def gmail_star(service, msg_id: str) -> bool:
 
 def gmail_unstar(service, msg_id: str) -> bool:
     """Remove STARRED label from a Gmail message."""
+    _assert_live_write_allowed("unstar Gmail message")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"removeLabelIds": ["STARRED"]}
@@ -1223,6 +1257,7 @@ def gmail_unstar(service, msg_id: str) -> bool:
 
 def gmail_mark_read(service, msg_id: str) -> bool:
     """Mark a Gmail message as read by removing UNREAD label."""
+    _assert_live_write_allowed("mark Gmail message read")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
@@ -1235,6 +1270,7 @@ def gmail_mark_read(service, msg_id: str) -> bool:
 
 def gmail_mark_unread(service, msg_id: str) -> bool:
     """Mark a Gmail message as unread by adding UNREAD label."""
+    _assert_live_write_allowed("mark Gmail message unread")
     try:
         service.users().messages().modify(
             userId="me", id=msg_id, body={"addLabelIds": ["UNREAD"]}
@@ -1285,6 +1321,7 @@ def gmail_attachment_download(service, msg_id: str, att_id: str) -> bytes | None
 
 def gmail_compose_send(service, to: str, subject: str, body: str) -> bool:
     """Send a new email (not a reply)."""
+    _assert_live_write_allowed("send Gmail message")
     msg = MIMEText(body)
     msg["to"] = to
     msg["subject"] = subject
@@ -1437,6 +1474,7 @@ def gmail_batch_modify(
     remove_label_ids: list[str] | None = None,
 ) -> bool:
     """Apply Gmail labels to multiple messages at once."""
+    _assert_live_write_allowed("modify Gmail labels")
     try:
         service.users().messages().batchModify(
             userId="me",
@@ -1465,6 +1503,7 @@ def gmail_create_filter(
     forward: str = "",
 ) -> dict | None:
     """Create a Gmail filter. Requires gmail.settings.basic scope."""
+    _assert_live_write_allowed("create Gmail filter")
     try:
         action: dict[str, object] = {
             "addLabelIds": add_label_ids or [],
@@ -1712,6 +1751,7 @@ def calendar_create_event(
     recurrence: list[str] | None = None,
     reminders: dict | None = None,
 ) -> str | None:
+    _assert_live_write_allowed("create calendar event")
     try:
         body = _build_event_body(
             summary,
@@ -1755,6 +1795,7 @@ def calendar_update_event(
     calendar_id: str = "primary",
     reminders: dict | None = None,
 ) -> bool:
+    _assert_live_write_allowed("update calendar event")
     try:
         existing = cal_service.events().get(calendarId=calendar_id, eventId=event_id).execute()
         if summary is not None:
@@ -1798,6 +1839,7 @@ def calendar_update_event(
 
 
 def calendar_delete_event(cal_service, event_id: str, calendar_id: str = "primary") -> bool:
+    _assert_live_write_allowed("delete calendar event")
     try:
         cal_service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
         return True
@@ -2429,6 +2471,7 @@ def whatsapp_send(chat_name: str, text: str) -> bool:
     Activates app, selects chat, focuses compose field, types text via
     synthesized keystrokes (AXValue set is ignored by Catalyst), presses Return.
     """
+    _assert_live_write_allowed("send WhatsApp message")
     try:
         if not whatsapp_check_accessibility(prompt=False):
             return False
@@ -2965,6 +3008,7 @@ def reminder_complete(title: str, list_name: str = "") -> bool:
     Returns:
         True if the completion succeeded, False otherwise.
     """
+    _assert_live_write_allowed("complete Apple Reminder")
     find_clause = _applescript_find_reminder(title, list_name)
     script = f"""
     tell application "Reminders"
@@ -2992,6 +3036,7 @@ def reminder_uncomplete(title: str, list_name: str = "") -> bool:
     Returns:
         True if the operation succeeded, False otherwise.
     """
+    _assert_live_write_allowed("uncomplete Apple Reminder")
     find_clause = _applescript_find_reminder(title, list_name)
     script = f"""
     tell application "Reminders"
@@ -3030,6 +3075,7 @@ def reminder_create(
     Returns:
         True if creation succeeded, False otherwise.
     """
+    _assert_live_write_allowed("create Apple Reminder")
     safe_title = _escape_applescript(title)
     safe_notes = _escape_applescript(notes)
     safe_list = _escape_applescript(list_name)
@@ -3106,6 +3152,7 @@ def reminder_edit(
     Returns:
         True if the edit succeeded, False otherwise.
     """
+    _assert_live_write_allowed("edit Apple Reminder")
     find_clause = _applescript_find_reminder(current_title, list_name)
     set_clauses: list[str] = []
 
@@ -3166,6 +3213,7 @@ def reminder_delete(title: str, list_name: str = "") -> bool:
     Returns:
         True if the deletion succeeded, False otherwise.
     """
+    _assert_live_write_allowed("delete Apple Reminder")
     find_clause = _applescript_find_reminder(title, list_name)
     script = f"""
     tell application "Reminders"
@@ -3255,6 +3303,7 @@ def task_create(
     notes: str = "",
 ) -> bool:
     """Create a Google Task."""
+    _assert_live_write_allowed("create Google Task")
     try:
         body = {"title": title}
         if notes:
@@ -3270,6 +3319,7 @@ def task_create(
 
 def task_complete(service, task_id: str, list_id: str = "@default") -> bool:
     """Mark a Google Task as complete."""
+    _assert_live_write_allowed("complete Google Task")
     try:
         service.tasks().patch(
             tasklist=list_id,
@@ -3284,6 +3334,7 @@ def task_complete(service, task_id: str, list_id: str = "@default") -> bool:
 
 def task_delete(service, task_id: str, list_id: str = "@default") -> bool:
     """Delete a Google Task."""
+    _assert_live_write_allowed("delete Google Task")
     try:
         service.tasks().delete(tasklist=list_id, task=task_id).execute()
         return True
@@ -3301,6 +3352,7 @@ def task_update(
     notes: str | None = None,
 ) -> bool:
     """Update a Google Task."""
+    _assert_live_write_allowed("update Google Task")
     try:
         body = {}
         if title is not None:
@@ -3813,6 +3865,7 @@ def github_notifications(all_notifs: bool = False) -> list[GitHubNotification]:
 
 def github_mark_read(notification_id: str) -> bool:
     """Mark a single GitHub notification as read."""
+    _assert_live_write_allowed("mark GitHub notification read")
     headers = _github_headers()
     if not headers:
         return False
@@ -3830,6 +3883,7 @@ def github_mark_read(notification_id: str) -> bool:
 
 def github_mark_all_read() -> bool:
     """Mark all GitHub notifications as read."""
+    _assert_live_write_allowed("mark all GitHub notifications read")
     headers = _github_headers()
     if not headers:
         return False
@@ -3991,6 +4045,7 @@ def drive_upload(
 
 def drive_create_folder(drive_service, name: str, parent_id: str = "") -> DriveFile | None:
     """Create a folder in Google Drive."""
+    _assert_live_write_allowed("create Google Drive folder")
     try:
         metadata: dict = {
             "name": name,
@@ -4019,6 +4074,7 @@ def drive_create_folder(drive_service, name: str, parent_id: str = "") -> DriveF
 
 def drive_delete(drive_service, file_id: str) -> bool:
     """Delete (trash) a file from Google Drive."""
+    _assert_live_write_allowed("delete Google Drive file")
     try:
         drive_service.files().update(fileId=file_id, body={"trashed": True}).execute()
         return True
@@ -4162,6 +4218,7 @@ def sheets_create(
     sheets_service: object, title: str, sheets: list[str] | None = None
 ) -> Spreadsheet | None:
     """Create a new spreadsheet with optional sheet tabs."""
+    _assert_live_write_allowed("create Google Sheet")
     try:
         requests = []
         body = {
@@ -4188,6 +4245,7 @@ def sheets_create(
 
 def sheets_delete(drive_service: object, spreadsheet_id: str) -> bool:
     """Soft-delete (trash) a spreadsheet."""
+    _assert_live_write_allowed("delete Google Sheet")
     try:
         drive_service.files().update(fileId=spreadsheet_id, body={"trashed": True}).execute()
         return True
@@ -4242,6 +4300,7 @@ def sheets_values_update(
     value_input: str = "USER_ENTERED",
 ) -> dict | None:
     """Update a range with values. Returns update stats or None on error."""
+    _assert_live_write_allowed("update Google Sheet values")
     try:
         result = (
             sheets_service.spreadsheets()
@@ -4267,6 +4326,7 @@ def sheets_values_batch_update(
     value_input: str = "USER_ENTERED",
 ) -> dict | None:
     """Update multiple ranges. data = [{"range": "...", "values": [...]}, ...]."""
+    _assert_live_write_allowed("batch update Google Sheet values")
     try:
         result = (
             sheets_service.spreadsheets()
@@ -4294,6 +4354,7 @@ def sheets_values_append(
     value_input: str = "USER_ENTERED",
 ) -> dict | None:
     """Append rows to a range. Returns append stats or None on error."""
+    _assert_live_write_allowed("append Google Sheet values")
     try:
         result = (
             sheets_service.spreadsheets()
@@ -4314,6 +4375,7 @@ def sheets_values_append(
 
 def sheets_values_clear(sheets_service: object, spreadsheet_id: str, range_: str) -> bool:
     """Clear a range."""
+    _assert_live_write_allowed("clear Google Sheet values")
     try:
         sheets_service.spreadsheets().values().clear(
             spreadsheetId=spreadsheet_id, range=range_
@@ -4332,6 +4394,7 @@ def sheets_add_sheet(
     cols: int = 26,
 ) -> SheetTab | None:
     """Add a new sheet tab to a spreadsheet."""
+    _assert_live_write_allowed("add Google Sheet tab")
     try:
         result = (
             sheets_service.spreadsheets()
@@ -4369,6 +4432,7 @@ def sheets_add_sheet(
 
 def sheets_delete_sheet(sheets_service: object, spreadsheet_id: str, sheet_id: int) -> bool:
     """Delete a sheet tab by sheet_id."""
+    _assert_live_write_allowed("delete Google Sheet tab")
     try:
         sheets_service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
@@ -4506,6 +4570,7 @@ def docs_get(docs_service: object, document_id: str) -> Document | None:
 
 def docs_create(docs_service: object, title: str) -> Document | None:
     """Create a new Google Doc."""
+    _assert_live_write_allowed("create Google Doc")
     try:
         result = docs_service.documents().create(body={"title": title}).execute()
         document_id = result.get("documentId", "")
@@ -4521,6 +4586,7 @@ def docs_create(docs_service: object, title: str) -> Document | None:
 
 def docs_delete(drive_service: object, document_id: str) -> bool:
     """Soft-delete (trash) a document."""
+    _assert_live_write_allowed("delete Google Doc")
     try:
         drive_service.files().update(fileId=document_id, body={"trashed": True}).execute()
         return True
@@ -5494,7 +5560,11 @@ def autocomplete(
 
 # ── Desktop Notifications ─────────────────────────────────────────────────────
 
-NOTIFICATION_CONFIG_PATH = Path.home() / ".config" / "inbox" / "notifications.json"
+NOTIFICATION_CONFIG_PATH = (
+    _TEST_DATA_DIR / "config/inbox/notifications.json"
+    if _TEST_DATA_DIR
+    else Path.home() / ".config" / "inbox" / "notifications.json"
+)
 
 _DEFAULT_NOTIFICATION_CONFIG: dict = {
     "enabled": True,
@@ -5572,6 +5642,7 @@ def send_notification(title: str, body: str, source: str = "") -> bool:
     falls back to osascript so tests/CI without pyobjc still work.
     Respects the notification config (enabled flag, per-source toggle, quiet hours).
     """
+    _assert_live_write_allowed("send desktop notification")
     cfg = load_notification_config()
     if not cfg.get("enabled", True):
         return False
@@ -5620,7 +5691,11 @@ def send_notification(title: str, body: str, source: str = "") -> bool:
 
 # ── Contacts search / profile ────────────────────────────────────────────────
 
-FAVORITES_FILE = Path.home() / ".config" / "inbox" / "favorites.json"
+FAVORITES_FILE = (
+    _TEST_DATA_DIR / "config/inbox/favorites.json"
+    if _TEST_DATA_DIR
+    else Path.home() / ".config" / "inbox" / "favorites.json"
+)
 
 
 def load_favorites() -> set[str]:
@@ -6146,7 +6221,11 @@ def ai_extract_actions(text: str) -> dict:  # type: ignore[type-arg]
 
 # ── Voice Config ────────────────────────────────────────────────────────────
 
-VOICE_CONFIG_PATH = Path.home() / ".config" / "inbox" / "voice.json"
+VOICE_CONFIG_PATH = (
+    _TEST_DATA_DIR / "config/inbox/voice.json"
+    if _TEST_DATA_DIR
+    else Path.home() / ".config" / "inbox" / "voice.json"
+)
 
 _VOICE_CONFIG_DEFAULTS: dict[str, object] = {
     "ambient_autostart": False,
@@ -6322,6 +6401,7 @@ def calendar_modify_attendees(
     calendar_id: str = "primary",
 ) -> bool:
     """Add/remove attendees from an event."""
+    _assert_live_write_allowed("modify calendar attendees")
     try:
         existing = cal_service.events().get(calendarId=calendar_id, eventId=event_id).execute()
         attendees = existing.get("attendees", [])
