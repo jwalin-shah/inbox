@@ -2,7 +2,7 @@
 
 - Issue: https://linear.app/symphony-test-jwalin/issue/SYM-29/inbox-b-resume-interrupted-bootstrap-sync-without-duplicates
 - Branch: `codex/SYM-29-resume-bootstrap-without-duplicates`
-- HEAD: `dd112cb`
+- HEAD: `2d6c1c2`
 - Status: In Review
 
 ## Scope
@@ -24,6 +24,6 @@
 - Added regression test `test_sync_gmail_bootstrap_does_not_double_count_or_rewrite_items_on_resume` in [tests/test_message_sync.py].
 
 ## Handoff
-- Commit: `dd112cb`
+- Commit: `2d6c1c2`
 - PR: `https://github.com/walin-shah/inbox/pull/13`
 - Push: `origin/codex/SYM-29-resume-bootstrap-without-duplicates`
