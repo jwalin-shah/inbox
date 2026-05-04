@@ -152,6 +152,10 @@ def test_sync_state_tracks_status_and_metadata(tmp_path):
 
 
 def test_list_threads_supports_waiting_on_and_recent_views(tmp_path):
+    import datetime
+    now = datetime.datetime.now(datetime.UTC)
+    t1 = now.isoformat()
+    t2 = (now + datetime.timedelta(hours=1)).isoformat()
     store = MessageIndexStore(tmp_path / "index.sqlite3")
     store.upsert_item(
         _item(
@@ -162,7 +166,7 @@ def test_list_threads_supports_waiting_on_and_recent_views(tmp_path):
             sender="Recruiter",
             subject="Interview tomorrow",
             body="Can you confirm your availability?",
-            created_at="2026-04-18T01:00:00+00:00",
+            created_at=t1,
             is_read=0,
         )
     )
@@ -175,7 +179,7 @@ def test_list_threads_supports_waiting_on_and_recent_views(tmp_path):
             sender="Billing",
             subject="Billing follow up",
             body="Your billing case is under review and we will get back to you soon.",
-            created_at="2026-04-18T02:00:00+00:00",
+            created_at=t2,
             is_read=1,
         )
     )
@@ -193,3 +197,74 @@ def test_list_threads_supports_waiting_on_and_recent_views(tmp_path):
 
     recent = store.list_threads(limit=10, newest_only=True, sort_mode="recent")
     assert [row["thread_id"] for row in recent] == ["track-thread", "reply-thread"]
+
+def test_upsert_item_is_idempotent(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    item = _item(
+        source="gmail",
+        account="a@example.com",
+        external_id="m1",
+        thread_id="t1",
+        sender="Me",
+        subject="Hello",
+    )
+    store.upsert_item(item)
+    store.upsert_item(item)
+
+    with store._connect() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        assert count == 1
+        row = conn.execute("SELECT * FROM items").fetchone()
+        assert row["external_id"] == "m1"
+        assert row["subject"] == "Hello"
+
+
+def test_rebuild_threads_is_idempotent(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    item = _item(
+        source="gmail",
+        account="a@example.com",
+        external_id="m1",
+        thread_id="t1",
+        sender="Me",
+        subject="Hello",
+    )
+    store.upsert_item(item)
+
+    store.rebuild_threads()
+    store.rebuild_threads()
+
+    with store._connect() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+        assert count == 1
+        row = conn.execute("SELECT * FROM threads").fetchone()
+        assert row["thread_id"] == "t1"
+
+
+def test_set_sync_state_is_idempotent(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    metadata = {"key": "value"}
+
+    store.set_sync_state(
+        source="gmail",
+        account="a@example.com",
+        checkpoint_type="internalDateMs",
+        checkpoint_value="12345",
+        status="idle",
+        metadata=metadata,
+    )
+
+    store.set_sync_state(
+        source="gmail",
+        account="a@example.com",
+        checkpoint_type="internalDateMs",
+        checkpoint_value="12345",
+        status="idle",
+        metadata=metadata,
+    )
+
+    states = store.list_sync_states()
+    assert len(states) == 1
+    assert states[0]["checkpoint_value"] == "12345"
+    assert states[0]["metadata"] == metadata
