@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from thread_classifier import classify_thread
 
 BASE_DIR = Path(__file__).parent
 DEFAULT_INDEX_DB = BASE_DIR / ".inbox_index.sqlite3"
@@ -384,29 +385,7 @@ class MessageIndexStore:
                     }
                 )
                 unread_count = sum(int(item["is_read"] == 0) for item in items)
-                human_score = _human_score(
-                    latest_sender=str(latest["sender"]),
-                    latest_subject=str(latest["subject"]),
-                    latest_body=str(latest["body_text"]),
-                )
-                noise_class = _noise_class(
-                    latest_sender=str(latest["sender"]),
-                    subject=str(latest["subject"]),
-                    body=str(latest["body_text"]),
-                )
-                topic = _topic(subject=str(latest["subject"]), body=str(latest["body_text"]))
-                urgency = _urgency(subject=str(latest["subject"]), body=str(latest["body_text"]))
-                actionability = _actionability(
-                    human_score=human_score,
-                    noise_class=noise_class,
-                    urgency=urgency,
-                    topic=topic,
-                )
-                needs_reply = int(
-                    actionability in {"reply", "review"} and str(latest["sender"]) != "Me"
-                )
-                open_loop = _open_loop(topic=topic, actionability=actionability, latest=latest)
-                summary = _summary(latest=latest, topic=topic, actionability=actionability)
+                classification = classify_thread(latest=latest)
                 conn.execute(
                     """
                     INSERT INTO threads (
@@ -451,14 +430,14 @@ class MessageIndexStore:
                         _json_dumps(participants),
                         len(items),
                         unread_count,
-                        human_score,
-                        noise_class,
-                        topic,
-                        urgency,
-                        actionability,
-                        needs_reply,
-                        summary,
-                        open_loop,
+                        classification.human_score,
+                        classification.noise_class,
+                        classification.topic,
+                        classification.urgency,
+                        classification.actionability,
+                        classification.needs_reply,
+                        classification.summary,
+                        classification.open_loop,
                         "v1",
                         now,
                     ),
@@ -546,106 +525,3 @@ class MessageIndexStore:
     def _thread_row_to_dict(self, row: sqlite3.Row) -> dict[str, object]:
         keys = list(row.keys())
         return {key: (_json_loads(row[key]) if key.endswith("_json") else row[key]) for key in keys}
-
-
-def _human_score(*, latest_sender: str, latest_subject: str, latest_body: str) -> float:
-    sender = latest_sender.lower()
-    haystack = f"{latest_subject}\n{latest_body}".lower()
-    score = 0.2
-    if latest_sender and latest_sender != "Me":
-        score += 0.3
-    if "noreply" not in sender and "no-reply" not in sender:
-        score += 0.2
-    if "unsubscribe" not in haystack and "verification code" not in haystack:
-        score += 0.2
-    if not sender.isdigit():
-        score += 0.1
-    return min(score, 1.0)
-
-
-def _noise_class(*, latest_sender: str, subject: str, body: str) -> str:
-    haystack = f"{subject}\n{body}".lower()
-    sender = latest_sender.lower()
-    if "verification code" in haystack or "otp" in haystack:
-        return "otp"
-    if "unsubscribe" in haystack or "job alert" in haystack:
-        return "newsletter"
-    if "appointment" in haystack or "your appt" in haystack:
-        return "appointment"
-    if "survey" in haystack or "thank you for your most recent visit" in haystack:
-        return "survey"
-    if "receipt" in haystack or "order" in haystack:
-        return "receipt"
-    if "login" in haystack or "security alert" in haystack:
-        return "security-alert"
-    if "noreply" in sender or "no-reply" in sender:
-        return "automated"
-    return ""
-
-
-def _topic(*, subject: str, body: str) -> str:
-    haystack = f"{subject}\n{body}".lower()
-    if any(token in haystack for token in ("interview", "recruit", "opportunity", "consulting")):
-        return "opportunity"
-    if any(token in haystack for token in ("appointment", "billing", "quest", "cvs", "health")):
-        return "health-admin"
-    if any(token in haystack for token in ("apartment", "tour", "lease", "housing")):
-        return "housing"
-    if any(token in haystack for token in ("login", "security", "verification")):
-        return "security"
-    return "general"
-
-
-def _urgency(*, subject: str, body: str) -> str:
-    haystack = f"{subject}\n{body}".lower()
-    if any(
-        token in haystack for token in ("action required", "urgent", "today", "verify", "security")
-    ):
-        return "high"
-    if any(token in haystack for token in ("appointment", "reply", "follow up", "opportunity")):
-        return "medium"
-    return "low"
-
-
-def _sender_freq_score(reply_count: int, thread_count: int) -> float:
-    if thread_count == 0:
-        return 0.0
-    reply_rate = reply_count / thread_count
-    volume_boost = min(math.log1p(reply_count) / math.log1p(10), 1.0)
-    return round(reply_rate * 0.7 + volume_boost * 0.3, 3)
-
-
-def _actionability(
-    *, human_score: float, noise_class: str, urgency: str, topic: str, sender_freq: float = 0.0
-) -> str:
-    if noise_class in {"otp", "receipt", "survey"}:
-        return "ignore"
-    if topic in {"security", "health-admin"} and urgency in {"high", "medium"}:
-        return "track"
-    if human_score >= 0.7 or sender_freq >= 0.5:
-        return "reply"
-    if noise_class in {"newsletter", "automated"}:
-        return "archive"
-    if topic == "opportunity":
-        return "review"
-    return "track"
-
-
-def _open_loop(*, topic: str, actionability: str, latest: sqlite3.Row) -> str:
-    if actionability == "reply":
-        return f"Reply to {latest['sender'] or 'sender'}"
-    if topic == "health-admin":
-        return "Track appointment or billing follow-up"
-    if topic == "security":
-        return "Confirm whether activity was expected"
-    if actionability == "review":
-        return "Review opportunity details"
-    return ""
-
-
-def _summary(*, latest: sqlite3.Row, topic: str, actionability: str) -> str:
-    title = _coalesce_str(latest["subject"]) or _coalesce_str(latest["snippet"])
-    sender = _coalesce_str(latest["sender"]) or "Unknown sender"
-    if title:
-        return f"{sender}: {title} [{topic}/{actionability}]"
-    return f"{sender} [{topic}/{actionability}]"
