@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import math
 import os
-import re
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -23,6 +21,38 @@ from loguru import logger
 from pydantic import BaseModel
 
 import ambient_notes
+import google_account_resolution as _gacct
+from gmail_triage import (
+    KIND_PREFIX as _KIND_PREFIX,
+)
+from gmail_triage import (
+    WORKFLOW_DISPLAY as _WORKFLOW_DISPLAY,
+)
+from gmail_triage import (
+    GmailThreadSummaryOut,
+    ThreadBriefOut,
+)
+from gmail_triage import (
+    classify_workflow as _classify_workflow,
+)
+from gmail_triage import (
+    contact_to_thread_summary as _contact_to_thread_summary,
+)
+from gmail_triage import (
+    extract_action_items as _extract_action_items,
+)
+from gmail_triage import (
+    extract_rich_data as _extract_rich_data,
+)
+from gmail_triage import (
+    indexed_thread_to_summary as _indexed_thread_to_summary,
+)
+from gmail_triage import (
+    rank_thread as _rank_thread,
+)
+from gmail_triage import (
+    thread_summary_to_out as _thread_summary_to_out,
+)
 from memory_store import MemoryStore
 from message_index_store import MessageIndexStore
 from message_sync import bootstrap as index_bootstrap_sync
@@ -42,7 +72,6 @@ from services import (
     Reminder,
     SheetTab,
     Spreadsheet,
-    ThreadSummary,
     add_google_account,
     ai_briefing,
     ai_extract_actions,
@@ -171,6 +200,13 @@ from services import (
 )
 from services import (
     autocomplete as services_autocomplete,
+)
+
+# Test-only: keeps _extract_* / _rank_thread imports live for ruff.
+_gmail_triage_reexports = (
+    _extract_action_items,
+    _extract_rich_data,
+    _rank_thread,
 )
 
 PORT = 9849
@@ -507,31 +543,6 @@ class PreflightResult(BaseModel):
     valid: bool
     warnings: list[str] = []
     explanation: str
-
-
-class GmailThreadSummaryOut(BaseModel):
-    thread_id: str
-    owning_account: str
-    participants: list[str]
-    subject: str
-    last_message_at: str
-    labels: list[str]
-    summary: str
-    action_items: list[str]
-    needs_reply: bool
-    workflow: str
-    message_count: int
-    rank: float = 0.0
-    brief: str = ""
-    rich_data: dict[str, str] = {}
-
-
-class ThreadBriefOut(BaseModel):
-    thread_id: str
-    brief: str
-    rank: float
-    workflow: str
-    needs_reply: bool
 
 
 class CreateDocumentRequest(BaseModel):
@@ -889,38 +900,6 @@ def _gh_notif_to_out(n: GitHubNotification) -> GitHubNotificationOut:
         unread=n.unread,
         updated_at=n.updated_at.isoformat(),
         url=n.url,
-    )
-
-
-def _thread_summary_to_out(ts: ThreadSummary, label_map: dict[str, str]) -> GmailThreadSummaryOut:
-    labels = [label_map.get(lid, lid) for lid in ts.label_ids if not lid.startswith("CATEGORY_")]
-    text = f"{ts.subject} {ts.body_text}"
-    workflow = _classify_workflow(text)
-    needs_reply = not ts.last_sender_is_me
-    action_items = _extract_action_items(ts.body_text)
-    last_iso = ts.last_message_at.isoformat()
-    rank = _rank_thread(last_iso, needs_reply, bool(action_items), workflow, ts.message_count)
-    sender = ts.participants[0] if ts.participants else "Unknown"
-    brief_parts = [f"{sender} \u00b7 {ts.subject[:60].rstrip()}"]
-    if needs_reply:
-        brief_parts.append("[needs reply]")
-    if workflow:
-        brief_parts.append(f"[{workflow}]")
-    return GmailThreadSummaryOut(
-        thread_id=ts.thread_id,
-        owning_account=ts.owning_account,
-        participants=ts.participants,
-        subject=ts.subject,
-        last_message_at=last_iso,
-        labels=labels,
-        summary=ts.last_message_body[:300].strip(),
-        action_items=action_items,
-        needs_reply=needs_reply,
-        workflow=workflow,
-        message_count=ts.message_count,
-        rank=rank,
-        brief=" ".join(brief_parts),
-        rich_data=_extract_rich_data(workflow, text),
     )
 
 
@@ -1440,46 +1419,14 @@ async def send_message(req: SendRequest):
 
 
 def _get_gmail_service(msg_id: str) -> tuple[object, Contact | None]:
-    """Look up the correct Gmail service for a message, using cache or fallback."""
-    contact = state.conv_cache.get(_cache_key("gmail", msg_id))
-    if contact and contact.gmail_account in state.gmail_services:
-        return state.gmail_services[contact.gmail_account], contact
-    default_acct = _default_google_account(state.gmail_services)
-    if default_acct:
-        return state.gmail_services[default_acct], contact
-    raise HTTPException(404, "No Gmail service available")
+    return _gacct.get_gmail_service(state, msg_id, _cache_key)
 
 
 def _get_gmail_service_for_account(account: str = "") -> tuple[str, object]:
-    acct = account or _default_google_account(state.gmail_services)
-    svc = state.gmail_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Gmail account available")
-    return acct, svc
+    return _gacct.get_gmail_service_for_account(state, account)
 
 
-def _gmail_message_or_thread_exists(service: object, msg_id: str = "", thread_id: str = "") -> bool:
-    """Return True if the Gmail message or thread exists in the given mailbox."""
-    try:
-        if msg_id:
-            (
-                service.users()
-                .messages()
-                .get(
-                    userId="me",
-                    id=msg_id,
-                    format="metadata",
-                    metadataHeaders=["Message-ID"],
-                )
-                .execute()
-            )
-            return True
-        if thread_id:
-            service.users().threads().get(userId="me", id=thread_id, format="metadata").execute()
-            return True
-    except Exception:
-        return False
-    return False
+_gmail_message_or_thread_exists = _gacct.gmail_message_or_thread_exists
 
 
 def _get_gmail_service_for_message(
@@ -1487,56 +1434,21 @@ def _get_gmail_service_for_message(
     thread_id: str = "",
     account: str = "",
 ) -> tuple[str, object]:
-    """Resolve the mailbox that owns a Gmail message/thread, falling back conservatively."""
-    if account:
-        return _get_gmail_service_for_account(account)
-
-    for cache_id in filter(None, [msg_id, thread_id]):
-        contact = state.conv_cache.get(_cache_key("gmail", cache_id))
-        if contact and contact.gmail_account in state.gmail_services:
-            return contact.gmail_account, state.gmail_services[contact.gmail_account]
-
-    for acct, svc in state.gmail_services.items():
-        if _gmail_message_or_thread_exists(svc, msg_id=msg_id, thread_id=thread_id):
-            return acct, svc
-
-    return _get_gmail_service_for_account("")
+    return _gacct.get_gmail_service_for_message(
+        state, msg_id, thread_id, account, cache_key=_cache_key
+    )
 
 
 def _get_sheets_service_for_account(account: str = "") -> tuple[str, object]:
-    acct = account or _default_google_account(state.sheets_services)
-    svc = state.sheets_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Sheets account available")
-    return acct, svc
-
-
-def _default_google_account(services: dict[str, object]) -> str:
-    """Pick the default account for a Google service.
-
-    Priority: INBOX_DEFAULT_GOOGLE_ACCOUNT env var if present in services,
-    then first service key.
-    """
-    preferred = os.environ.get("INBOX_DEFAULT_GOOGLE_ACCOUNT", "").strip()
-    if preferred and preferred in services:
-        return preferred
-    return next(iter(services)) if services else ""
+    return _gacct.get_sheets_service_for_account(state, account)
 
 
 def _get_drive_service_for_account(account: str = "") -> tuple[str, object]:
-    acct = account or _default_google_account(state.drive_services)
-    svc = state.drive_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Drive account available")
-    return acct, svc
+    return _gacct.get_drive_service_for_account(state, account)
 
 
 def _get_tasks_service_for_account(account: str = "") -> tuple[str, object]:
-    acct = account or _default_google_account(state.tasks_services)
-    svc = state.tasks_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No Tasks account available")
-    return acct, svc
+    return _gacct.get_tasks_service_for_account(state, account)
 
 
 @app.post("/messages/gmail/{msg_id}/archive")
@@ -2818,274 +2730,7 @@ async def format_spreadsheet(spreadsheet_id: str, req: FormatRequest):
 
 
 def _get_docs_service_for_account(account: str = "") -> tuple[str, object]:
-    """Get docs service for account, return (account_email, service). Raises HTTPException on failure."""
-    acct = account or _default_google_account(state.docs_services)
-    if not acct or acct not in state.docs_services:
-        raise HTTPException(400, "No docs service available")
-    return acct, state.docs_services[acct]
-
-
-_WORKFLOW_KEYWORDS: dict[str, list[str]] = {
-    "job_hunt": [
-        "recruiter",
-        "hiring",
-        "offer letter",
-        "interview",
-        "application",
-        "linkedin",
-        "resume",
-        "salary",
-        "compensation",
-        "candidate",
-        "onboarding",
-        "job description",
-        "cover letter",
-        "job offer",
-    ],
-    "legal": [
-        "attorney",
-        "legal counsel",
-        "contract",
-        "lawsuit",
-        "court",
-        "settlement",
-        "nda",
-        "litigation",
-        "subpoena",
-        "non-disclosure",
-    ],
-    "medical": [
-        "appointment",
-        "prescription",
-        "insurance claim",
-        "clinic",
-        "hospital",
-        "lab result",
-        "diagnosis",
-        "patient",
-        "referral",
-        "copay",
-        "doctor",
-        "medical",
-    ],
-    "finance": [
-        "invoice",
-        "payment due",
-        "tax return",
-        "bank statement",
-        "investment",
-        "reimbursement",
-        "payroll",
-        "billing",
-        "receipt",
-        "w-2",
-        "1099",
-    ],
-    "personal_admin": [
-        "dmv",
-        "renew",
-        "renewal",
-        "license plate",
-        "utility bill",
-        "lease",
-        "landlord",
-        "visa application",
-        "passport",
-    ],
-}
-
-_WORKFLOW_DISPLAY: dict[str, str] = {
-    "job_hunt": "Job Hunt",
-    "legal": "Legal",
-    "medical": "Medical",
-    "finance": "Finance",
-    "personal_admin": "Personal Admin",
-}
-
-_KIND_PREFIX: dict[str, str] = {
-    "interview": "[Interview]",
-    "deadline": "[Deadline]",
-    "meeting": "[Meeting]",
-}
-
-_ACTION_ITEM_RE = re.compile(
-    r"(?:please\s+\w[\w\s,]{5,80}|"
-    r"can you\s+\w[\w\s,]{5,80}|"
-    r"could you\s+\w[\w\s,]{5,80}|"
-    r"(?:Review|Send|Complete|Submit|Sign|Confirm|Approve|Update|Schedule|Respond|Reply|Attach|Forward)"
-    r"\s+\w[\w\s,]{3,80})"
-    r"[.!?]?",
-    re.IGNORECASE,
-)
-
-
-def _classify_workflow(text: str) -> str:
-    lower = text.lower()
-    for workflow, keywords in _WORKFLOW_KEYWORDS.items():
-        if any(kw in lower for kw in keywords):
-            return workflow
-    return ""
-
-
-def _extract_action_items(body: str) -> list[str]:
-    matches = _ACTION_ITEM_RE.findall(body)
-    seen: set[str] = set()
-    items: list[str] = []
-    for m in matches:
-        cleaned = m.strip()[:120]
-        key = cleaned.lower()[:40]
-        if key not in seen and cleaned:
-            seen.add(key)
-            items.append(cleaned)
-    return items[:5]
-
-
-_RICH_PATTERNS: dict[str, dict[str, re.Pattern]] = {
-    "job_hunt": {
-        "company": re.compile(
-            r"(?:at|from|with|@)\s+([A-Z][A-Za-z0-9&\s\-]{1,40}?)(?:\s+(?:Inc|LLC|Corp|Ltd|Co)\.?)?"
-            r"(?=[,\s]|$)",
-            re.IGNORECASE,
-        ),
-        "role": re.compile(
-            r"(?:position|role|opening|opportunity|for)\s*[:\-]?\s*([A-Za-z][A-Za-z\s]{4,50}?)"
-            r"(?=\s+(?:at|with|role|position)|[,\.]|$)",
-            re.IGNORECASE,
-        ),
-    },
-    "finance": {
-        "amount": re.compile(r"\$\s*[\d,]+(?:\.\d{2})?"),
-        "due_date": re.compile(
-            r"due\s+(?:on\s+|by\s+)?([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)",
-            re.IGNORECASE,
-        ),
-    },
-    "legal": {
-        "ref": re.compile(
-            r"(?:agreement|contract|nda|case)\s+(?:no\.?\s*)?([A-Z0-9\-]{3,20})",
-            re.IGNORECASE,
-        ),
-    },
-    "medical": {
-        "appointment": re.compile(
-            r"(?:appointment|visit|scheduled)\s+(?:for\s+|on\s+)?([A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}[\/-]\d{1,2})",
-            re.IGNORECASE,
-        ),
-    },
-}
-
-
-def _extract_rich_data(workflow: str, text: str) -> dict[str, str]:
-    patterns = _RICH_PATTERNS.get(workflow, {})
-    result: dict[str, str] = {}
-    for key, pat in patterns.items():
-        m = pat.search(text)
-        if m:
-            result[key] = (m.group(1) if m.lastindex else m.group(0)).strip()
-    return result
-
-
-def _rank_thread(
-    last_message_at_iso: str,
-    needs_reply: bool,
-    has_action_items: bool,
-    workflow: str,
-    message_count: int,
-) -> float:
-    """Score a thread — higher = fresher, more actionable, has workflow."""
-    try:
-        last = datetime.fromisoformat(last_message_at_iso)
-        days_old = max(0.0, (datetime.now() - last).total_seconds() / 86400)
-        score = 2.0 * math.exp(-days_old / 7)
-    except Exception:
-        score = 0.0
-    if needs_reply:
-        score += 1.0
-    if has_action_items:
-        score += 0.5
-    if workflow:
-        score += 0.3
-    if message_count > 1:
-        score += 0.2
-    return round(score, 4)
-
-
-def _contact_to_thread_summary(c: Contact) -> GmailThreadSummaryOut:
-    """Build a lightweight GmailThreadSummaryOut from a Contact (no full thread fetch)."""
-    wf = _classify_workflow(c.snippet)
-    nr = c.unread > 0
-    last_iso = c.last_ts.isoformat()
-    rank = _rank_thread(last_iso, nr, False, wf, 0)
-    sender = c.name or "Unknown"
-    brief_parts = [f"{sender} \u00b7 {c.snippet[:60].rstrip()}"]
-    if nr:
-        brief_parts.append("[needs reply]")
-    if wf:
-        brief_parts.append(f"[{wf}]")
-    return GmailThreadSummaryOut(
-        thread_id=c.thread_id or c.id,
-        owning_account=c.gmail_account,
-        participants=[c.name],
-        subject=c.snippet,
-        last_message_at=last_iso,
-        labels=[],
-        summary=c.snippet,
-        action_items=[],
-        needs_reply=nr,
-        workflow=wf,
-        message_count=0,
-        rank=rank,
-        brief=" ".join(brief_parts),
-        rich_data=_extract_rich_data(wf, c.snippet),
-    )
-
-
-def _indexed_thread_to_summary(row: dict[str, object]) -> GmailThreadSummaryOut:
-    subject = str(row.get("latest_subject", "") or row.get("latest_snippet", "") or "")
-    summary = str(row.get("summary", "") or subject)
-    workflow = _classify_workflow(f"{subject}\n{summary}")
-    needs_reply = bool(row.get("needs_reply"))
-    action_items = [str(row["open_loop"])] if row.get("open_loop") else []
-    last_message_at = str(row.get("latest_item_at", ""))
-    rank = _rank_thread(
-        last_message_at,
-        needs_reply,
-        bool(action_items),
-        workflow,
-        int(row.get("message_count", 0) or 0),
-    )
-    sender = str(row.get("latest_sender", "") or "Unknown")
-    brief_parts = [f"{sender} · {summary[:60].rstrip()}"]
-    if needs_reply:
-        brief_parts.append("[needs reply]")
-    if workflow:
-        brief_parts.append(f"[{workflow}]")
-    rich_text = "\n".join(
-        part
-        for part in [
-            subject,
-            summary,
-            str(row.get("open_loop", "")),
-            str(row.get("topic", "")),
-        ]
-        if part
-    )
-    return GmailThreadSummaryOut(
-        thread_id=str(row.get("thread_id", "")),
-        owning_account=str(row.get("account", "")),
-        participants=[str(p) for p in row.get("participants_json", [])],
-        subject=subject,
-        last_message_at=last_message_at,
-        labels=[],
-        summary=summary,
-        action_items=action_items,
-        needs_reply=needs_reply,
-        workflow=workflow,
-        message_count=int(row.get("message_count", 0) or 0),
-        rank=rank,
-        brief=" ".join(brief_parts),
-        rich_data=_extract_rich_data(workflow, rich_text),
-    )
+    return _gacct.get_docs_service_for_account(state, account)
 
 
 def _index_view_rows(view: str, limit: int) -> list[dict[str, object]]:
@@ -3122,140 +2767,10 @@ def _preflight_google_write(
     title: str = "",
 ) -> PreflightResult:
     """Inspect where a Google write will land without executing it."""
-    warnings: list[str] = []
-
-    if kind in ("doc", "sheet", "drive_folder"):
-        resolved = account or _default_google_account(state.drive_services)
-        if not resolved or resolved not in state.drive_services:
-            return PreflightResult(
-                kind=kind,
-                resolved_account=resolved,
-                destination="Drive",
-                destination_id=folder_id,
-                valid=False,
-                warnings=["No Drive account available"],
-                explanation=f"No Drive service available for account '{resolved}'",
-            )
-        svc = state.drive_services[resolved]
-        destination = "Drive root"
-        dest_id = folder_id or ""
-        if folder_id:
-            try:
-                folder = drive_get(svc, folder_id)
-                if folder:
-                    destination = f"Folder '{folder.name}'"
-                else:
-                    warnings.append(f"Folder '{folder_id}' not found")
-                    return PreflightResult(
-                        kind=kind,
-                        resolved_account=resolved,
-                        destination=f"Unknown folder '{folder_id}'",
-                        destination_id=folder_id,
-                        valid=False,
-                        warnings=warnings,
-                        explanation=f"Folder '{folder_id}' not found in Drive for {resolved}",
-                    )
-            except Exception:
-                warnings.append(f"Could not verify folder '{folder_id}'")
-                destination = f"Folder '{folder_id}' (unverified)"
-        label = f"'{title}' " if title else ""
-        return PreflightResult(
-            kind=kind,
-            resolved_account=resolved,
-            destination=destination,
-            destination_id=dest_id,
-            valid=True,
-            warnings=warnings,
-            explanation=f"Will create {kind} {label}in {destination} using {resolved}",
-        )
-
-    elif kind == "task":
-        resolved = account or _default_google_account(state.tasks_services)
-        if not resolved or resolved not in state.tasks_services:
-            return PreflightResult(
-                kind=kind,
-                resolved_account=resolved,
-                destination="Google Tasks",
-                destination_id=list_id,
-                valid=False,
-                warnings=["No Tasks account available"],
-                explanation=f"No Tasks service available for account '{resolved}'",
-            )
-        svc = state.tasks_services[resolved]
-        destination = "My Tasks"
-        dest_id = list_id or "@default"
-        if list_id and list_id != "@default":
-            try:
-                all_lists = tasks_lists(svc)
-                matched = next(
-                    (
-                        lst
-                        for lst in all_lists
-                        if lst.get("id") == list_id or lst.get("title") == list_id
-                    ),
-                    None,
-                )
-                if matched:
-                    destination = f"Task list '{matched.get('title', list_id)}'"
-                    dest_id = matched.get("id", list_id)
-                else:
-                    warnings.append(f"Task list '{list_id}' not found")
-                    return PreflightResult(
-                        kind=kind,
-                        resolved_account=resolved,
-                        destination=f"Unknown list '{list_id}'",
-                        destination_id=list_id,
-                        valid=False,
-                        warnings=warnings,
-                        explanation=f"Task list '{list_id}' not found for {resolved}",
-                    )
-            except Exception:
-                warnings.append(f"Could not verify task list '{list_id}'")
-                destination = f"List '{list_id}' (unverified)"
-        label = f"'{title}' " if title else ""
-        return PreflightResult(
-            kind=kind,
-            resolved_account=resolved,
-            destination=destination,
-            destination_id=dest_id,
-            valid=True,
-            warnings=warnings,
-            explanation=f"Will create task {label}in {destination} using {resolved}",
-        )
-
-    elif kind == "calendar_event":
-        resolved = account or _default_google_account(state.cal_services)
-        if not resolved or resolved not in state.cal_services:
-            return PreflightResult(
-                kind=kind,
-                resolved_account=resolved,
-                destination="Calendar",
-                destination_id=calendar_id,
-                valid=False,
-                warnings=["No calendar account available"],
-                explanation=f"No calendar service available for account '{resolved}'",
-            )
-        cal_id = calendar_id or "primary"
-        destination = "primary calendar" if cal_id == "primary" else f"Calendar '{cal_id}'"
-        label = f"'{title}' " if title else ""
-        return PreflightResult(
-            kind=kind,
-            resolved_account=resolved,
-            destination=destination,
-            destination_id=cal_id,
-            valid=True,
-            warnings=warnings,
-            explanation=f"Will create event {label}in {destination} using {resolved}",
-        )
-
     return PreflightResult(
-        kind=kind,
-        resolved_account="",
-        destination="",
-        destination_id="",
-        valid=False,
-        warnings=[f"Unknown kind '{kind}'"],
-        explanation=f"Unknown write kind '{kind}'. Expected: doc, sheet, drive_folder, task, calendar_event",
+        **_gacct.preflight_google_write_payload(
+            state, kind, account, folder_id, list_id, calendar_id, title
+        )
     )
 
 
@@ -3727,12 +3242,7 @@ async def test_notification(req: NotificationTestRequest):
 
 
 def _get_cal_service_for_account(account: str = "") -> tuple[str, object]:
-    """Get calendar service for account, raising HTTPException if unavailable."""
-    acct = account or _default_google_account(state.cal_services)
-    svc = state.cal_services.get(acct)
-    if not svc:
-        raise HTTPException(404, "No calendar account available")
-    return acct, svc
+    return _gacct.get_cal_service_for_account(state, account)
 
 
 @app.get("/calendar/calendars", response_model=list[CalendarOut])
