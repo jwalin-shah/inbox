@@ -13,6 +13,7 @@ from services import IMSG_DB, _clean_body, _decode_body, _parse_email_address, g
 GMAIL_BOOTSTRAP_BATCH_SIZE = 250
 GMAIL_INCREMENTAL_BATCH_SIZE = 100
 IMESSAGE_PROGRESS_EVERY = 250
+_ATTACHMENT_TEXT = "(attachment)"
 
 
 def _iso_from_ms(value: int | str | None) -> str:
@@ -30,6 +31,11 @@ def _iso_from_apple_seconds(value: float | int | None) -> str:
 
 def _hash_body(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _clean_imessage_body(text: str | None) -> str:
+    body = _clean_body(text)
+    return "" if body.replace(_ATTACHMENT_TEXT, "").strip() == "" else body
 
 
 def _gmail_recipients(headers: dict[str, str]) -> list[str]:
@@ -238,7 +244,7 @@ def _imessage_messages_after(last_rowid: int | None = None) -> list[sqlite3.Row]
 
 
 def _imessage_item(row: sqlite3.Row) -> IndexedItem:
-    body = _clean_body(row["text"] or "")
+    body = _clean_imessage_body(row["text"] or "")
     created_at = _iso_from_apple_seconds(row["ts"])
     sender = "Me" if row["is_from_me"] else (row["sender_id"] or "?")
     return IndexedItem(
@@ -277,11 +283,11 @@ def sync_imessage_bootstrap(store: MessageIndexStore) -> dict[str, int]:
     try:
         rows = _imessage_messages_after(highest_rowid or None)
         for row in rows:
-            body = _clean_body(row["text"] or "")
+            highest_rowid = max(highest_rowid, int(row["message_rowid"]))
+            body = _clean_imessage_body(row["text"] or "")
             if not body:
                 continue
             store.upsert_item(_imessage_item(row))
-            highest_rowid = max(highest_rowid, int(row["message_rowid"]))
             count += 1
             if count % IMESSAGE_PROGRESS_EVERY == 0:
                 store.update_sync_progress(
@@ -321,11 +327,11 @@ def sync_imessage_incremental(store: MessageIndexStore) -> dict[str, int]:
     try:
         rows = _imessage_messages_after(last_rowid)
         for row in rows:
-            body = _clean_body(row["text"] or "")
+            highest_rowid = max(highest_rowid, int(row["message_rowid"]))
+            body = _clean_imessage_body(row["text"] or "")
             if not body:
                 continue
             store.upsert_item(_imessage_item(row))
-            highest_rowid = max(highest_rowid, int(row["message_rowid"]))
             count += 1
             if count % IMESSAGE_PROGRESS_EVERY == 0:
                 store.update_sync_progress(

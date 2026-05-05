@@ -125,7 +125,9 @@ def test_sync_gmail_bootstrap_resumes_from_saved_page_token(tmp_path, monkeypatc
     assert row_count == 3
 
 
-def test_sync_gmail_bootstrap_does_not_double_count_or_rewrite_items_on_resume(tmp_path, monkeypatch):
+def test_sync_gmail_bootstrap_does_not_double_count_or_rewrite_items_on_resume(
+    tmp_path, monkeypatch
+):
     store = MessageIndexStore(tmp_path / "index.sqlite3")
 
     first_run_service = _FakeGmailService(
@@ -159,9 +161,7 @@ def test_sync_gmail_bootstrap_does_not_double_count_or_rewrite_items_on_resume(t
     assert interrupted["metadata"]["bootstrap_page_token"] == "page-2"
 
     with sqlite3.connect(store.db_path) as conn:
-        interrupted_count = conn.execute(
-            "SELECT COUNT(*) FROM items"
-        ).fetchone()[0]
+        interrupted_count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         existing_m2_ingested_at = conn.execute(
             "SELECT ingested_at FROM items WHERE external_id = 'm2'"
         ).fetchone()[0]
@@ -200,3 +200,84 @@ def test_sync_gmail_bootstrap_does_not_double_count_or_rewrite_items_on_resume(t
         ).fetchone()[0]
     assert finished_count == 3
     assert resumed_m2_ingested_at == existing_m2_ingested_at
+
+
+def test_sync_imessage_incremental_advances_checkpoint_for_skipped_rows(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.set_sync_state(
+        source="imessage",
+        account="local",
+        checkpoint_type="rowid",
+        checkpoint_value="10",
+        full_sync=False,
+        status="idle",
+        metadata={},
+    )
+
+    monkeypatch.setattr(
+        message_sync,
+        "_imessage_messages_after",
+        lambda _last_rowid: [
+            {
+                "message_rowid": 11,
+                "text": "",
+                "ts": 0,
+                "is_from_me": 0,
+                "sender_id": "a",
+                "chat_id": 1,
+            },
+            {
+                "message_rowid": 12,
+                "text": "\N{OBJECT REPLACEMENT CHARACTER}",
+                "ts": 0,
+                "is_from_me": 0,
+                "sender_id": "a",
+                "chat_id": 1,
+            },
+        ],
+    )
+
+    stats = message_sync.sync_imessage_incremental(store)
+    assert stats == {"local": 0}
+
+    state = store.get_sync_state("imessage", "local")
+    assert state is not None
+    assert state["checkpoint_value"] == "12"
+
+    with sqlite3.connect(store.db_path) as conn:
+        row_count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+    assert row_count == 0
+
+
+def test_sync_imessage_bootstrap_advances_checkpoint_for_skipped_rows(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    monkeypatch.setattr(
+        message_sync,
+        "_imessage_messages_after",
+        lambda _last_rowid: [
+            {
+                "message_rowid": 1,
+                "text": "",
+                "ts": 0,
+                "is_from_me": 1,
+                "sender_id": None,
+                "chat_id": 1,
+            },
+            {
+                "message_rowid": 2,
+                "text": "\N{OBJECT REPLACEMENT CHARACTER}",
+                "ts": 0,
+                "is_from_me": 1,
+                "sender_id": None,
+                "chat_id": 1,
+            },
+        ],
+    )
+
+    stats = message_sync.sync_imessage_bootstrap(store)
+    assert stats == {"local": 0}
+
+    state = store.get_sync_state("imessage", "local")
+    assert state is not None
+    assert state["checkpoint_value"] == "2"
