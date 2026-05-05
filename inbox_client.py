@@ -20,7 +20,9 @@ SERVER_SCRIPT = Path(__file__).parent / "inbox_server.py"
 
 class InboxClient:
     def __init__(self, base_url: str = SERVER_URL, timeout: float = 30):
-        self._client = httpx.Client(base_url=base_url, timeout=timeout)
+        token = os.environ.get("INBOX_SERVER_TOKEN", "").strip()
+        headers = {"Authorization": f"Bearer {token}"} if token else None
+        self._client = httpx.Client(base_url=base_url, timeout=timeout, headers=headers)
 
     def close(self) -> None:
         self._client.close()
