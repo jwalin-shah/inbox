@@ -16,7 +16,55 @@ import pytest
 from loguru import logger
 
 import services
+from service_models import (
+    CalendarEvent as ModelCalendarEvent,
+)
+from service_models import (
+    Contact as ModelContact,
+)
+from service_models import (
+    Document as ModelDocument,
+)
+from service_models import (
+    DriveFile as ModelDriveFile,
+)
+from service_models import (
+    GitHubNotification as ModelGitHubNotification,
+)
+from service_models import (
+    GoogleTask as ModelGoogleTask,
+)
+from service_models import (
+    Msg as ModelMsg,
+)
+from service_models import (
+    Note as ModelNote,
+)
+from service_models import (
+    Reminder as ModelReminder,
+)
+from service_models import (
+    SheetTab as ModelSheetTab,
+)
+from service_models import (
+    Spreadsheet as ModelSpreadsheet,
+)
+from service_models import (
+    ThreadSummary as ModelThreadSummary,
+)
 from services import (
+    CalendarEvent,
+    Contact,
+    Document,
+    DriveFile,
+    GitHubNotification,
+    GoogleTask,
+    Msg,
+    Note,
+    Reminder,
+    SheetTab,
+    Spreadsheet,
+    ThreadSummary,
     _build_event_body,
     _clean_body,
     _clean_email_body,
@@ -26,6 +74,22 @@ from services import (
     _parse_time,
     parse_quick_event,
 )
+
+
+def test_service_model_re_exports():
+    assert Contact is ModelContact
+    assert Msg is ModelMsg
+    assert CalendarEvent is ModelCalendarEvent
+    assert Note is ModelNote
+    assert Reminder is ModelReminder
+    assert GoogleTask is ModelGoogleTask
+    assert GitHubNotification is ModelGitHubNotification
+    assert DriveFile is ModelDriveFile
+    assert SheetTab is ModelSheetTab
+    assert Spreadsheet is ModelSpreadsheet
+    assert Document is ModelDocument
+    assert ThreadSummary is ModelThreadSummary
+
 
 # ── _clean_body ─────────────────────────────────────────────────────────────
 
