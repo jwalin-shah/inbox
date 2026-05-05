@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from tui_tabs import TUI_TABS
+
 # ── Command data model ───────────────────────────────────────────────────────
 
 CommandDict = dict[str, Any]
@@ -175,64 +177,16 @@ def build_commands(app: Any) -> list[CommandDict]:
         return lambda: getattr(app, method_name)()
 
     commands: list[CommandDict] = [
-        # Navigate
-        make_command(
-            "switch_all",
-            "Switch to All",
-            "Show all conversations",
-            "Navigate",
-            act("action_filter_all"),
-        ),
-        make_command(
-            "switch_imessage",
-            "Switch to iMessage",
-            "Show iMessage conversations",
-            "Navigate",
-            act("action_filter_imsg"),
-        ),
-        make_command(
-            "switch_gmail",
-            "Switch to Gmail",
-            "Show Gmail conversations",
-            "Navigate",
-            act("action_filter_gmail"),
-        ),
-        make_command(
-            "switch_calendar",
-            "Switch to Calendar",
-            "Show calendar events",
-            "Navigate",
-            act("action_filter_cal"),
-        ),
-        make_command(
-            "switch_notes",
-            "Switch to Notes",
-            "Show Apple Notes",
-            "Navigate",
-            act("action_filter_notes"),
-        ),
-        make_command(
-            "switch_reminders",
-            "Switch to Reminders",
-            "Show Apple Reminders",
-            "Navigate",
-            act("action_filter_rem"),
-        ),
-        make_command(
-            "switch_github",
-            "Switch to GitHub",
-            "Show GitHub notifications",
-            "Navigate",
-            act("action_filter_gh"),
-        ),
-        make_command(
-            "switch_drive",
-            "Switch to Drive",
-            "Show Google Drive files",
-            "Navigate",
-            act("action_filter_drv"),
-        ),
-        # Action
+        *[
+            make_command(
+                tab["command_id"],
+                tab["command_name"],
+                tab["command_description"],
+                "Navigate",
+                act(tab["action"]),
+            )
+            for tab in TUI_TABS
+        ],
         make_command(
             "refresh", "Refresh", "Reload all data from server", "Action", act("action_refresh")
         ),

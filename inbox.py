@@ -38,6 +38,7 @@ from textual.widgets import (
 
 from command_palette import CommandDict, build_commands, filter_commands, resolve_nlp
 from inbox_client import InboxClient
+from tui_tabs import TAB_BY_TEXTUAL_ID, TUI_TABS
 
 DEFAULT_POLL_INTERVAL = 10.0
 
@@ -1361,16 +1362,7 @@ class InboxApp(App):
         with Horizontal(id="main"):
             with Vertical(id="sidebar"):
                 yield Tabs(
-                    Tab("Now", id="tab-all"),
-                    Tab("Actionable", id="tab-act"),
-                    Tab("Waiting On", id="tab-wait"),
-                    Tab("iMessage", id="tab-imsg"),
-                    Tab("Gmail", id="tab-gmail"),
-                    Tab("Calendar", id="tab-cal"),
-                    Tab("Notes", id="tab-notes"),
-                    Tab("Reminders", id="tab-rem"),
-                    Tab("GitHub", id="tab-gh"),
-                    Tab("Drive", id="tab-drv"),
+                    *(Tab(tab["label"], id=tab["textual_tab_id"]) for tab in TUI_TABS),
                     id="tabs",
                 )
                 yield ListView(id="contact-list")
@@ -1503,19 +1495,8 @@ class InboxApp(App):
 
     @on(Tabs.TabActivated, "#tabs")
     def on_tab_activated(self, event: Tabs.TabActivated) -> None:
-        tab_map = {
-            "tab-all": "all",
-            "tab-act": "actionable",
-            "tab-wait": "waiting",
-            "tab-imsg": "imessage",
-            "tab-gmail": "gmail",
-            "tab-cal": "calendar",
-            "tab-notes": "notes",
-            "tab-rem": "reminders",
-            "tab-gh": "github",
-            "tab-drv": "drive",
-        }
-        new_filter = tab_map.get(event.tab.id or "", "all")
+        tab = TAB_BY_TEXTUAL_ID.get(event.tab.id or "")
+        new_filter = (tab or {"id": "all"})["id"]
         # Save state of the tab we're leaving
         if self._active_filter != new_filter:
             self._save_tab_state(self._active_filter)
@@ -1531,13 +1512,8 @@ class InboxApp(App):
             self._load_drive_files()
 
     def _toggle_views(self) -> None:
-        is_detail = self._active_filter in (
-            "calendar",
-            "notes",
-            "reminders",
-            "github",
-            "drive",
-        )
+        tab = next((t for t in TUI_TABS if t["id"] == self._active_filter), None)
+        is_detail = (tab or {"mode": "message"})["mode"] == "detail"
         msg_view = self.query_one("#messages", MessageView)
         det_view = self.query_one("#detail-view", DetailView)
         compose_input = self.query_one("#compose", Input)
@@ -1809,36 +1785,40 @@ class InboxApp(App):
             lv.index = target_index
 
     # ── Tab shortcuts ────────────────────────────────────────────────────
+    def _activate_tab(self, tab_id: str) -> None:
+        tab = next((t for t in TUI_TABS if t["id"] == tab_id), None)
+        if tab:
+            self.query_one("#tabs", Tabs).active = tab["textual_tab_id"]
 
     def action_filter_all(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-all"
+        self._activate_tab("all")
 
     def action_filter_imsg(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-imsg"
+        self._activate_tab("imessage")
 
     def action_filter_gmail(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-gmail"
+        self._activate_tab("gmail")
 
     def action_filter_cal(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-cal"
+        self._activate_tab("calendar")
 
     def action_filter_notes(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-notes"
+        self._activate_tab("notes")
 
     def action_filter_rem(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-rem"
+        self._activate_tab("reminders")
 
     def action_filter_gh(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-gh"
+        self._activate_tab("github")
 
     def action_filter_drv(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-drv"
+        self._activate_tab("drive")
 
     def action_filter_actionable(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-act"
+        self._activate_tab("actionable")
 
     def action_filter_waiting(self) -> None:
-        self.query_one("#tabs", Tabs).active = "tab-wait"
+        self._activate_tab("waiting")
 
     # ── Vim mode actions ─────────────────────────────────────────────────
 

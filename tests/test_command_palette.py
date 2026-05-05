@@ -150,7 +150,7 @@ def test_build_commands_all_have_required_fields():
 def test_build_commands_categories_are_valid():
     app = _mock_app()
     commands = build_commands(app)
-    valid_categories = {"Navigate", "Action", "Create", "Settings"}
+    valid_categories = {"Navigate", "Action", "Create", "Settings", "AI"}
     for cmd in commands:
         assert cmd["category"] in valid_categories, (
             f"Unexpected category '{cmd['category']}' for '{cmd['id']}'"
