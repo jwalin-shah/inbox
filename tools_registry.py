@@ -204,6 +204,7 @@ TOOLS: list[Tool] = [
             "list of tab names. Returns the new spreadsheet metadata including id."
         ),
         readonly=False,
+        confirm=True,
         params=[
             Param("title", str, _EMPTY, "body"),
             Param("sheets", list, None, "body"),
@@ -219,6 +220,7 @@ TOOLS: list[Tool] = [
             "(list[list[Any]]). `value_input` is USER_ENTERED or RAW."
         ),
         readonly=False,
+        confirm=True,
         params=[
             Param("spreadsheet_id", str, _EMPTY, "path"),
             Param("range_", str, _EMPTY, "path"),
