@@ -1397,7 +1397,7 @@ class TestPreflight:
         assert data["destination"] == "primary calendar"
         assert "Interview" in data["explanation"]
 
-    @patch("inbox_server.drive_get")
+    @patch("google_account_resolution.drive_get")
     def test_valid_folder_id(self, mock_get, client):
         import inbox_server
 
@@ -1418,7 +1418,7 @@ class TestPreflight:
         assert data["destination"] == "Folder 'Job Hunt'"
         assert data["destination_id"] == "fold1"
 
-    @patch("inbox_server.drive_get")
+    @patch("google_account_resolution.drive_get")
     def test_invalid_folder_id(self, mock_get, client):
         import inbox_server
 
@@ -1432,7 +1432,7 @@ class TestPreflight:
         assert data["valid"] is False
         assert "bad_id" in data["warnings"][0]
 
-    @patch("inbox_server.tasks_lists")
+    @patch("google_account_resolution.tasks_lists")
     def test_valid_task_list_id(self, mock_lists, client):
         import inbox_server
 
@@ -1446,7 +1446,7 @@ class TestPreflight:
         assert data["valid"] is True
         assert data["destination"] == "Task list 'Job Hunt'"
 
-    @patch("inbox_server.tasks_lists")
+    @patch("google_account_resolution.tasks_lists")
     def test_invalid_task_list_id(self, mock_lists, client):
         import inbox_server
 
