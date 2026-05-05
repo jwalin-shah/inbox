@@ -35,6 +35,30 @@ def _mock_response(data, status_code=200):
     return resp
 
 
+class TestClientInit:
+    def test_init_includes_bearer_header_when_token_set(self, monkeypatch):
+        mock_httpx_client = MagicMock()
+        monkeypatch.setenv("INBOX_SERVER_TOKEN", "secret-token")
+        monkeypatch.setattr(httpx, "Client", mock_httpx_client)
+        InboxClient(base_url="http://127.0.0.1:9999", timeout=7)
+        mock_httpx_client.assert_called_once_with(
+            base_url="http://127.0.0.1:9999",
+            timeout=7,
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+    def test_init_omits_bearer_header_when_token_unset(self, monkeypatch):
+        mock_httpx_client = MagicMock()
+        monkeypatch.delenv("INBOX_SERVER_TOKEN", raising=False)
+        monkeypatch.setattr(httpx, "Client", mock_httpx_client)
+        InboxClient(base_url="http://127.0.0.1:9999", timeout=7)
+        mock_httpx_client.assert_called_once_with(
+            base_url="http://127.0.0.1:9999",
+            timeout=7,
+            headers=None,
+        )
+
+
 # ── Health ──────────────────────────────────────────────────────────────────
 
 
