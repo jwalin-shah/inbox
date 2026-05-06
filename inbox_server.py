@@ -11,7 +11,7 @@ import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from secrets import compare_digest
 from typing import Any
 
@@ -597,6 +597,25 @@ class IndexOverviewOut(BaseModel):
     db_path: str
     counts: dict[str, int]
     sync_states: list[IndexSyncStateOut]
+
+
+class IndexSyncHealthStateOut(IndexSyncStateOut):
+    last_success_age_seconds: int | None
+    healthy: bool
+    stale: bool
+    reasons: list[str]
+
+
+class IndexHealthOut(BaseModel):
+    db_path: str
+    healthy: bool
+    stale: bool
+    checked_at: str
+    stale_after_seconds: int
+    newest_success_at: str | None
+    newest_success_age_seconds: int | None
+    reasons: list[str]
+    sync_states: list[IndexSyncHealthStateOut]
 
 
 class IndexedThreadListOut(BaseModel):
@@ -2765,6 +2784,102 @@ def _index_view_rows(view: str, limit: int) -> list[dict[str, object]]:
     raise HTTPException(status_code=404, detail=f"Unknown index view: {view}")
 
 
+INDEX_HEALTH_STALE_AFTER = timedelta(minutes=30)
+INDEX_HEALTH_NO_SYNC_STATE = "no_sync_state"
+INDEX_HEALTH_MISSING_CHECKPOINT = "missing_checkpoint"
+INDEX_HEALTH_STALE_CHECKPOINT = "stale_checkpoint"
+INDEX_HEALTH_SYNC_ERROR = "sync_error"
+
+
+def _parse_index_health_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _append_index_health_reason(reasons: list[str], reason: str) -> None:
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+def _index_sync_health_state(
+    row: dict[str, Any],
+    checked_at: datetime,
+) -> tuple[IndexSyncHealthStateOut, datetime | None]:
+    last_success_at = _parse_index_health_datetime(str(row.get("last_success_at") or ""))
+    reasons: list[str] = []
+
+    if not str(row.get("checkpoint_value") or "") or last_success_at is None:
+        _append_index_health_reason(reasons, INDEX_HEALTH_MISSING_CHECKPOINT)
+
+    last_success_age_seconds = None
+    if last_success_at is not None:
+        last_success_age_seconds = max(0, int((checked_at - last_success_at).total_seconds()))
+        if checked_at - last_success_at > INDEX_HEALTH_STALE_AFTER:
+            _append_index_health_reason(reasons, INDEX_HEALTH_STALE_CHECKPOINT)
+
+    if str(row.get("status") or "") == "error" or str(row.get("last_error") or ""):
+        _append_index_health_reason(reasons, INDEX_HEALTH_SYNC_ERROR)
+
+    stale = any(
+        reason in reasons
+        for reason in (INDEX_HEALTH_MISSING_CHECKPOINT, INDEX_HEALTH_STALE_CHECKPOINT)
+    )
+    health_state = IndexSyncHealthStateOut(
+        **row,
+        last_success_age_seconds=last_success_age_seconds,
+        healthy=not reasons,
+        stale=stale,
+        reasons=reasons,
+    )
+    return health_state, last_success_at
+
+
+def _build_index_health(sync_states: list[dict[str, Any]]) -> IndexHealthOut:
+    checked_at = datetime.now(UTC)
+    health_states: list[IndexSyncHealthStateOut] = []
+    successes: list[datetime] = []
+
+    for row in sync_states:
+        health_state, last_success_at = _index_sync_health_state(row, checked_at)
+        health_states.append(health_state)
+        if last_success_at is not None:
+            successes.append(last_success_at)
+
+    reasons: list[str] = []
+    if not health_states:
+        _append_index_health_reason(reasons, INDEX_HEALTH_NO_SYNC_STATE)
+    for health_state in health_states:
+        for reason in health_state.reasons:
+            _append_index_health_reason(reasons, reason)
+
+    newest_success_at = max(successes) if successes else None
+    newest_success_age_seconds = (
+        max(0, int((checked_at - newest_success_at).total_seconds()))
+        if newest_success_at is not None
+        else None
+    )
+    stale = not health_states or any(health_state.stale for health_state in health_states)
+
+    return IndexHealthOut(
+        db_path=str(state.index_store.db_path),
+        healthy=bool(health_states) and not reasons,
+        stale=stale,
+        checked_at=checked_at.isoformat(),
+        stale_after_seconds=int(INDEX_HEALTH_STALE_AFTER.total_seconds()),
+        newest_success_at=newest_success_at.isoformat() if newest_success_at else None,
+        newest_success_age_seconds=newest_success_age_seconds,
+        reasons=reasons,
+        sync_states=health_states,
+    )
+
+
 def _preflight_google_write(
     kind: str,
     account: str = "",
@@ -3704,6 +3819,11 @@ async def get_index_status():
         counts=state.index_store.index_counts(),
         sync_states=[IndexSyncStateOut(**row) for row in state.index_store.list_sync_states()],
     )
+
+
+@app.get("/index/health", response_model=IndexHealthOut)
+async def get_index_health():
+    return _build_index_health(state.index_store.list_sync_states())
 
 
 @app.get("/index/views/{view_name}", response_model=IndexedThreadListOut)

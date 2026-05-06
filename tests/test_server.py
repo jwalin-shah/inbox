@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -100,6 +100,29 @@ class TestHealth:
 
 
 class TestIndexEndpoints:
+    def _sync_state_row(
+        self,
+        *,
+        checkpoint_value: str = "123",
+        last_success_at: str | None = None,
+        status: str = "idle",
+        last_error: str = "",
+    ) -> dict[str, object]:
+        return {
+            "source": "gmail",
+            "account": "me@gmail.com",
+            "checkpoint_type": "internalDateMs",
+            "checkpoint_value": checkpoint_value,
+            "last_success_at": last_success_at
+            if last_success_at is not None
+            else datetime.now(UTC).isoformat(),
+            "last_full_sync_at": "2026-04-18T00:00:00+00:00",
+            "status": status,
+            "last_run_started_at": "2026-04-18T00:55:00+00:00",
+            "last_error": last_error,
+            "metadata": {"messages_processed": 12},
+        }
+
     def test_index_threads_endpoint_returns_materialized_threads(self, client):
         import inbox_server
 
@@ -161,6 +184,91 @@ class TestIndexEndpoints:
         assert len(data["sync_states"]) == 1
         assert data["sync_states"][0]["source"] == "gmail"
         assert data["sync_states"][0]["metadata"]["messages_processed"] == 12
+
+    def test_index_health_reports_fresh_checkpoint(self, client):
+        import inbox_server
+
+        fresh_at = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+        inbox_server.state.index_store.list_sync_states = MagicMock(
+            return_value=[self._sync_state_row(last_success_at=fresh_at)]
+        )
+
+        resp = client.get("/index/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["db_path"].endswith(".inbox_index.sqlite3")
+        assert data["healthy"] is True
+        assert data["stale"] is False
+        assert data["reasons"] == []
+        assert data["newest_success_at"] == fresh_at
+        assert data["newest_success_age_seconds"] < data["stale_after_seconds"]
+        assert data["sync_states"][0]["healthy"] is True
+        assert data["sync_states"][0]["stale"] is False
+        assert data["sync_states"][0]["last_success_age_seconds"] < data["stale_after_seconds"]
+
+    def test_index_health_reports_stale_checkpoint(self, client):
+        import inbox_server
+
+        stale_at = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        inbox_server.state.index_store.list_sync_states = MagicMock(
+            return_value=[self._sync_state_row(last_success_at=stale_at)]
+        )
+
+        resp = client.get("/index/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["healthy"] is False
+        assert data["stale"] is True
+        assert "stale_checkpoint" in data["reasons"]
+        assert data["sync_states"][0]["healthy"] is False
+        assert data["sync_states"][0]["stale"] is True
+        assert "stale_checkpoint" in data["sync_states"][0]["reasons"]
+
+    def test_index_health_reports_missing_checkpoint(self, client):
+        import inbox_server
+
+        inbox_server.state.index_store.list_sync_states = MagicMock(
+            return_value=[self._sync_state_row(checkpoint_value="", last_success_at="")]
+        )
+
+        resp = client.get("/index/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["healthy"] is False
+        assert data["stale"] is True
+        assert data["newest_success_at"] is None
+        assert "missing_checkpoint" in data["reasons"]
+        assert data["sync_states"][0]["last_success_age_seconds"] is None
+        assert "missing_checkpoint" in data["sync_states"][0]["reasons"]
+
+    def test_index_health_reports_sync_error(self, client):
+        import inbox_server
+
+        inbox_server.state.index_store.list_sync_states = MagicMock(
+            return_value=[self._sync_state_row(status="error", last_error="OAuth token expired")]
+        )
+
+        resp = client.get("/index/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["healthy"] is False
+        assert data["stale"] is False
+        assert "sync_error" in data["reasons"]
+        assert "sync_error" in data["sync_states"][0]["reasons"]
+
+    def test_index_health_reports_no_sync_state(self, client):
+        import inbox_server
+
+        inbox_server.state.index_store.list_sync_states = MagicMock(return_value=[])
+
+        resp = client.get("/index/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["healthy"] is False
+        assert data["stale"] is True
+        assert data["newest_success_at"] is None
+        assert data["reasons"] == ["no_sync_state"]
+        assert data["sync_states"] == []
 
     def test_index_view_actionable_routes_to_index_store(self, client):
         import inbox_server
