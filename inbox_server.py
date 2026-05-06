@@ -753,6 +753,13 @@ class ProductionCalendarSourceAdapter:
         start_date: datetime | None = None,
         end_date: datetime | None = None,
     ) -> list[CalendarEvent]:
+        if start_date is not None or end_date is not None:
+            return calendar_events(
+                cal_services,
+                date,
+                start_date=start_date,
+                end_date=end_date,
+            )
         return calendar_events(cal_services, date, start_date, end_date)
 
 
