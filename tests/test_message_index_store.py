@@ -119,6 +119,153 @@ def test_rebuild_threads_classifies_otp_as_ignore(tmp_path):
     assert rows[0]["actionability"] == "ignore"
 
 
+def test_rebuild_threads_uses_frequent_human_sender_stats(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    sender = "5551234567"
+    store.upsert_item(
+        _item(
+            source="imessage",
+            account="local",
+            external_id="h1-me",
+            thread_id="history-1",
+            sender="Me",
+            body="Following up from earlier.",
+            created_at="2026-04-17T00:00:00+00:00",
+            is_read=1,
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="imessage",
+            account="local",
+            external_id="h1-them",
+            thread_id="history-1",
+            sender=sender,
+            body="Thanks.",
+            created_at="2026-04-17T01:00:00+00:00",
+            is_read=1,
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="imessage",
+            account="local",
+            external_id="h2-me",
+            thread_id="history-2",
+            sender="Me",
+            body="Can you send that over?",
+            created_at="2026-04-17T02:00:00+00:00",
+            is_read=1,
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="imessage",
+            account="local",
+            external_id="h2-them",
+            thread_id="history-2",
+            sender=sender,
+            body="Will do.",
+            created_at="2026-04-17T03:00:00+00:00",
+            is_read=1,
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="imessage",
+            account="local",
+            external_id="current",
+            thread_id="current-thread",
+            sender=sender,
+            body="Quick FYI for later.",
+            created_at="2026-04-18T00:00:00+00:00",
+            is_read=0,
+        )
+    )
+
+    store.rebuild_threads()
+
+    rows = store.list_threads(limit=10)
+    current = next(row for row in rows if row["thread_id"] == "current-thread")
+    human_score = current["human_score"]
+    assert isinstance(human_score, float)
+    assert human_score < 1.0
+    assert current["actionability"] == "reply"
+    assert current["needs_reply"] == 1
+    with store._connect() as conn:
+        stats = conn.execute("SELECT * FROM sender_stats WHERE email = ?", (sender,)).fetchone()
+    assert stats["thread_count"] == 3
+    assert stats["reply_count"] == 2
+
+
+def test_rebuild_threads_does_not_promote_high_volume_automated_sender(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    sender = "no-reply@example.com"
+    for index in range(12):
+        store.upsert_item(
+            _item(
+                source="gmail",
+                account="a@example.com",
+                external_id=f"auto-{index}",
+                thread_id=f"auto-thread-{index}",
+                sender=sender,
+                subject="Account update",
+                body="This is an automated notification.",
+                created_at=f"2026-04-18T00:{index:02d}:00+00:00",
+                is_read=0,
+            )
+        )
+
+    store.rebuild_threads()
+
+    rows = store.list_threads(limit=20)
+    assert rows
+    assert {row["noise_class"] for row in rows} == {"automated"}
+    assert {row["actionability"] for row in rows} == {"archive"}
+    assert {row["needs_reply"] for row in rows} == {0}
+    with store._connect() as conn:
+        stats = conn.execute("SELECT * FROM sender_stats WHERE email = ?", (sender,)).fetchone()
+    assert stats["thread_count"] == 12
+    assert stats["reply_count"] == 0
+
+
+def test_rebuild_threads_sender_stats_are_deterministic(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="m1",
+            thread_id="t1",
+            sender="Me",
+            subject="Hello",
+            created_at="2026-04-18T00:00:00+00:00",
+            is_read=1,
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="m2",
+            thread_id="t1",
+            sender="Alex",
+            subject="Re: Hello",
+            created_at="2026-04-18T01:00:00+00:00",
+            is_read=0,
+        )
+    )
+
+    store.rebuild_threads()
+    with store._connect() as conn:
+        first = [dict(row) for row in conn.execute("SELECT * FROM sender_stats").fetchall()]
+    store.rebuild_threads()
+    with store._connect() as conn:
+        second = [dict(row) for row in conn.execute("SELECT * FROM sender_stats").fetchall()]
+
+    assert second == first
+
+
 def test_sync_state_tracks_status_and_metadata(tmp_path):
     store = MessageIndexStore(tmp_path / "index.sqlite3")
 
@@ -153,6 +300,7 @@ def test_sync_state_tracks_status_and_metadata(tmp_path):
 
 def test_list_threads_supports_waiting_on_and_recent_views(tmp_path):
     import datetime
+
     now = datetime.datetime.now(datetime.UTC)
     t1 = now.isoformat()
     t2 = (now + datetime.timedelta(hours=1)).isoformat()
@@ -197,6 +345,7 @@ def test_list_threads_supports_waiting_on_and_recent_views(tmp_path):
 
     recent = store.list_threads(limit=10, newest_only=True, sort_mode="recent")
     assert [row["thread_id"] for row in recent] == ["track-thread", "reply-thread"]
+
 
 def test_upsert_item_is_idempotent(tmp_path):
     store = MessageIndexStore(tmp_path / "index.sqlite3")
