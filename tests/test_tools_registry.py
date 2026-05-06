@@ -48,8 +48,9 @@ def test_readonly_registration_preserved():
     registered = register_all(mcp, DummyBackend(), readonly_only=True)
 
     readonly_names = [tool.name for tool in TOOLS if tool.readonly]
+    write_names = [tool.name for tool in TOOLS if not tool.readonly]
     assert registered == readonly_names
-    assert all(name not in registered for name in ("create_sheet", "append_sheet_rows"))
+    assert all(name not in registered for name in write_names)
 
 
 def test_confirm_param_is_added_only_for_confirm_tools():
@@ -57,11 +58,35 @@ def test_confirm_param_is_added_only_for_confirm_tools():
     register_all(mcp, DummyBackend(), readonly_only=False)
 
     handlers = {fn.__name__: fn for fn in mcp._handlers}
-    create_sheet_params = inspect.signature(handlers["create_sheet"]).parameters
-    list_sheets_params = inspect.signature(handlers["list_sheets"]).parameters
+    mismatches = []
+    for tool in TOOLS:
+        params = inspect.signature(handlers[tool.name]).parameters
+        if ("confirm" in params) != tool.confirm:
+            mismatches.append(tool.name)
 
-    assert "confirm" in create_sheet_params
-    assert "confirm" not in list_sheets_params
+    assert mismatches == []
+
+
+def test_registry_handler_signatures_include_required_tool_params():
+    handlers = _handlers()
+    missing = []
+    optional_marked_required = []
+
+    for tool in TOOLS:
+        signature_params = inspect.signature(handlers[tool.name]).parameters
+        for param in tool.params:
+            if param.name not in signature_params:
+                missing.append(f"{tool.name}.{param.name}")
+                continue
+            signature_param = signature_params[param.name]
+            if (
+                param.default is not inspect.Parameter.empty
+                and signature_param.default is inspect.Parameter.empty
+            ):
+                optional_marked_required.append(f"{tool.name}.{param.name}")
+
+    assert missing == []
+    assert optional_marked_required == []
 
 
 def test_sheet_path_params_are_encoded_and_query_params_remain_query_values():
