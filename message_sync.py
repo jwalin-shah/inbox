@@ -16,6 +16,7 @@ GMAIL_HISTORY_CURSOR = "gmailHistoryId"
 GMAIL_TIMESTAMP_CURSOR = "internalDateMs"
 IMESSAGE_PROGRESS_EVERY = 250
 _ATTACHMENT_TEXT = "(attachment)"
+SyncScope = tuple[str, str]
 
 
 def _iso_from_ms(value: int | str | None) -> str:
@@ -581,21 +582,48 @@ def sync_imessage_incremental(store: MessageIndexStore) -> dict[str, int]:
     return {"local": count}
 
 
+def _changed_scopes(source: str, stats: dict[str, int]) -> set[SyncScope]:
+    return {(source, account) for account, count in stats.items() if count > 0}
+
+
+def rebuild_changed_threads(
+    store: MessageIndexStore, scopes: set[SyncScope]
+) -> dict[SyncScope, int]:
+    rebuilt: dict[SyncScope, int] = {}
+    for source, account in sorted(scopes):
+        rebuilt[(source, account)] = store.rebuild_threads(source=source, account=account)
+    return rebuilt
+
+
+def rebuild_all_threads(store: MessageIndexStore) -> int:
+    return store.rebuild_threads()
+
+
 def bootstrap(store: MessageIndexStore) -> dict[str, dict[str, int]]:
+    gmail_stats = sync_gmail_bootstrap(store)
+    imessage_stats = sync_imessage_bootstrap(store)
     result = {
-        "gmail": sync_gmail_bootstrap(store),
-        "imessage": sync_imessage_bootstrap(store),
+        "gmail": gmail_stats,
+        "imessage": imessage_stats,
     }
-    store.rebuild_threads()
+    rebuild_changed_threads(
+        store,
+        _changed_scopes("gmail", gmail_stats) | _changed_scopes("imessage", imessage_stats),
+    )
     return result
 
 
 def incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
+    gmail_stats = sync_gmail_incremental(store)
+    imessage_stats = sync_imessage_incremental(store)
     result = {
-        "gmail": sync_gmail_incremental(store),
-        "imessage": sync_imessage_incremental(store),
+        "gmail": gmail_stats,
+        "imessage": imessage_stats,
     }
-    store.rebuild_threads()
+    rebuild_changed_threads(
+        store,
+        _changed_scopes("gmail", gmail_stats) | _changed_scopes("imessage", imessage_stats),
+    )
     return result
 
 
@@ -611,7 +639,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Materialize raw inbox sources into a local index."
     )
-    parser.add_argument("mode", choices=["bootstrap", "incremental", "summary"])
+    parser.add_argument("mode", choices=["bootstrap", "incremental", "rebuild", "summary"])
     parser.add_argument("--db", default="", help="Override index database path.")
     parser.add_argument("--limit", type=int, default=20, help="Summary row limit.")
     args = parser.parse_args()
@@ -621,6 +649,8 @@ def main() -> None:
         print(bootstrap(store))
     elif args.mode == "incremental":
         print(incremental(store))
+    elif args.mode == "rebuild":
+        print({"threads": rebuild_all_threads(store)})
     else:
         print_summary(store, args.limit)
 
