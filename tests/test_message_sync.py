@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 import message_sync
-from message_index_store import MessageIndexStore
+from message_index_store import IndexedItem, MessageIndexStore
 
 
 class _FakeRequest:
@@ -101,6 +101,43 @@ def _gmail_message(
             "body": {"data": ""},
         },
     }
+
+
+def _indexed_item(
+    *,
+    source: str,
+    account: str,
+    external_id: str,
+    thread_id: str,
+    created_at: str,
+    subject: str,
+) -> IndexedItem:
+    return IndexedItem(
+        source=source,
+        account=account,
+        external_id=external_id,
+        thread_id=thread_id,
+        kind="email" if source == "gmail" else "imessage",
+        created_at=created_at,
+        updated_at=created_at,
+        ingested_at=created_at,
+        sender="Sender",
+        recipients_json="[]",
+        subject=subject,
+        snippet=subject,
+        body_text=subject,
+        body_hash=f"hash-{external_id}",
+        labels_json="[]",
+        raw_pointer=f"{source}:{account}:{external_id}",
+        is_deleted=0,
+        is_read=1,
+    )
+
+
+def _thread_rows(store: MessageIndexStore) -> dict[tuple[str, str, str], sqlite3.Row]:
+    with store._connect() as conn:
+        rows = conn.execute("SELECT * FROM threads").fetchall()
+    return {(str(row["source"]), str(row["account"]), str(row["thread_id"])): row for row in rows}
 
 
 def test_sync_gmail_bootstrap_resumes_from_saved_page_token(tmp_path, monkeypatch):
@@ -457,3 +494,156 @@ def test_sync_imessage_bootstrap_advances_checkpoint_for_skipped_rows(tmp_path, 
     state = store.get_sync_state("imessage", "local")
     assert state is not None
     assert state["checkpoint_value"] == "2"
+
+
+def test_incremental_rebuilds_only_changed_gmail_account(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _indexed_item(
+            source="gmail",
+            account="acct@example.com",
+            external_id="gmail-a-1",
+            thread_id="gmail-a-thread",
+            created_at="2026-04-18T00:00:00+00:00",
+            subject="Old Gmail A",
+        )
+    )
+    store.upsert_item(
+        _indexed_item(
+            source="gmail",
+            account="other@example.com",
+            external_id="gmail-b-1",
+            thread_id="gmail-b-thread",
+            created_at="2026-04-18T00:00:00+00:00",
+            subject="Old Gmail B",
+        )
+    )
+    store.upsert_item(
+        _indexed_item(
+            source="imessage",
+            account="local",
+            external_id="imsg-1",
+            thread_id="imsg-thread",
+            created_at="2026-04-18T00:00:00+00:00",
+            subject="Old iMessage",
+        )
+    )
+    store.rebuild_threads()
+    with store._connect() as conn:
+        conn.execute("UPDATE threads SET updated_at = 'sentinel'")
+
+    def fake_gmail_incremental(sync_store: MessageIndexStore) -> dict[str, int]:
+        sync_store.upsert_item(
+            _indexed_item(
+                source="gmail",
+                account="acct@example.com",
+                external_id="gmail-a-2",
+                thread_id="gmail-a-thread",
+                created_at="2026-04-18T01:00:00+00:00",
+                subject="New Gmail A",
+            )
+        )
+        return {"acct@example.com": 1, "other@example.com": 0}
+
+    monkeypatch.setattr(message_sync, "sync_gmail_incremental", fake_gmail_incremental)
+    monkeypatch.setattr(message_sync, "sync_imessage_incremental", lambda _store: {"local": 0})
+
+    result = message_sync.incremental(store)
+
+    assert result == {
+        "gmail": {"acct@example.com": 1, "other@example.com": 0},
+        "imessage": {"local": 0},
+    }
+    rows = _thread_rows(store)
+    assert len(rows) == 3
+    changed = rows[("gmail", "acct@example.com", "gmail-a-thread")]
+    untouched_gmail = rows[("gmail", "other@example.com", "gmail-b-thread")]
+    untouched_imessage = rows[("imessage", "local", "imsg-thread")]
+    assert changed["latest_external_id"] == "gmail-a-2"
+    assert changed["latest_subject"] == "New Gmail A"
+    assert changed["updated_at"] != "sentinel"
+    assert untouched_gmail["latest_external_id"] == "gmail-b-1"
+    assert untouched_gmail["updated_at"] == "sentinel"
+    assert untouched_imessage["latest_external_id"] == "imsg-1"
+    assert untouched_imessage["updated_at"] == "sentinel"
+
+
+def test_incremental_rebuilds_only_changed_imessage_scope(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _indexed_item(
+            source="gmail",
+            account="acct@example.com",
+            external_id="gmail-1",
+            thread_id="gmail-thread",
+            created_at="2026-04-18T00:00:00+00:00",
+            subject="Old Gmail",
+        )
+    )
+    store.upsert_item(
+        _indexed_item(
+            source="imessage",
+            account="local",
+            external_id="imsg-1",
+            thread_id="imsg-thread",
+            created_at="2026-04-18T00:00:00+00:00",
+            subject="Old iMessage",
+        )
+    )
+    store.rebuild_threads()
+    with store._connect() as conn:
+        conn.execute("UPDATE threads SET updated_at = 'sentinel'")
+
+    def fake_imessage_incremental(sync_store: MessageIndexStore) -> dict[str, int]:
+        sync_store.upsert_item(
+            _indexed_item(
+                source="imessage",
+                account="local",
+                external_id="imsg-2",
+                thread_id="imsg-thread",
+                created_at="2026-04-18T01:00:00+00:00",
+                subject="New iMessage",
+            )
+        )
+        return {"local": 1}
+
+    monkeypatch.setattr(
+        message_sync, "sync_gmail_incremental", lambda _store: {"acct@example.com": 0}
+    )
+    monkeypatch.setattr(message_sync, "sync_imessage_incremental", fake_imessage_incremental)
+
+    result = message_sync.incremental(store)
+
+    assert result == {
+        "gmail": {"acct@example.com": 0},
+        "imessage": {"local": 1},
+    }
+    rows = _thread_rows(store)
+    assert len(rows) == 2
+    untouched_gmail = rows[("gmail", "acct@example.com", "gmail-thread")]
+    changed_imessage = rows[("imessage", "local", "imsg-thread")]
+    assert untouched_gmail["latest_external_id"] == "gmail-1"
+    assert untouched_gmail["updated_at"] == "sentinel"
+    assert changed_imessage["latest_external_id"] == "imsg-2"
+    assert changed_imessage["latest_subject"] == "New iMessage"
+    assert changed_imessage["updated_at"] != "sentinel"
+
+
+def test_rebuild_all_threads_preserves_global_repair_path(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _indexed_item(
+            source="gmail",
+            account="acct@example.com",
+            external_id="gmail-1",
+            thread_id="gmail-thread",
+            created_at="2026-04-18T00:00:00+00:00",
+            subject="Gmail",
+        )
+    )
+
+    rebuilt = message_sync.rebuild_all_threads(store)
+
+    assert rebuilt == 1
+    rows = _thread_rows(store)
+    assert list(rows) == [("gmail", "acct@example.com", "gmail-thread")]
