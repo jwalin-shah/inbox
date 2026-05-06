@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 import httpx
@@ -59,6 +60,38 @@ def _format_request_error(action: str, exc: Exception) -> str:
     if isinstance(exc, httpx.RequestError):
         return "Server unreachable — press Ctrl+R to retry"
     return f"{action} failed: {exc}"
+
+
+@dataclass(frozen=True)
+class AuxiliaryDataSnapshot:
+    events: list[dict]
+    notes: list[dict]
+    reminders: list[dict]
+    reminder_lists: list[dict]
+    github_data: list[dict]
+    now_threads: list[dict]
+    actionable_threads: list[dict]
+    waiting_threads: list[dict]
+    errors: list[str]
+
+
+@dataclass(frozen=True)
+class RefreshDataSnapshot:
+    conversations: list[dict]
+    events: list[dict]
+    notes: list[dict]
+    reminders: list[dict]
+    reminder_lists: list[dict]
+    github_data: list[dict]
+    now_threads: list[dict]
+    actionable_threads: list[dict]
+    waiting_threads: list[dict]
+    status: str | None
+
+
+@dataclass(frozen=True)
+class PollDataSnapshot(RefreshDataSnapshot):
+    changed: bool
 
 
 # ── UI Widgets ───────────────────────────────────────────────────────────────
@@ -1216,6 +1249,7 @@ class InboxApp(App):
         self._client_closed = False
         self._poll_had_error = False
         self._consecutive_errors = 0
+        self._sidebar_status_override: str | None = None
         # Calendar state
         self._calendar_date: date = date.today()
         self._calendar_view_mode: str = "day"  # "day" | "week" | "agenda"
@@ -1537,6 +1571,9 @@ class InboxApp(App):
             else:
                 compose_input.placeholder = "Reply… (Enter to send)"
 
+    def _update_sidebar_status(self, status: str) -> None:
+        self.query_one("#status", Static).update(self._sidebar_status_override or status)
+
     def _render_sidebar(self) -> None:
         lv = self.query_one("#contact-list", ListView)
         lv.clear()
@@ -1604,14 +1641,14 @@ class InboxApp(App):
             if n_accts > 1:
                 status += f"  [dim]{n_accts} accounts[/]"
             status += "  [dim]v: view · ←→: nav · g: go to date · e: edit[/]"
-            self.query_one("#status", Static).update(status)
+            self._update_sidebar_status(status)
             return
 
         if self._active_filter == "notes":
             for n in self.notes_data:
                 lv.append(NoteItem(n))
             status = f"[magenta]{len(self.notes_data)} notes[/]"
-            self.query_one("#status", Static).update(status)
+            self._update_sidebar_status(status)
             return
 
         if self._active_filter == "reminders":
@@ -1630,7 +1667,7 @@ class InboxApp(App):
                     rl.get("name", "") for rl in self.reminder_lists if rl.get("name")
                 )
                 status += f"  [dim]f: filter ({list_names})[/]"
-            self.query_one("#status", Static).update(status)
+            self._update_sidebar_status(status)
             return
 
         if self._active_filter == "github":
@@ -1644,7 +1681,7 @@ class InboxApp(App):
             if unread:
                 status += f"  [yellow]{unread} unread[/]"
             status += "  [dim]r: mark read · R: read all · o: open[/]"
-            self.query_one("#status", Static).update(status)
+            self._update_sidebar_status(status)
             return
 
         if self._active_filter == "drive":
@@ -1659,7 +1696,7 @@ class InboxApp(App):
             status += "  [dim]d: download · u: upload · n: new folder · x: delete[/]"
             if self._drive_folder_id:
                 status += "  [dim]Bksp: back[/]"
-            self.query_one("#status", Static).update(status)
+            self._update_sidebar_status(status)
             return
 
         if self._active_filter == "all":
@@ -1667,7 +1704,7 @@ class InboxApp(App):
                 lv.append(IndexedThreadItem(thread))
             status = f"[green]{len(self.now_threads)} indexed threads[/]"
             status += "  [dim]Now view · summaries first[/]"
-            self.query_one("#status", Static).update(status)
+            self._update_sidebar_status(status)
             return
 
         if self._active_filter == "actionable":
@@ -1675,7 +1712,7 @@ class InboxApp(App):
                 lv.append(IndexedThreadItem(thread))
             status = f"[green]{len(self.actionable_threads)} actionable threads[/]"
             status += "  [dim]reply / review / track[/]"
-            self.query_one("#status", Static).update(status)
+            self._update_sidebar_status(status)
             return
 
         if self._active_filter == "waiting":
@@ -1683,7 +1720,7 @@ class InboxApp(App):
                 lv.append(IndexedThreadItem(thread))
             status = f"[green]{len(self.waiting_threads)} waiting-on threads[/]"
             status += "  [dim]open loops being tracked[/]"
-            self.query_one("#status", Static).update(status)
+            self._update_sidebar_status(status)
             return
 
         shown = [c for c in self.conversations if c.get("source") == self._active_filter]
@@ -1725,7 +1762,7 @@ class InboxApp(App):
             )
         else:
             status += f"  [dim]{tab_label}[/]"
-        self.query_one("#status", Static).update(status)
+        self._update_sidebar_status(status)
 
     def _restore_sidebar_selection(self) -> None:
         """After _render_sidebar populates the ListView, restore the
@@ -2058,9 +2095,11 @@ class InboxApp(App):
         try:
             self.client.ensure_server()
         except RuntimeError as e:
+            status = f"[red]{e}[/]"
+            self._sidebar_status_override = status
             self.call_from_thread(
                 self.query_one("#status", Static).update,
-                f"[red]{e}[/]",
+                status,
             )
             # Start polling even if server boot fails — polling will keep
             # trying so the TUI recovers automatically when the server
@@ -2102,109 +2141,91 @@ class InboxApp(App):
     def _bg_poll(self) -> None:
         """Lightweight poll — updates data without disrupting UI if unchanged."""
         try:
-            (
-                convos,
-                events,
-                notes,
-                reminders,
-                reminder_lists,
-                github_data,
-                now_threads,
-                actionable_threads,
-                waiting_threads,
-                status_override,
-                changed,
-            ) = self._collect_poll_data()
+            snapshot = self._collect_poll_data()
         except Exception as exc:
             # Unhandled exception in poll data collection — keep the TUI alive
             self._consecutive_errors += 1
+            status_override = f"[red]{_format_request_error('Auto-refresh', exc)}[/]"
+            self._sidebar_status_override = status_override
             self.call_from_thread(
                 self.query_one("#status", Static).update,
-                f"[red]{_format_request_error('Auto-refresh', exc)}[/]",
+                status_override,
             )
             return
 
+        status_override = snapshot.status
         if status_override:
             self._consecutive_errors += 1
             self._poll_had_error = True
             if self._consecutive_errors >= self._SUSTAINED_OUTAGE_THRESHOLD:
                 # Show persistent outage message that reminds user about retry
                 status_override = "[red]Server unreachable — press Ctrl+R to retry[/]"
-            if changed:
+            self._sidebar_status_override = status_override
+            if snapshot.changed:
                 self.call_from_thread(
                     self._populate,
-                    convos,
-                    events,
-                    notes,
-                    reminders,
-                    reminder_lists,
-                    github_data,
-                    now_threads,
-                    actionable_threads,
-                    waiting_threads,
+                    snapshot.conversations,
+                    snapshot.events,
+                    snapshot.notes,
+                    snapshot.reminders,
+                    snapshot.reminder_lists,
+                    snapshot.github_data,
+                    snapshot.now_threads,
+                    snapshot.actionable_threads,
+                    snapshot.waiting_threads,
                     status_override,
                 )
                 return
-            self.conversations = convos
-            self.now_threads = now_threads
-            self.actionable_threads = actionable_threads
-            self.waiting_threads = waiting_threads
+            self.conversations = snapshot.conversations
+            self.now_threads = snapshot.now_threads
+            self.actionable_threads = snapshot.actionable_threads
+            self.waiting_threads = snapshot.waiting_threads
             self.call_from_thread(self.query_one("#status", Static).update, status_override)
             return
 
         # Success path — reset counters
         self._consecutive_errors = 0
-        if changed:
+        self._sidebar_status_override = None
+        if snapshot.changed:
             self._poll_had_error = False
             self.call_from_thread(
                 self._populate,
-                convos,
-                events,
-                notes,
-                reminders,
-                reminder_lists,
-                github_data,
-                now_threads,
-                actionable_threads,
-                waiting_threads,
+                snapshot.conversations,
+                snapshot.events,
+                snapshot.notes,
+                snapshot.reminders,
+                snapshot.reminder_lists,
+                snapshot.github_data,
+                snapshot.now_threads,
+                snapshot.actionable_threads,
+                snapshot.waiting_threads,
                 status_override,
             )
             return
 
-        self.conversations = convos
-        self.now_threads = now_threads
-        self.actionable_threads = actionable_threads
-        self.waiting_threads = waiting_threads
+        self.conversations = snapshot.conversations
+        self.now_threads = snapshot.now_threads
+        self.actionable_threads = snapshot.actionable_threads
+        self.waiting_threads = snapshot.waiting_threads
         if self._poll_had_error:
             self._poll_had_error = False
             self.call_from_thread(self._render_sidebar)
 
     def _do_refresh(self) -> None:
         """Fetch all data from the server (runs in worker thread)."""
-        (
-            convos,
-            events,
-            notes,
-            reminders,
-            reminder_lists,
-            github_data,
-            now_threads,
-            actionable_threads,
-            waiting_threads,
-            status_override,
-        ) = self._collect_refresh_data()
+        snapshot = self._collect_refresh_data()
         self.call_from_thread(
             self._populate,
-            convos,
-            events,
-            notes,
-            reminders,
-            reminder_lists,
-            github_data,
-            now_threads,
-            actionable_threads,
-            waiting_threads,
-            status_override,
+            snapshot.conversations,
+            snapshot.events,
+            snapshot.notes,
+            snapshot.reminders,
+            snapshot.reminder_lists,
+            snapshot.github_data,
+            snapshot.now_threads,
+            snapshot.actionable_threads,
+            snapshot.waiting_threads,
+            snapshot.status,
         )
 
     def _populate(
@@ -2220,6 +2241,7 @@ class InboxApp(App):
         waiting_threads: list[dict] | None = None,
         status_override: str | None = None,
     ) -> None:
+        self._sidebar_status_override = status_override
         # Check for notification-worthy changes before updating state
         gh = github_data if github_data is not None else self.github_data
         ev = events if events is not None else self.events
@@ -2272,17 +2294,7 @@ class InboxApp(App):
 
     def _collect_auxiliary_data(
         self,
-    ) -> tuple[
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[str],
-    ]:
+    ) -> AuxiliaryDataSnapshot:
         events = self.events
         notes = self.notes_data
         reminders = self.reminders_data
@@ -2336,32 +2348,21 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("Indexed waiting refresh", exc))
 
-        return (
-            events,
-            notes,
-            reminders,
-            reminder_lists,
-            github_data,
-            now_threads,
-            actionable_threads,
-            waiting_threads,
-            errors,
+        return AuxiliaryDataSnapshot(
+            events=events,
+            notes=notes,
+            reminders=reminders,
+            reminder_lists=reminder_lists,
+            github_data=github_data,
+            now_threads=now_threads,
+            actionable_threads=actionable_threads,
+            waiting_threads=waiting_threads,
+            errors=errors,
         )
 
     def _collect_refresh_data(
         self,
-    ) -> tuple[
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        str | None,
-    ]:
+    ) -> RefreshDataSnapshot:
         convos = self.conversations
         errors: list[str] = []
 
@@ -2370,61 +2371,39 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("Conversation refresh", exc))
 
-        (
-            events,
-            notes,
-            reminders,
-            reminder_lists,
-            github_data,
-            now_threads,
-            actionable_threads,
-            waiting_threads,
-            aux_errors,
-        ) = self._collect_auxiliary_data()
-        errors.extend(aux_errors)
-        return (
-            convos,
-            events,
-            notes,
-            reminders,
-            reminder_lists,
-            github_data,
-            now_threads,
-            actionable_threads,
-            waiting_threads,
-            self._merge_status_errors(errors),
+        auxiliary = self._collect_auxiliary_data()
+        errors.extend(auxiliary.errors)
+        return RefreshDataSnapshot(
+            conversations=convos,
+            events=auxiliary.events,
+            notes=auxiliary.notes,
+            reminders=auxiliary.reminders,
+            reminder_lists=auxiliary.reminder_lists,
+            github_data=auxiliary.github_data,
+            now_threads=auxiliary.now_threads,
+            actionable_threads=auxiliary.actionable_threads,
+            waiting_threads=auxiliary.waiting_threads,
+            status=self._merge_status_errors(errors),
         )
 
     def _collect_poll_data(
         self,
-    ) -> tuple[
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        list[dict],
-        str | None,
-        bool,
-    ]:
+    ) -> PollDataSnapshot:
         try:
             convos = self.client.conversations(limit=100)
         except Exception as exc:
-            return (
-                self.conversations,
-                self.events,
-                self.notes_data,
-                self.reminders_data,
-                self.reminder_lists,
-                self.github_data,
-                self.now_threads,
-                self.actionable_threads,
-                self.waiting_threads,
-                self._merge_status_errors([_format_request_error("Auto-refresh", exc)]),
-                False,
+            return PollDataSnapshot(
+                conversations=self.conversations,
+                events=self.events,
+                notes=self.notes_data,
+                reminders=self.reminders_data,
+                reminder_lists=self.reminder_lists,
+                github_data=self.github_data,
+                now_threads=self.now_threads,
+                actionable_threads=self.actionable_threads,
+                waiting_threads=self.waiting_threads,
+                status=self._merge_status_errors([_format_request_error("Auto-refresh", exc)]),
+                changed=False,
             )
 
         # Check if unread counts changed
@@ -2436,56 +2415,46 @@ class InboxApp(App):
         changed = (
             old_unread != new_unread or old_ids != new_ids or len(self.conversations) != len(convos)
         )
-        (
-            events,
-            notes,
-            reminders,
-            reminder_lists,
-            github_data,
-            now_threads,
-            actionable_threads,
-            waiting_threads,
-            errors,
-        ) = self._collect_auxiliary_data()
+        auxiliary = self._collect_auxiliary_data()
         if not changed:
             old_now_ids = [t.get("thread_id") for t in self.now_threads]
-            new_now_ids = [t.get("thread_id") for t in now_threads]
+            new_now_ids = [t.get("thread_id") for t in auxiliary.now_threads]
             old_action_ids = [t.get("thread_id") for t in self.actionable_threads]
-            new_action_ids = [t.get("thread_id") for t in actionable_threads]
+            new_action_ids = [t.get("thread_id") for t in auxiliary.actionable_threads]
             old_wait_ids = [t.get("thread_id") for t in self.waiting_threads]
-            new_wait_ids = [t.get("thread_id") for t in waiting_threads]
+            new_wait_ids = [t.get("thread_id") for t in auxiliary.waiting_threads]
             changed = (
                 old_now_ids != new_now_ids
                 or old_action_ids != new_action_ids
                 or old_wait_ids != new_wait_ids
             )
         if not changed:
-            return (
-                convos,
-                events,
-                notes,
-                reminders,
-                reminder_lists,
-                github_data,
-                now_threads,
-                actionable_threads,
-                waiting_threads,
-                self._merge_status_errors(errors),
-                False,
+            return PollDataSnapshot(
+                conversations=convos,
+                events=auxiliary.events,
+                notes=auxiliary.notes,
+                reminders=auxiliary.reminders,
+                reminder_lists=auxiliary.reminder_lists,
+                github_data=auxiliary.github_data,
+                now_threads=auxiliary.now_threads,
+                actionable_threads=auxiliary.actionable_threads,
+                waiting_threads=auxiliary.waiting_threads,
+                status=self._merge_status_errors(auxiliary.errors),
+                changed=False,
             )
 
-        return (
-            convos,
-            events,
-            notes,
-            reminders,
-            reminder_lists,
-            github_data,
-            now_threads,
-            actionable_threads,
-            waiting_threads,
-            self._merge_status_errors(errors),
-            True,
+        return PollDataSnapshot(
+            conversations=convos,
+            events=auxiliary.events,
+            notes=auxiliary.notes,
+            reminders=auxiliary.reminders,
+            reminder_lists=auxiliary.reminder_lists,
+            github_data=auxiliary.github_data,
+            now_threads=auxiliary.now_threads,
+            actionable_threads=auxiliary.actionable_threads,
+            waiting_threads=auxiliary.waiting_threads,
+            status=self._merge_status_errors(auxiliary.errors),
+            changed=True,
         )
 
     # ── Reminder key handling ─────────────────────────────────────────────

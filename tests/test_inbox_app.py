@@ -74,14 +74,12 @@ def test_collect_refresh_data_preserves_other_data_on_partial_failure() -> None:
     app.events = [{"summary": "Existing event"}]
     app.notes_data = [{"id": "old-note", "title": "Old note"}]
 
-    convos, events, notes, reminders, reminder_lists, github_data, status = (
-        app._collect_refresh_data()
-    )
+    snapshot = app._collect_refresh_data()
 
-    assert convos == [{"id": "c1", "source": "imessage", "unread": 0}]
-    assert events == [{"summary": "Existing event"}]
-    assert notes == [{"id": "n1", "title": "Fresh note"}]
-    assert status == "[red]Calendar refresh failed (HTTP 500)[/]"
+    assert snapshot.conversations == [{"id": "c1", "source": "imessage", "unread": 0}]
+    assert snapshot.events == [{"summary": "Existing event"}]
+    assert snapshot.notes == [{"id": "n1", "title": "Fresh note"}]
+    assert snapshot.status == "[red]Calendar refresh failed (HTTP 500)[/]"
 
 
 def test_collect_poll_data_reports_server_unreachable() -> None:
@@ -95,15 +93,13 @@ def test_collect_poll_data_reports_server_unreachable() -> None:
     app.events = [{"summary": "Standup"}]
     app.notes_data = [{"id": "n1"}]
 
-    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-        app._collect_poll_data()
-    )
+    snapshot = app._collect_poll_data()
 
-    assert changed is False
-    assert convos == app.conversations
-    assert events == app.events
-    assert notes == app.notes_data
-    assert status == "[red]Server unreachable — press Ctrl+R to retry[/]"
+    assert snapshot.changed is False
+    assert snapshot.conversations == app.conversations
+    assert snapshot.events == app.events
+    assert snapshot.notes == app.notes_data
+    assert snapshot.status == "[red]Server unreachable — press Ctrl+R to retry[/]"
 
 
 def test_start_polling_uses_configured_interval() -> None:
@@ -141,9 +137,14 @@ def test_boot_failure_shows_status_error() -> None:
         app.client.ensure_server.side_effect = RuntimeError(
             "Server unreachable — press Ctrl+R to retry"
         )
+        app.client.conversations.side_effect = httpx.ConnectError(
+            "refused", request=httpx.Request("GET", "http://test/conversations")
+        )
 
         async with app.run_test() as pilot:
-            await pilot.pause(0.2)
+            worker = app.boot()
+            await worker.wait()
+            await pilot.pause()
             assert "Server unreachable" in _status_text(app)
 
     asyncio.run(runner())
@@ -269,22 +270,18 @@ def test_poll_had_error_resets_after_successful_poll() -> None:
     app._poll_had_error = False
 
     # First poll fails
-    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-        app._collect_poll_data()
-    )
-    assert status is not None
-    assert "unreachable" in status
-    assert changed is False
+    snapshot = app._collect_poll_data()
+    assert snapshot.status is not None
+    assert "unreachable" in snapshot.status
+    assert snapshot.changed is False
 
     # Simulate that the error was shown (flag set by _bg_poll)
     app._poll_had_error = True
 
     # Second poll succeeds — conversations changed so changed=True
-    convos2, events2, notes2, reminders2, reminder_lists2, github_data2, status2, changed2 = (
-        app._collect_poll_data()
-    )
-    assert changed2 is True
-    assert status2 is None
+    snapshot = app._collect_poll_data()
+    assert snapshot.changed is True
+    assert snapshot.status is None
 
 
 def test_collect_poll_data_succeeds_with_changed_data() -> None:
@@ -304,15 +301,13 @@ def test_collect_poll_data_succeeds_with_changed_data() -> None:
     app.events = []
     app.notes_data = []
 
-    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-        app._collect_poll_data()
-    )
+    snapshot = app._collect_poll_data()
 
-    assert changed is True
-    assert len(convos) == 2
-    assert len(events) == 1
-    assert len(notes) == 1
-    assert status is None
+    assert snapshot.changed is True
+    assert len(snapshot.conversations) == 2
+    assert len(snapshot.events) == 1
+    assert len(snapshot.notes) == 1
+    assert snapshot.status is None
 
 
 def test_collect_refresh_data_all_succeed() -> None:
@@ -325,16 +320,14 @@ def test_collect_refresh_data_all_succeed() -> None:
     client.github_notifications.return_value = []
 
     app = _make_app(client)
-    convos, events, notes, reminders, reminder_lists, github_data, status = (
-        app._collect_refresh_data()
-    )
+    snapshot = app._collect_refresh_data()
 
-    assert convos == [{"id": "c1", "source": "imessage", "unread": 0}]
-    assert events == [{"summary": "Meeting"}]
-    assert notes == [{"id": "n1", "title": "My Note"}]
-    assert reminders == [{"id": "r1", "title": "Buy groceries"}]
-    assert reminder_lists == [{"name": "Reminders", "incomplete_count": 1}]
-    assert status is None
+    assert snapshot.conversations == [{"id": "c1", "source": "imessage", "unread": 0}]
+    assert snapshot.events == [{"summary": "Meeting"}]
+    assert snapshot.notes == [{"id": "n1", "title": "My Note"}]
+    assert snapshot.reminders == [{"id": "r1", "title": "Buy groceries"}]
+    assert snapshot.reminder_lists == [{"name": "Reminders", "incomplete_count": 1}]
+    assert snapshot.status is None
 
 
 def test_collect_refresh_data_conversations_fails_preserves_old() -> None:
@@ -351,16 +344,14 @@ def test_collect_refresh_data_conversations_fails_preserves_old() -> None:
     app = _make_app(client)
     app.conversations = [{"id": "old", "source": "imessage", "unread": 0}]
 
-    convos, events, notes, reminders, reminder_lists, github_data, status = (
-        app._collect_refresh_data()
-    )
+    snapshot = app._collect_refresh_data()
 
     # Conversations preserved from old data
-    assert convos == [{"id": "old", "source": "imessage", "unread": 0}]
-    assert events == [{"summary": "Meeting"}]
-    assert notes == [{"id": "n1"}]
-    assert status is not None
-    assert "unreachable" in status
+    assert snapshot.conversations == [{"id": "old", "source": "imessage", "unread": 0}]
+    assert snapshot.events == [{"summary": "Meeting"}]
+    assert snapshot.notes == [{"id": "n1"}]
+    assert snapshot.status is not None
+    assert "unreachable" in snapshot.status
 
 
 def test_poll_interval_env_not_set_uses_default(monkeypatch) -> None:
@@ -384,13 +375,11 @@ def test_consecutive_errors_increment_on_poll_failure() -> None:
     assert app._consecutive_errors == 0
 
     # First poll failure
-    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-        app._collect_poll_data()
-    )
-    assert status is not None
+    snapshot = app._collect_poll_data()
+    assert snapshot.status is not None
     # The counter is incremented by _bg_poll, not by _collect_poll_data,
     # but we can verify the method returns the error status
-    assert "unreachable" in status
+    assert "unreachable" in snapshot.status
 
 
 def test_consecutive_errors_reset_on_successful_poll() -> None:
@@ -413,11 +402,9 @@ def test_consecutive_errors_reset_on_successful_poll() -> None:
     app._consecutive_errors = 3  # Simulate sustained outage state
 
     # Successful poll returns fresh data
-    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-        app._collect_poll_data()
-    )
-    assert changed is True
-    assert status is None
+    snapshot = app._collect_poll_data()
+    assert snapshot.changed is True
+    assert snapshot.status is None
 
     # The _consecutive_errors is reset by _bg_poll on the success path
     # Verify the reset happens (simulating _bg_poll logic)
@@ -439,11 +426,9 @@ def test_sustained_outage_threshold_message() -> None:
     app._consecutive_errors = InboxApp._SUSTAINED_OUTAGE_THRESHOLD - 1
 
     # This poll failure pushes us over the threshold
-    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-        app._collect_poll_data()
-    )
-    assert status is not None
-    assert "unreachable" in status
+    snapshot = app._collect_poll_data()
+    assert snapshot.status is not None
+    assert "unreachable" in snapshot.status
 
     # The _bg_poll method checks threshold and overrides the status message.
     # We can verify the threshold constant is used correctly.
@@ -484,7 +469,7 @@ def test_status_bar_clears_unreachable_message_after_recovery() -> None:
             assert "unreachable" not in status, (
                 f"Status bar still shows outage after recovery: {status!r}"
             )
-            assert "conversations" in status or "conversation" in status
+            assert "indexed threads" in status
 
     asyncio.run(runner())
 
@@ -560,12 +545,10 @@ def test_bg_poll_catches_unexpected_exceptions() -> None:
 
     # _collect_poll_data catches Exception on conversations, so RuntimeError
     # will be caught there and an error status returned. Verify this:
-    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-        app._collect_poll_data()
-    )
-    assert status is not None
-    assert "unexpected" in status or "failed" in status
-    assert changed is False
+    snapshot = app._collect_poll_data()
+    assert snapshot.status is not None
+    assert "unexpected" in snapshot.status or "failed" in snapshot.status
+    assert snapshot.changed is False
 
 
 def test_bg_refresh_catches_unexpected_exceptions() -> None:
@@ -578,11 +561,9 @@ def test_bg_refresh_catches_unexpected_exceptions() -> None:
 
     # _collect_refresh_data catches Exception on conversations, so the
     # RuntimeError will be caught and an error status returned.
-    convos, events, notes, reminders, reminder_lists, github_data, status = (
-        app._collect_refresh_data()
-    )
-    assert status is not None
-    assert "unexpected" in status or "failed" in status
+    snapshot = app._collect_refresh_data()
+    assert snapshot.status is not None
+    assert "unexpected" in snapshot.status or "failed" in snapshot.status
 
 
 def test_worker_exit_on_error_is_false() -> None:
@@ -650,13 +631,11 @@ def test_tui_survives_repeated_poll_failures() -> None:
         client.conversations.side_effect = httpx.ConnectError(
             "refused", request=httpx.Request("GET", "http://test/")
         )
-        convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-            app._collect_poll_data()
-        )
-        assert changed is False
-        assert convos == app.conversations  # Old data preserved
-        assert status is not None
-        assert "unreachable" in status
+        snapshot = app._collect_poll_data()
+        assert snapshot.changed is False
+        assert snapshot.conversations == app.conversations  # Old data preserved
+        assert snapshot.status is not None
+        assert "unreachable" in snapshot.status
 
 
 def test_tui_recovers_after_sustained_outage() -> None:
@@ -685,22 +664,18 @@ def test_tui_recovers_after_sustained_outage() -> None:
 
     # Failures during outage
     for _ in range(3):
-        convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-            app._collect_poll_data()
-        )
-        assert status is not None
-        assert "unreachable" in status
+        snapshot = app._collect_poll_data()
+        assert snapshot.status is not None
+        assert "unreachable" in snapshot.status
 
     # Server comes back — poll succeeds with changed data
-    convos, events, notes, reminders, reminder_lists, github_data, status, changed = (
-        app._collect_poll_data()
-    )
-    assert changed is True
-    assert len(convos) == 1
-    assert convos[0]["id"] == "c2"
-    assert len(events) == 1
-    assert events[0]["summary"] == "New event"
-    assert status is None
+    snapshot = app._collect_poll_data()
+    assert snapshot.changed is True
+    assert len(snapshot.conversations) == 1
+    assert snapshot.conversations[0]["id"] == "c2"
+    assert len(snapshot.events) == 1
+    assert snapshot.events[0]["summary"] == "New event"
+    assert snapshot.status is None
 
 
 def test_sustained_outage_threshold_is_reasonable() -> None:
@@ -1120,15 +1095,13 @@ def test_collect_refresh_data_includes_reminders() -> None:
     client.github_notifications.return_value = []
 
     app = _make_app(client)
-    convos, events, notes, reminders, reminder_lists, github_data, status = (
-        app._collect_refresh_data()
-    )
+    snapshot = app._collect_refresh_data()
 
-    assert len(reminders) == 1
-    assert reminders[0]["title"] == "Buy groceries"
-    assert len(reminder_lists) == 1
-    assert reminder_lists[0]["name"] == "Shopping"
-    assert status is None
+    assert len(snapshot.reminders) == 1
+    assert snapshot.reminders[0]["title"] == "Buy groceries"
+    assert len(snapshot.reminder_lists) == 1
+    assert snapshot.reminder_lists[0]["name"] == "Shopping"
+    assert snapshot.status is None
 
 
 def test_collect_auxiliary_data_fetches_reminders() -> None:
@@ -1141,11 +1114,11 @@ def test_collect_auxiliary_data_fetches_reminders() -> None:
     client.github_notifications.return_value = []
 
     app = _make_app(client)
-    events, notes, reminders, reminder_lists, github_data, errors = app._collect_auxiliary_data()
+    snapshot = app._collect_auxiliary_data()
 
-    assert len(reminders) == 1
-    assert len(reminder_lists) == 1
-    assert errors == []
+    assert len(snapshot.reminders) == 1
+    assert len(snapshot.reminder_lists) == 1
+    assert snapshot.errors == []
 
 
 def test_collect_auxiliary_data_reminders_failure_preserves_old() -> None:
@@ -1162,13 +1135,13 @@ def test_collect_auxiliary_data_reminders_failure_preserves_old() -> None:
     app = _make_app(client)
     app.reminders_data = [_make_reminder_data(title="Old reminder")]
 
-    events, notes, reminders, reminder_lists, github_data, errors = app._collect_auxiliary_data()
+    snapshot = app._collect_auxiliary_data()
 
     # Old reminders preserved
-    assert len(reminders) == 1
-    assert reminders[0]["title"] == "Old reminder"
-    assert len(errors) == 1
-    assert "unreachable" in errors[0]
+    assert len(snapshot.reminders) == 1
+    assert snapshot.reminders[0]["title"] == "Old reminder"
+    assert len(snapshot.errors) == 1
+    assert "unreachable" in snapshot.errors[0]
 
 
 def test_populate_stores_reminders_data() -> None:
@@ -1547,13 +1520,16 @@ def test_sidebar_selection_restored_after_tab_switch() -> None:
         app.conversations = client.conversations.return_value
 
         async with app.run_test() as pilot:
+            await pilot.press("ctrl+2")
+            await pilot.pause(0.5)
             # Select Alice in the sidebar
-            app.active_conv = {"id": "c1", "source": "imessage", "name": "Alice"}
+            app.active_conv = app.conversations[0]
+            app._restore_sidebar_selection()
 
             # Switch to calendar and back
             await pilot.press("ctrl+4")
             await pilot.pause(0.5)
-            await pilot.press("ctrl+1")
+            await pilot.press("ctrl+2")
             await pilot.pause(0.5)
 
             # Check that the sidebar selection is restored (index matches Alice)
@@ -2022,13 +1998,11 @@ def test_collect_refresh_data_includes_github() -> None:
     client.github_notifications.return_value = [_make_notification_data()]
 
     app = _make_app(client)
-    convos, events, notes, reminders, reminder_lists, github_data, status = (
-        app._collect_refresh_data()
-    )
+    snapshot = app._collect_refresh_data()
 
-    assert len(github_data) == 1
-    assert github_data[0]["title"] == "Fix auth bug"
-    assert status is None
+    assert len(snapshot.github_data) == 1
+    assert snapshot.github_data[0]["title"] == "Fix auth bug"
+    assert snapshot.status is None
 
 
 def test_collect_auxiliary_data_fetches_github() -> None:
@@ -2041,10 +2015,10 @@ def test_collect_auxiliary_data_fetches_github() -> None:
     client.github_notifications.return_value = [_make_notification_data()]
 
     app = _make_app(client)
-    events, notes, reminders, reminder_lists, github_data, errors = app._collect_auxiliary_data()
+    snapshot = app._collect_auxiliary_data()
 
-    assert len(github_data) == 1
-    assert errors == []
+    assert len(snapshot.github_data) == 1
+    assert snapshot.errors == []
 
 
 def test_collect_auxiliary_data_github_failure_preserves_old() -> None:
@@ -2061,12 +2035,12 @@ def test_collect_auxiliary_data_github_failure_preserves_old() -> None:
     app = _make_app(client)
     app.github_data = [_make_notification_data(title="Old notif")]
 
-    events, notes, reminders, reminder_lists, github_data, errors = app._collect_auxiliary_data()
+    snapshot = app._collect_auxiliary_data()
 
-    assert len(github_data) == 1
-    assert github_data[0]["title"] == "Old notif"
-    assert len(errors) == 1
-    assert "unreachable" in errors[0]
+    assert len(snapshot.github_data) == 1
+    assert snapshot.github_data[0]["title"] == "Old notif"
+    assert len(snapshot.errors) == 1
+    assert "unreachable" in snapshot.errors[0]
 
 
 def test_github_key_handlers_mark_read() -> None:
@@ -2156,12 +2130,10 @@ def test_github_notifications_not_fetched_on_non_github_tabs() -> None:
     client.github_notifications.return_value = [_make_notification_data()]
 
     app = _make_app(client)
-    convos, events, notes, reminders, reminder_lists, github_data, status = (
-        app._collect_refresh_data()
-    )
+    snapshot = app._collect_refresh_data()
 
     # GitHub notifications should be included in refresh
-    assert len(github_data) == 1
+    assert len(snapshot.github_data) == 1
     client.github_notifications.assert_called()
 
 
@@ -3112,6 +3084,11 @@ def test_p_key_calls_show_contact_profile() -> None:
         app.action_show_contact_profile = MagicMock()
 
         async with app.run_test() as pilot:
+            await pilot.press("ctrl+2")
+            await pilot.pause(0.5)
+            app.active_conv = app.conversations[0]
+            app.query_one("#compose", Input).blur()
+            await pilot.pause()
             await pilot.press("p")
             await pilot.pause(0.2)
 
@@ -3376,6 +3353,7 @@ def test_search_on_result_selected_navigates_to_notes() -> None:
         assert navigated[0]["source"] == "notes"
 
     asyncio.run(runner())
+
 
 # ── AI layer TUI tests ───────────────────────────────────────────────────────
 
