@@ -108,10 +108,27 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def index_health(self) -> dict:
+        r = self._client.get("/index/health")
+        r.raise_for_status()
+        return r.json()
+
     def index_view(self, view_name: str, *, limit: int = 20) -> dict:
         r = self._client.get(f"/index/views/{view_name}", params={"limit": limit})
         r.raise_for_status()
         return r.json()
+
+    def indexed_recent_threads(self, *, limit: int = 20) -> dict:
+        return self.index_view("recent", limit=limit)
+
+    def indexed_actionable_threads(self, *, limit: int = 20) -> dict:
+        return self.index_view("actionable", limit=limit)
+
+    def indexed_waiting_on_me_threads(self, *, limit: int = 20) -> dict:
+        return self.index_view("waiting-on-me", limit=limit)
+
+    def indexed_waiting_on_others_threads(self, *, limit: int = 20) -> dict:
+        return self.index_view("waiting-on-others", limit=limit)
 
     # ── Messages ─────────────────────────────────────────────────────────
 

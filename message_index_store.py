@@ -571,6 +571,7 @@ class MessageIndexStore:
         actions: tuple[str, ...] | None = None,
         needs_reply: bool | None = None,
         has_open_loop: bool | None = None,
+        latest_sender: str | None = None,
         sort_mode: str = "priority",
     ) -> list[dict[str, object]]:
         predicates: list[str] = []
@@ -588,6 +589,9 @@ class MessageIndexStore:
         if has_open_loop is not None:
             predicates.append("(open_loop != '') = ?")
             params.append(1 if has_open_loop else 0)
+        if latest_sender is not None:
+            predicates.append("latest_sender = ?")
+            params.append(latest_sender)
         where_clause = f"WHERE {' AND '.join(predicates)}" if predicates else ""
         if sort_mode == "recent":
             order_clause = "latest_item_at DESC"

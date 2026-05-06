@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import httpx
 import pytest
@@ -93,6 +93,34 @@ class TestClientConversations:
         client._client.get.assert_called_once_with(
             "/conversations", params={"source": "imessage", "limit": 10}
         )
+
+
+class TestClientIndexedInbox:
+    def test_index_health(self, client):
+        client._client.get.return_value = _mock_response({"healthy": True})
+        result = client.index_health()
+        assert result == {"healthy": True}
+        client._client.get.assert_called_once_with("/index/health")
+
+    def test_index_view(self, client):
+        client._client.get.return_value = _mock_response({"view": "recent", "threads": []})
+        result = client.index_view("recent", limit=7)
+        assert result == {"view": "recent", "threads": []}
+        client._client.get.assert_called_once_with("/index/views/recent", params={"limit": 7})
+
+    def test_indexed_view_helpers_use_compact_index_views(self, client):
+        client.index_view = MagicMock(return_value={"threads": []})
+
+        assert client.indexed_recent_threads(limit=1) == {"threads": []}
+        assert client.indexed_actionable_threads(limit=2) == {"threads": []}
+        assert client.indexed_waiting_on_me_threads(limit=3) == {"threads": []}
+        assert client.indexed_waiting_on_others_threads(limit=4) == {"threads": []}
+        assert client.index_view.call_args_list == [
+            call("recent", limit=1),
+            call("actionable", limit=2),
+            call("waiting-on-me", limit=3),
+            call("waiting-on-others", limit=4),
+        ]
 
 
 # ── Messages ────────────────────────────────────────────────────────────────
