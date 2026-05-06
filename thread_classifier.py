@@ -119,12 +119,12 @@ def _actionability(
 ) -> str:
     if noise_class in {"otp", "receipt", "survey"}:
         return "ignore"
-    if topic in {"security", "health-admin"} and urgency in {"high", "medium"}:
-        return "track"
-    if human_score >= 0.7 or sender_freq >= 0.5:
-        return "reply"
     if noise_class in {"newsletter", "automated"}:
         return "archive"
+    if topic in {"security", "health-admin"} and urgency in {"high", "medium"}:
+        return "track"
+    if human_score >= 1.0 or sender_freq >= 0.5:
+        return "reply"
     if topic == "opportunity":
         return "review"
     return "track"

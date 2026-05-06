@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from thread_classifier import classify_thread
+from thread_classifier import classify_thread, sender_freq_score
 
 BASE_DIR = Path(__file__).parent
 DEFAULT_INDEX_DB = BASE_DIR / ".inbox_index.sqlite3"
@@ -27,6 +27,18 @@ def _json_loads(value: str | None) -> object:
 
 def _coalesce_str(value: object | None) -> str:
     return "" if value is None else str(value)
+
+
+def _sender_key(sender: object | None) -> str:
+    value = _coalesce_str(sender).strip()
+    return "" if value == "Me" else value.lower()
+
+
+@dataclass
+class SenderStat:
+    thread_count: int = 0
+    reply_count: int = 0
+    last_seen_at: str = ""
 
 
 @dataclass
@@ -330,7 +342,7 @@ class MessageIndexStore:
                 (source, account, error),
             )
 
-    def get_sync_state(self, source: str, account: str) -> dict[str, str] | None:
+    def get_sync_state(self, source: str, account: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM sync_state WHERE source = ? AND account = ?",
@@ -354,6 +366,44 @@ class MessageIndexStore:
         data["metadata"] = _json_loads(str(data.get("metadata_json") or "{}"))
         return data
 
+    def _refresh_sender_stats(
+        self, conn: sqlite3.Connection, rows: list[sqlite3.Row]
+    ) -> dict[str, SenderStat]:
+        grouped: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+        for row in rows:
+            key = (str(row["source"]), str(row["account"]), str(row["thread_id"]))
+            grouped.setdefault(key, []).append(row)
+
+        stats: dict[str, SenderStat] = {}
+        for items in grouped.values():
+            has_reply = any(str(item["sender"]) == "Me" for item in items)
+            senders = {_sender_key(item["sender"]) for item in items}
+            for sender in sorted(sender for sender in senders if sender):
+                sender_items = [item for item in items if _sender_key(item["sender"]) == sender]
+                latest_seen = max(str(item["created_at"]) for item in sender_items)
+                row = stats.setdefault(sender, SenderStat())
+                row.thread_count += 1
+                row.reply_count += int(has_reply)
+                row.last_seen_at = max(row.last_seen_at, latest_seen)
+
+        conn.execute("DELETE FROM sender_stats")
+        conn.executemany(
+            """
+            INSERT INTO sender_stats (email, thread_count, reply_count, last_seen_at)
+            VALUES (:email, :thread_count, :reply_count, :last_seen_at)
+            """,
+            [
+                {
+                    "email": sender,
+                    "thread_count": row.thread_count,
+                    "reply_count": row.reply_count,
+                    "last_seen_at": row.last_seen_at,
+                }
+                for sender, row in sorted(stats.items())
+            ],
+        )
+        return stats
+
     def rebuild_threads(self, *, source: str | None = None, account: str | None = None) -> int:
         predicates: list[str] = []
         params: list[object] = []
@@ -366,6 +416,11 @@ class MessageIndexStore:
         where_clause = f"WHERE {' AND '.join(predicates)}" if predicates else ""
 
         with self._connect() as conn:
+            all_rows = conn.execute(
+                "SELECT * FROM items ORDER BY source, account, thread_id, created_at, id"
+            ).fetchall()
+            sender_stats = self._refresh_sender_stats(conn, all_rows)
+
             _q = f"SELECT * FROM items {where_clause} ORDER BY source, account, thread_id, created_at, id"  # nosec B608
             rows = conn.execute(_q, params).fetchall()
 
@@ -385,7 +440,12 @@ class MessageIndexStore:
                     }
                 )
                 unread_count = sum(int(item["is_read"] == 0) for item in items)
-                classification = classify_thread(latest=latest)
+                sender_stat = sender_stats.get(_sender_key(latest["sender"]), SenderStat())
+                sender_freq = sender_freq_score(
+                    reply_count=sender_stat.reply_count,
+                    thread_count=sender_stat.thread_count,
+                )
+                classification = classify_thread(latest=latest, sender_freq=sender_freq)
                 conn.execute(
                     """
                     INSERT INTO threads (
