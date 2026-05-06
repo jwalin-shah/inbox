@@ -29,29 +29,68 @@ class _FakeMessagesApi:
         return _FakeRequest(self._full_messages[id])
 
 
+class _FakeHistoryApi:
+    def __init__(self, history_payloads):
+        self._history_payloads = history_payloads
+
+    def list(self, *, pageToken=None, **_kwargs):
+        key = pageToken or "__first__"
+        return _FakeRequest(self._history_payloads[key])
+
+
 class _FakeUsersApi:
-    def __init__(self, list_payloads, full_messages):
+    def __init__(
+        self, list_payloads, full_messages, *, profile_payload=None, history_payloads=None
+    ):
         self._messages_api = _FakeMessagesApi(list_payloads, full_messages)
+        self._profile_payload = profile_payload
+        self._history_payloads = history_payloads
 
     def messages(self):
         return self._messages_api
 
+    def getProfile(self, **_kwargs):
+        return _FakeRequest(self._profile_payload or {})
+
+    def history(self):
+        if self._history_payloads is None:
+            raise AttributeError("history unavailable")
+        return _FakeHistoryApi(self._history_payloads)
+
 
 class _FakeGmailService:
-    def __init__(self, list_payloads, full_messages):
-        self._users_api = _FakeUsersApi(list_payloads, full_messages)
+    def __init__(
+        self,
+        list_payloads,
+        full_messages,
+        *,
+        profile_payload=None,
+        history_payloads=None,
+    ):
+        self._users_api = _FakeUsersApi(
+            list_payloads,
+            full_messages,
+            profile_payload=profile_payload,
+            history_payloads=history_payloads,
+        )
 
     def users(self):
         return self._users_api
 
 
-def _gmail_message(message_id: str, internal_date: int, *, thread_id: str | None = None):
+def _gmail_message(
+    message_id: str,
+    internal_date: int,
+    *,
+    thread_id: str | None = None,
+    labels: list[str] | None = None,
+):
     return {
         "id": message_id,
         "threadId": thread_id or message_id,
         "internalDate": str(internal_date),
         "snippet": f"snippet-{message_id}",
-        "labelIds": ["INBOX"],
+        "labelIds": labels or ["INBOX"],
         "payload": {
             "headers": [
                 {"name": "From", "value": "Sender <sender@example.com>"},
@@ -123,6 +162,37 @@ def test_sync_gmail_bootstrap_resumes_from_saved_page_token(tmp_path, monkeypatc
     with sqlite3.connect(store.db_path) as conn:
         row_count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
     assert row_count == 3
+
+
+def test_sync_gmail_bootstrap_records_history_cursor(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    service = _FakeGmailService(
+        list_payloads={
+            "__first__": {
+                "messages": [{"id": "m1"}],
+            },
+        },
+        full_messages={
+            "m1": _gmail_message("m1", 300),
+        },
+        profile_payload={"historyId": "9000"},
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    stats = message_sync.sync_gmail_bootstrap(store)
+    assert stats == {"acct@example.com": 1}
+
+    state = store.get_sync_state("gmail", "acct@example.com")
+    assert state is not None
+    assert state["checkpoint_type"] == message_sync.GMAIL_HISTORY_CURSOR
+    assert state["checkpoint_value"] == "9000"
+    assert state["metadata"]["cursor_mode"] == "history"
+    assert state["metadata"]["history_id"] == "9000"
+    assert state["metadata"]["timestamp_checkpoint_ms"] == "300"
 
 
 def test_sync_gmail_bootstrap_does_not_double_count_or_rewrite_items_on_resume(
@@ -200,6 +270,112 @@ def test_sync_gmail_bootstrap_does_not_double_count_or_rewrite_items_on_resume(
         ).fetchone()[0]
     assert finished_count == 3
     assert resumed_m2_ingested_at == existing_m2_ingested_at
+
+
+def test_sync_gmail_incremental_uses_history_for_new_and_changed_messages(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        message_sync._gmail_item(
+            "acct@example.com",
+            _gmail_message("m1", 100, labels=["INBOX", "UNREAD"]),
+        )
+    )
+    store.set_sync_state(
+        source="gmail",
+        account="acct@example.com",
+        checkpoint_type=message_sync.GMAIL_HISTORY_CURSOR,
+        checkpoint_value="9000",
+        status="idle",
+        metadata={
+            "cursor_mode": "history",
+            "history_id": "9000",
+            "timestamp_checkpoint_ms": "100",
+        },
+    )
+    service = _FakeGmailService(
+        list_payloads={},
+        full_messages={
+            "m1": _gmail_message("m1", 100, labels=["INBOX"]),
+            "m2": _gmail_message("m2", 200, labels=["INBOX", "UNREAD"]),
+        },
+        history_payloads={
+            "__first__": {
+                "historyId": "9001",
+                "history": [
+                    {
+                        "labelsRemoved": [{"message": {"id": "m1"}, "labelIds": ["UNREAD"]}],
+                        "messagesAdded": [{"message": {"id": "m2"}}],
+                    }
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    stats = message_sync.sync_gmail_incremental(store)
+    assert stats == {"acct@example.com": 2}
+
+    state = store.get_sync_state("gmail", "acct@example.com")
+    assert state is not None
+    assert state["checkpoint_type"] == message_sync.GMAIL_HISTORY_CURSOR
+    assert state["checkpoint_value"] == "9001"
+    assert state["metadata"]["cursor_mode"] == "history"
+    assert state["metadata"]["timestamp_checkpoint_ms"] == "200"
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        existing = conn.execute(
+            "SELECT is_read, labels_json FROM items WHERE external_id = 'm1'"
+        ).fetchone()
+        inserted = conn.execute(
+            "SELECT is_read, labels_json FROM items WHERE external_id = 'm2'"
+        ).fetchone()
+    assert existing["is_read"] == 1
+    assert '"UNREAD"' not in existing["labels_json"]
+    assert inserted["is_read"] == 0
+
+
+def test_sync_gmail_incremental_falls_back_without_history_cursor(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.set_sync_state(
+        source="gmail",
+        account="acct@example.com",
+        checkpoint_type=message_sync.GMAIL_TIMESTAMP_CURSOR,
+        checkpoint_value="100",
+        status="idle",
+        metadata={},
+    )
+    service = _FakeGmailService(
+        list_payloads={
+            "__first__": {
+                "messages": [{"id": "m2"}, {"id": "m1"}],
+            },
+        },
+        full_messages={
+            "m2": _gmail_message("m2", 200),
+            "m1": _gmail_message("m1", 100),
+        },
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    stats = message_sync.sync_gmail_incremental(store)
+    assert stats == {"acct@example.com": 1}
+
+    state = store.get_sync_state("gmail", "acct@example.com")
+    assert state is not None
+    assert state["checkpoint_type"] == message_sync.GMAIL_TIMESTAMP_CURSOR
+    assert state["checkpoint_value"] == "200"
+    assert state["metadata"]["cursor_mode"] == "timestamp_fallback"
+    assert state["metadata"]["fallback_reason"] == "missing_history_cursor"
+    assert state["metadata"]["timestamp_checkpoint_ms"] == "200"
 
 
 def test_sync_imessage_incremental_advances_checkpoint_for_skipped_rows(tmp_path, monkeypatch):
