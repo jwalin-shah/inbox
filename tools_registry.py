@@ -17,6 +17,7 @@ import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import quote
 
 ParamLocation = Literal["query", "body", "path"]
 _EMPTY = inspect.Parameter.empty
@@ -42,6 +43,10 @@ class Tool:
     # Static extras baked into every call (e.g., `source="gmail"`).
     extra_query: dict[str, Any] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
+
+
+def _encode_path_value(value: Any) -> str:
+    return quote(str(value), safe="")
 
 
 def _build_handler(tool: Tool, backend: Any) -> Callable[..., Any]:
@@ -72,7 +77,7 @@ def _build_handler(tool: Tool, backend: Any) -> Callable[..., Any]:
                 "Retry with confirm=True after user approval."
             )
 
-        path_kwargs: dict[str, Any] = {}
+        path_kwargs: dict[str, str] = {}
         query: dict[str, Any] = dict(tool.extra_query)
         body: dict[str, Any] = dict(tool.extra_body)
 
@@ -81,7 +86,7 @@ def _build_handler(tool: Tool, backend: Any) -> Callable[..., Any]:
                 continue
             value = kwargs[p.name]
             if p.location == "path":
-                path_kwargs[p.name] = value
+                path_kwargs[p.name] = _encode_path_value(value)
             elif p.location == "query":
                 query[p.name] = value
             elif p.location == "body":
