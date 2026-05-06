@@ -330,7 +330,7 @@ class MessageIndexStore:
                 (source, account, error),
             )
 
-    def get_sync_state(self, source: str, account: str) -> dict[str, str] | None:
+    def get_sync_state(self, source: str, account: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM sync_state WHERE source = ? AND account = ?",
