@@ -390,6 +390,31 @@ def test_rebuild_threads_is_idempotent(tmp_path):
         assert row["thread_id"] == "t1"
 
 
+def test_rebuild_threads_handles_many_threads_without_expression_depth_failure(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    for index in range(1100):
+        store.upsert_item(
+            _item(
+                source="gmail",
+                account="a@example.com",
+                external_id=f"m{index}",
+                thread_id=f"t{index}",
+                sender="Sender",
+                subject=f"Thread {index}",
+            )
+        )
+
+    rebuilt = store.rebuild_threads(source="gmail", account="a@example.com")
+
+    assert rebuilt == 1100
+    with store._connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM threads WHERE source = ? AND account = ?",
+            ("gmail", "a@example.com"),
+        ).fetchone()[0]
+        assert count == 1100
+
+
 def test_set_sync_state_is_idempotent(tmp_path):
     store = MessageIndexStore(tmp_path / "index.sqlite3")
 

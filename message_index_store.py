@@ -516,14 +516,39 @@ class MessageIndexStore:
                 scope_clause = (
                     " AND ".join(deletion_scope_predicates) if deletion_scope_predicates else "1=1"
                 )
-                keep_clause = " OR ".join(
-                    "(source = ? AND account = ? AND thread_id = ?)" for _ in keys
-                )
-                keep_params: list[object] = [value for key in keys for value in key]
                 conn.execute(
-                    f"DELETE FROM threads WHERE ({scope_clause}) AND NOT ({keep_clause})",  # nosec: B608
-                    deletion_scope_params + keep_params,
+                    """
+                    CREATE TEMP TABLE IF NOT EXISTS rebuild_thread_keep (
+                        source TEXT NOT NULL,
+                        account TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        PRIMARY KEY (source, account, thread_id)
+                    )
+                    """
                 )
+                conn.execute("DELETE FROM rebuild_thread_keep")
+                conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO rebuild_thread_keep (source, account, thread_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    keys,
+                )
+                conn.execute(
+                    f"""
+                    DELETE FROM threads
+                    WHERE ({scope_clause})
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM rebuild_thread_keep keep
+                          WHERE keep.source = threads.source
+                            AND keep.account = threads.account
+                            AND keep.thread_id = threads.thread_id
+                      )
+                    """,  # nosec: B608
+                    deletion_scope_params,
+                )
+                conn.execute("DELETE FROM rebuild_thread_keep")
             elif source and account:
                 conn.execute(
                     "DELETE FROM threads WHERE source = ? AND account = ?", (source, account)
