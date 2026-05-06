@@ -100,5 +100,23 @@ def test_inbox_client_index_status_matches_server_endpoint_shape(api_client: Tes
     result = client.index_status()
 
     assert result["db_path"].endswith(".inbox_index.sqlite3")
+    assert result["read_model"] == "index"
+    assert result["raw_provider_fetch"] is False
     assert result["counts"] == {"items": 3, "threads": 2}
     assert result["sync_states"] == []
+
+
+def test_inbox_client_index_health_matches_server_endpoint_shape(api_client: TestClient):
+    import inbox_server
+
+    inbox_server.state.index_store.list_sync_states = MagicMock(return_value=[])
+
+    client = InboxClient.__new__(InboxClient)
+    client._client = api_client
+
+    result = client.index_health()
+
+    assert result["db_path"].endswith(".inbox_index.sqlite3")
+    assert result["healthy"] is False
+    assert result["stale"] is True
+    assert result["reasons"] == ["no_sync_state"]

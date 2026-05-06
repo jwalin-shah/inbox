@@ -415,6 +415,35 @@ def test_rebuild_threads_handles_many_threads_without_expression_depth_failure(t
         assert count == 1100
 
 
+def test_list_threads_can_filter_by_latest_sender(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="m1",
+            thread_id="waiting-on-other",
+            sender="Me",
+            subject="Following up",
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="m2",
+            thread_id="waiting-on-me",
+            sender="Recruiter",
+            subject="Can you reply?",
+        )
+    )
+    store.rebuild_threads()
+
+    rows = store.list_threads(limit=10, latest_sender="Me", sort_mode="recent")
+
+    assert [row["thread_id"] for row in rows] == ["waiting-on-other"]
+
+
 def test_set_sync_state_is_idempotent(tmp_path):
     store = MessageIndexStore(tmp_path / "index.sqlite3")
 

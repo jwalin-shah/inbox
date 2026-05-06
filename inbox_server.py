@@ -563,6 +563,8 @@ class WorkflowEventRequest(BaseModel):
 
 
 class NeedsActionOut(BaseModel):
+    thread_read_model: str = "index"
+    raw_thread_provider_fetch: bool = False
     threads: list[GmailThreadSummaryOut]
     tasks: list[TaskOut]
     events: list[CalendarEventOut]
@@ -590,11 +592,15 @@ class IndexSyncStateOut(BaseModel):
 
 class IndexStatusOut(BaseModel):
     db_path: str
+    read_model: str = "index"
+    raw_provider_fetch: bool = False
     threads: list[GmailThreadSummaryOut]
 
 
 class IndexOverviewOut(BaseModel):
     db_path: str
+    read_model: str = "index"
+    raw_provider_fetch: bool = False
     counts: dict[str, int]
     sync_states: list[IndexSyncStateOut]
 
@@ -620,6 +626,9 @@ class IndexHealthOut(BaseModel):
 
 class IndexedThreadListOut(BaseModel):
     view: str
+    db_path: str
+    read_model: str = "index"
+    raw_provider_fetch: bool = False
     threads: list[GmailThreadSummaryOut]
 
 
@@ -2773,6 +2782,20 @@ def _index_view_rows(view: str, limit: int) -> list[dict[str, object]]:
             newest_only=True,
             sort_mode="recent",
         )
+    if view == "waiting-on-me":
+        return state.index_store.list_threads(
+            limit=limit,
+            needs_reply=True,
+            newest_only=True,
+            sort_mode="priority",
+        )
+    if view == "waiting-on-others":
+        return state.index_store.list_threads(
+            limit=limit,
+            latest_sender="Me",
+            newest_only=True,
+            sort_mode="recent",
+        )
     if view == "waiting-on":
         return state.index_store.list_threads(
             limit=limit,
@@ -3733,24 +3756,6 @@ async def get_needs_action(workflow: str = "", account: str = ""):
             threads.append(ts)
             if len(threads) >= 10:
                 break
-    elif state.gmail_services:
-        try:
-            acct, svc = _get_gmail_service_for_account(account)
-            contacts = await asyncio.to_thread(gmail_search, svc, acct, "is:inbox", 40)
-            seen_na: set[str] = set()
-            for c in contacts:
-                tid = c.thread_id or c.id
-                if c.unread == 0 or tid in seen_na:
-                    continue
-                seen_na.add(tid)
-                ts = _contact_to_thread_summary(c)
-                if workflow and ts.workflow != workflow:
-                    continue
-                threads.append(ts)
-                if len(threads) >= 10:
-                    break
-        except Exception:
-            pass
 
     tasks: list[TaskOut] = []
     if state.tasks_services:
@@ -3831,6 +3836,7 @@ async def get_index_view(view_name: str, limit: int = 20):
     rows = _index_view_rows(view_name, limit)
     return IndexedThreadListOut(
         view=view_name,
+        db_path=str(state.index_store.db_path),
         threads=[_indexed_thread_to_summary(row) for row in rows],
     )
 

@@ -149,10 +149,13 @@ class TestIndexEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["db_path"].endswith(".inbox_index.sqlite3")
+        assert data["read_model"] == "index"
+        assert data["raw_provider_fetch"] is False
         assert len(data["threads"]) == 1
         assert data["threads"][0]["thread_id"] == "t1"
         assert data["threads"][0]["needs_reply"] is True
         assert data["threads"][0]["workflow"] == ""
+        assert "body_text" not in data["threads"][0]
 
     def test_index_status_exposes_counts_and_sync_states(self, client):
         import inbox_server
@@ -296,7 +299,11 @@ class TestIndexEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["view"] == "actionable"
+        assert data["db_path"].endswith(".inbox_index.sqlite3")
+        assert data["read_model"] == "index"
+        assert data["raw_provider_fetch"] is False
         assert len(data["threads"]) == 1
+        assert "body_text" not in data["threads"][0]
         inbox_server.state.index_store.list_threads.assert_called_once_with(
             limit=5,
             actions=("reply", "review", "track"),
@@ -318,6 +325,44 @@ class TestIndexEndpoints:
             limit=7,
             actions=("track",),
             has_open_loop=True,
+            newest_only=True,
+            sort_mode="recent",
+        )
+
+    def test_index_view_waiting_on_me_routes_to_needs_reply_threads(self, client):
+        import inbox_server
+
+        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+
+        resp = client.get("/index/views/waiting-on-me", params={"limit": 9})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["view"] == "waiting-on-me"
+        assert data["read_model"] == "index"
+        assert data["raw_provider_fetch"] is False
+        assert data["threads"] == []
+        inbox_server.state.index_store.list_threads.assert_called_once_with(
+            limit=9,
+            needs_reply=True,
+            newest_only=True,
+            sort_mode="priority",
+        )
+
+    def test_index_view_waiting_on_others_routes_to_my_latest_threads(self, client):
+        import inbox_server
+
+        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+
+        resp = client.get("/index/views/waiting-on-others", params={"limit": 11})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["view"] == "waiting-on-others"
+        assert data["read_model"] == "index"
+        assert data["raw_provider_fetch"] is False
+        assert data["threads"] == []
+        inbox_server.state.index_store.list_threads.assert_called_once_with(
+            limit=11,
+            latest_sender="Me",
             newest_only=True,
             sort_mode="recent",
         )
@@ -1784,10 +1829,13 @@ class TestPhase4:
         resp = client.get("/inbox/needs-action")
         assert resp.status_code == 200
         data = resp.json()
+        assert data["thread_read_model"] == "index"
+        assert data["raw_thread_provider_fetch"] is False
         assert "threads" in data
         assert "tasks" in data
         assert "events" in data
         assert "workflow_counts" in data
+        mock_gmail.assert_not_called()
 
     @patch("inbox_server.gmail_search")
     @patch("inbox_server.tasks_list")
@@ -1795,28 +1843,34 @@ class TestPhase4:
     def test_needs_action_workflow_counts(self, mock_events, mock_tasks, mock_gmail, client):
         import inbox_server
 
-        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+        inbox_server.state.index_store.list_threads = MagicMock(
+            return_value=[
+                {
+                    "thread_id": "t1",
+                    "account": "me@gmail.com",
+                    "participants_json": ["HR"],
+                    "latest_subject": "Interview at Acme",
+                    "latest_snippet": "Interview at Acme",
+                    "latest_item_at": "2026-04-18T01:00:00+00:00",
+                    "summary": "HR: Interview at Acme [opportunity/review]",
+                    "open_loop": "Review opportunity details",
+                    "topic": "opportunity",
+                    "needs_reply": 1,
+                    "message_count": 1,
+                    "latest_sender": "HR",
+                }
+            ]
+        )
         inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
         inbox_server.state.tasks_services = {"me@gmail.com": MagicMock()}
         inbox_server.state.cal_services = {}
-        mock_gmail.return_value = [
-            Contact(
-                id="m1",
-                name="HR",
-                source="gmail",
-                snippet="Interview at Acme",
-                unread=1,
-                last_ts=datetime(2020, 1, 1),
-                thread_id="t1",
-                gmail_account="me@gmail.com",
-            ),
-        ]
         mock_tasks.return_value = []
         mock_events.return_value = []
         resp = client.get("/inbox/needs-action")
         assert resp.status_code == 200
         data = resp.json()
         assert data["workflow_counts"].get("job_hunt", 0) >= 1
+        mock_gmail.assert_not_called()
 
     @patch("inbox_server.gmail_search")
     @patch("inbox_server.tasks_list")
@@ -1851,8 +1905,34 @@ class TestPhase4:
         resp = client.get("/inbox/needs-action")
         assert resp.status_code == 200
         data = resp.json()
+        assert data["thread_read_model"] == "index"
+        assert data["raw_thread_provider_fetch"] is False
         assert len(data["threads"]) == 1
         assert data["threads"][0]["thread_id"] == "t1"
+        mock_gmail.assert_not_called()
+
+    @patch("inbox_server.gmail_search")
+    @patch("inbox_server.tasks_list")
+    @patch("inbox_server.calendar_events")
+    def test_needs_action_does_not_fallback_to_live_gmail_when_index_empty(
+        self, mock_events, mock_tasks, mock_gmail, client
+    ):
+        import inbox_server
+
+        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.tasks_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.cal_services = {}
+        mock_tasks.return_value = []
+        mock_events.return_value = []
+
+        resp = client.get("/inbox/needs-action")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["threads"] == []
+        assert data["thread_read_model"] == "index"
+        assert data["raw_thread_provider_fetch"] is False
         mock_gmail.assert_not_called()
 
     @patch("inbox_server.drive_create_folder")
