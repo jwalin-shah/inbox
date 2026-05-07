@@ -8,4 +8,9 @@ export INBOX_SERVER_PORT="${INBOX_SERVER_PORT:-9850}"
 export INBOX_SERVER_URL="${INBOX_SERVER_URL:-http://127.0.0.1:${INBOX_SERVER_PORT}}"
 
 cd "$ROOT_DIR"
+
+if [[ "${1:-}" == "validate-agent-safe" ]]; then
+  exec "$ROOT_DIR/scripts/validate_agent_safe.sh"
+fi
+
 exec uv run python "${1:-inbox.py}"

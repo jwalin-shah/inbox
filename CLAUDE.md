@@ -328,9 +328,10 @@ POST /notifications/test  {"title", "body"}
 
 ## Dev commands
 ```bash
-uv run ruff check --fix .   # lint
-uv run pyright              # type check
-uv run pytest               # unit tests
+scripts/validate_agent_safe.sh  # default agent-safe validation
+uv run ruff check --fix .       # human-invoked lint fix; mutates files
+uv run pyright                  # broad type check
+uv run pytest                   # broad unit test suite
 ```
 
 ## Agent Slash Commands

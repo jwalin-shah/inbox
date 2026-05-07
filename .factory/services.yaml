@@ -1,5 +1,6 @@
 commands:
   install: uv sync
+  validate: scripts/validate_agent_safe.sh
   test: uv run pytest --ignore=tests/test_audio.py --ignore=tests/test_llm.py -x -q
   test_all: uv run pytest -x -q
   typecheck: uv run pyright
