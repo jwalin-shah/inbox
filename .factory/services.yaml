@@ -1,11 +1,9 @@
 commands:
   install: uv sync
-  test: uv run pytest --ignore=tests/test_audio.py --ignore=tests/test_llm.py -x -q
-  test_all: uv run pytest -x -q
-  typecheck: uv run pyright
-  lint: uv run ruff check .
-  lint_fix: uv run ruff check --fix .
-  format: uv run ruff format .
+  validate: scripts/validate_agent_safe.sh
+  test: scripts/validate_agent_safe.sh
+  test_all: scripts/validate_agent_safe.sh
+  lint: scripts/validate_agent_safe.sh
 
 services:
   inbox-server:
