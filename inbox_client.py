@@ -121,6 +121,9 @@ class InboxClient:
     def indexed_recent_threads(self, *, limit: int = 20) -> dict:
         return self.index_view("recent", limit=limit)
 
+    def indexed_now_threads(self, *, limit: int = 20) -> dict:
+        return self.index_view("now", limit=limit)
+
     def indexed_actionable_threads(self, *, limit: int = 20) -> dict:
         return self.index_view("actionable", limit=limit)
 
@@ -130,6 +133,16 @@ class InboxClient:
     def indexed_waiting_on_others_threads(self, *, limit: int = 20) -> dict:
         return self.index_view("waiting-on-others", limit=limit)
 
+    def needs_action(self, *, workflow: str = "", account: str = "") -> dict:
+        params = {}
+        if workflow:
+            params["workflow"] = workflow
+        if account:
+            params["account"] = account
+        r = self._client.get("/inbox/needs-action", params=params)
+        r.raise_for_status()
+        return r.json()
+
     # ── Messages ─────────────────────────────────────────────────────────
 
     def messages(
@@ -138,10 +151,13 @@ class InboxClient:
         conv_id: str,
         thread_id: str = "",
         limit: int = 50,
+        account: str = "",
     ) -> list[dict]:
         params: dict = {"limit": limit}
         if thread_id:
             params["thread_id"] = thread_id
+        if account:
+            params["account"] = account
         r = self._client.get(f"/messages/{source}/{conv_id}", params=params)
         r.raise_for_status()
         return r.json()

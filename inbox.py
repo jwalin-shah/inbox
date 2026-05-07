@@ -14,6 +14,7 @@ import time
 import webbrowser
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 
 import httpx
 from rich.align import Align
@@ -60,6 +61,110 @@ def _format_request_error(action: str, exc: Exception) -> str:
     if isinstance(exc, httpx.RequestError):
         return "Server unreachable — press Ctrl+R to retry"
     return f"{action} failed: {exc}"
+
+
+def _now_item_key(item: dict) -> str:
+    if item.get("now_id"):
+        return str(item["now_id"])
+    if item.get("thread_id"):
+        return (
+            f"thread:{item.get('source', '')}:{item.get('owning_account', '')}:{item['thread_id']}"
+        )
+    if item.get("id"):
+        return f"{item.get('now_kind', 'item')}:{item.get('account', '')}:{item['id']}"
+    if item.get("event_id"):
+        return f"event:{item.get('account', '')}:{item.get('calendar_id', '')}:{item['event_id']}"
+    return repr(sorted(item.items()))
+
+
+def _format_now_due(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return datetime.fromisoformat(value).strftime("%b %d")
+    except (TypeError, ValueError):
+        return value
+
+
+def _normalize_needs_action(data: dict) -> list[dict]:
+    items: list[dict] = []
+    for thread in data.get("threads", []):
+        normalized = dict(thread)
+        normalized["now_kind"] = "thread"
+        normalized["title"] = thread.get("subject", "Untitled")
+        normalized["now_id"] = _now_item_key(normalized)
+        normalized["now_meta"] = [
+            thread.get("source", "thread"),
+            thread.get("actionability", ""),
+            thread.get("urgency", ""),
+            thread.get("workflow", ""),
+        ]
+        items.append(normalized)
+
+    for task in data.get("tasks", []):
+        due = _format_now_due(task.get("due"))
+        normalized = {
+            **task,
+            "now_kind": "task",
+            "now_id": f"task:{task.get('account', '')}:{task.get('list_id', '')}:{task.get('id', '')}",
+            "title": task.get("title", "Untitled task"),
+            "summary": task.get("notes", ""),
+            "source": "tasks",
+            "actionability": "task",
+            "now_meta": [
+                "task",
+                due,
+                task.get("list_title", ""),
+                task.get("workflow", ""),
+            ],
+        }
+        items.append(normalized)
+
+    for event in data.get("events", []):
+        start = event.get("start", "")
+        time_label = ""
+        if start:
+            try:
+                time_label = datetime.fromisoformat(start).strftime("%b %d %H:%M")
+            except (TypeError, ValueError):
+                time_label = start
+        normalized = {
+            **event,
+            "now_kind": "event",
+            "now_id": f"event:{event.get('account', '')}:{event.get('calendar_id', '')}:{event.get('event_id', '')}",
+            "title": event.get("summary", "Untitled event"),
+            "summary": event.get("description", "") or event.get("location", ""),
+            "source": "calendar",
+            "actionability": "prep",
+            "now_meta": [
+                "calendar",
+                time_label,
+                event.get("location", ""),
+                event.get("workflow", ""),
+            ],
+        }
+        items.append(normalized)
+    return items
+
+
+def _index_thread_message_ref(thread: dict) -> dict[str, str]:
+    source = str(thread.get("source", ""))
+    if source == "gmail":
+        conv_id = str(thread.get("latest_external_id") or thread.get("thread_id") or "")
+        return {
+            "source": source,
+            "conv_id": conv_id,
+            "thread_id": str(thread.get("thread_id", "")),
+            "account": str(thread.get("owning_account", "")),
+        }
+    if source == "imessage":
+        return {
+            "source": source,
+            "conv_id": str(thread.get("thread_id", "")),
+            "thread_id": "",
+            "account": "",
+        }
+    return {"source": "", "conv_id": "", "thread_id": "", "account": ""}
 
 
 @dataclass(frozen=True)
@@ -385,6 +490,15 @@ class IndexedThreadItem(ListItem):
         t.append(d.get("subject", "Untitled"), style="bold white")
         participants = ", ".join(d.get("participants", [])[:2])
         meta_parts: list[str] = []
+        source = d.get("source", "")
+        if source:
+            meta_parts.append(str(source))
+        actionability = d.get("actionability", "")
+        if actionability:
+            meta_parts.append(str(actionability))
+        urgency = d.get("urgency", "")
+        if urgency in ("high", "medium"):
+            meta_parts.append(f"{urgency} urgency")
         if participants:
             meta_parts.append(participants)
         workflow = d.get("workflow", "")
@@ -392,9 +506,40 @@ class IndexedThreadItem(ListItem):
             meta_parts.append(workflow)
         if meta_parts:
             t.append(f"\n  {' · '.join(meta_parts)}", style="dim")
-        brief = d.get("brief", "") or d.get("summary", "")
+        brief = d.get("open_loop", "") or d.get("brief", "") or d.get("summary", "")
         if brief:
             t.append(f"\n  {brief[:72]}", style="dim")
+        yield Static(t)
+
+
+class NowItem(ListItem):
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+
+    def compose(self) -> ComposeResult:
+        d = self.data
+        kind = d.get("now_kind", "thread")
+        t = Text()
+        if kind == "task":
+            t.append("☐ ", style="yellow")
+        elif kind == "event":
+            t.append("󰃮 ", style="cyan")
+        elif d.get("needs_reply"):
+            t.append("↩ ", style="bold yellow")
+        else:
+            t.append("• ", style="dim")
+
+        title = d.get("title") or d.get("subject") or "Untitled"
+        t.append(str(title), style="bold white")
+
+        meta_parts = [str(value) for value in d.get("now_meta", []) if value]
+        if meta_parts:
+            t.append(f"\n  {' · '.join(meta_parts)}", style="dim")
+
+        brief = d.get("open_loop") or d.get("brief") or d.get("summary") or d.get("notes") or ""
+        if brief:
+            t.append(f"\n  {str(brief)[:72]}", style="dim")
         yield Static(t)
 
 
@@ -1700,10 +1845,17 @@ class InboxApp(App):
             return
 
         if self._active_filter == "all":
-            for thread in self.now_threads:
-                lv.append(IndexedThreadItem(thread))
-            status = f"[green]{len(self.now_threads)} indexed threads[/]"
-            status += "  [dim]Now view · summaries first[/]"
+            for item in self.now_threads:
+                lv.append(NowItem(item))
+            counts: dict[str, int] = {}
+            for item in self.now_threads:
+                kind = str(item.get("now_kind", "thread"))
+                counts[kind] = counts.get(kind, 0) + 1
+            count_parts = [f"{count} {kind}" for kind, count in sorted(counts.items())]
+            status = f"[green]{len(self.now_threads)} now items[/]"
+            if count_parts:
+                status += f"  [dim]{' · '.join(count_parts)}[/]"
+            status += "  [dim]threads / tasks / events[/]"
             self._update_sidebar_status(status)
             return
 
@@ -1770,7 +1922,13 @@ class InboxApp(App):
         lv = self.query_one("#contact-list", ListView)
         target_index = -1
 
-        if self._active_filter in ("all", "actionable", "waiting") and self.active_index_thread:
+        if self._active_filter == "all" and self.active_index_thread:
+            target_key = _now_item_key(self.active_index_thread)
+            for i, child in enumerate(lv.children):
+                if isinstance(child, NowItem) and _now_item_key(child.data) == target_key:
+                    target_index = i
+                    break
+        elif self._active_filter in ("actionable", "waiting") and self.active_index_thread:
             thread_id = self.active_index_thread.get("thread_id")
             for i, child in enumerate(lv.children):
                 if (
@@ -1859,7 +2017,7 @@ class InboxApp(App):
 
     # ── Vim mode actions ─────────────────────────────────────────────────
 
-    def _vim_focused_nav_widget(self):
+    def _vim_focused_nav_widget(self) -> Any | None:
         """Return the currently focused navigable widget (ListView/DataTable), or None."""
         focused = self.focused
         if focused is None:
@@ -2331,10 +2489,15 @@ class InboxApp(App):
             errors.append(_format_request_error("GitHub refresh", exc))
 
         try:
-            result = self.client.index_view("recent", limit=20)
-            now_threads = result.get("threads", []) if isinstance(result, dict) else []
+            result = self.client.needs_action()
+            now_threads = _normalize_needs_action(result) if isinstance(result, dict) else []
         except Exception as exc:
-            errors.append(_format_request_error("Indexed recent refresh", exc))
+            errors.append(_format_request_error("Now refresh", exc))
+            try:
+                result = self.client.index_view("now", limit=20)
+                now_threads = result.get("threads", []) if isinstance(result, dict) else []
+            except Exception:
+                pass
 
         try:
             result = self.client.index_view("actionable", limit=20)
@@ -2417,8 +2580,8 @@ class InboxApp(App):
         )
         auxiliary = self._collect_auxiliary_data()
         if not changed:
-            old_now_ids = [t.get("thread_id") for t in self.now_threads]
-            new_now_ids = [t.get("thread_id") for t in auxiliary.now_threads]
+            old_now_ids = [_now_item_key(t) for t in self.now_threads]
+            new_now_ids = [_now_item_key(t) for t in auxiliary.now_threads]
             old_action_ids = [t.get("thread_id") for t in self.actionable_threads]
             new_action_ids = [t.get("thread_id") for t in auxiliary.actionable_threads]
             old_wait_ids = [t.get("thread_id") for t in self.waiting_threads]
@@ -2648,6 +2811,18 @@ class InboxApp(App):
             self.query_one("#detail-view", DetailView).detail = item.data
             return
 
+        if isinstance(item, NowItem):
+            self.active_index_thread = item.data
+            self.active_conv = None
+            self.active_event = item.data if item.data.get("now_kind") == "event" else None
+            self.active_reminder = None
+            self.active_notification = None
+            if item.data.get("now_kind", "thread") == "thread":
+                self._load_index_thread(item.data)
+            else:
+                self._show_now_item(item.data)
+            return
+
         if isinstance(item, NoteItem):
             self.active_event = None
             self._load_note(item.data)
@@ -2659,7 +2834,7 @@ class InboxApp(App):
             self.active_event = None
             self.active_reminder = None
             self.active_notification = None
-            self._show_index_thread(item.data)
+            self._load_index_thread(item.data)
             return
 
         if isinstance(item, ConversationItem):
@@ -2682,6 +2857,39 @@ class InboxApp(App):
                 f"[red]{_format_request_error('Thread load', e)}[/]",
             )
             return
+        self.call_from_thread(self._show_thread, msgs, conv)
+
+    @work(thread=True, exit_on_error=False)
+    def _load_index_thread(self, thread: dict) -> None:
+        ref = _index_thread_message_ref(thread)
+        if not ref["source"] or not ref["conv_id"]:
+            self.call_from_thread(self._show_index_thread, thread)
+            return
+        try:
+            msgs = self.client.messages(
+                source=ref["source"],
+                conv_id=ref["conv_id"],
+                thread_id=ref["thread_id"],
+                account=ref["account"],
+            )
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status", Static).update,
+                f"[yellow]{_format_request_error('Indexed thread load', exc)} · showing summary[/]",
+            )
+            self.call_from_thread(self._show_index_thread, thread)
+            return
+        if not msgs:
+            self.call_from_thread(self._show_index_thread, thread)
+            return
+
+        conv = {
+            "id": ref["conv_id"],
+            "source": ref["source"],
+            "name": thread.get("subject") or thread.get("summary") or "Indexed thread",
+            "thread_id": ref["thread_id"],
+            "gmail_account": ref["account"],
+        }
         self.call_from_thread(self._show_thread, msgs, conv)
 
     def _show_thread(self, msgs: list[dict], conv: dict) -> None:
@@ -2717,14 +2925,85 @@ class InboxApp(App):
                 key = conv.get("id", "") or str(hash(body))
                 self._do_extract_actions(body, key)
 
+    def _show_now_item(self, item: dict) -> None:
+        if item.get("now_kind", "thread") == "thread":
+            self._show_index_thread(item)
+            return
+
+        mv = self.query_one("#messages", MessageView)
+        kind = str(item.get("now_kind", "item"))
+        title = str(item.get("title") or item.get("summary") or "Untitled")
+        lines: list[str] = []
+
+        meta_parts = [str(value) for value in item.get("now_meta", []) if value]
+        if meta_parts:
+            lines.append(" · ".join(meta_parts))
+            lines.append("")
+
+        if kind == "task":
+            if item.get("due"):
+                lines.append(f"Due: {item['due']}")
+            if item.get("list_title"):
+                lines.append(f"List: {item['list_title']}")
+            if item.get("notes"):
+                lines.append("")
+                lines.append(str(item["notes"]))
+        elif kind == "event":
+            if item.get("start") and item.get("end"):
+                lines.append(f"When: {item['start']} -> {item['end']}")
+            if item.get("location"):
+                lines.append(f"Where: {item['location']}")
+            if item.get("description"):
+                lines.append("")
+                lines.append(str(item["description"]))
+        else:
+            lines.append(str(item.get("summary", "")))
+
+        body = "\n".join(lines).strip() or title
+        mv.ai_summary = None
+        mv.messages = [
+            {
+                "body": body,
+                "ts": item.get("start") or item.get("due") or "",
+                "sender": "Inbox Now",
+                "is_me": False,
+            }
+        ]
+        self.query_one("#status", Static).update(f"[bold]{title}[/]  [dim]now · {kind}[/]")
+
     def _show_index_thread(self, thread: dict) -> None:
         mv = self.query_one("#messages", MessageView)
         lines = []
+        meta_parts = [
+            str(value)
+            for value in (
+                thread.get("source", ""),
+                thread.get("owning_account", ""),
+                thread.get("actionability", ""),
+                thread.get("urgency", ""),
+            )
+            if value
+        ]
+        if meta_parts:
+            lines.append(" · ".join(meta_parts))
+            lines.append("")
         if thread.get("summary"):
             lines.append(str(thread["summary"]))
+        if thread.get("open_loop"):
+            lines.append("")
+            lines.append(f"Open loop: {thread['open_loop']}")
         if thread.get("action_items"):
-            lines.append("Action items:")
-            lines.extend(f"- {item}" for item in thread["action_items"][:5])
+            action_items = [
+                item for item in thread["action_items"][:5] if item != thread.get("open_loop")
+            ]
+            if action_items:
+                lines.append("Action items:")
+                lines.extend(f"- {item}" for item in action_items)
+        if thread.get("rich_data"):
+            lines.append("")
+            lines.append("Signals:")
+            for key, value in thread["rich_data"].items():
+                lines.append(f"- {key}: {value}")
         if thread.get("brief"):
             lines.append("")
             lines.append(str(thread["brief"]))
@@ -4128,7 +4407,7 @@ class InboxApp(App):
     @work(thread=True, exit_on_error=False)
     def _do_run_readonly_assistant(self, query: str, context_text: str) -> None:
         try:
-            from agents.runner import Supervisor
+            from agents.runner import Supervisor  # type: ignore[reportMissingImports]
 
             result = Supervisor().run_codex_exec(
                 profile_name="readonly",

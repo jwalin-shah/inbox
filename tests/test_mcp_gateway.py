@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -74,12 +76,12 @@ async def test_health_handler_includes_backend_and_extra_payload(monkeypatch):
         db_path = "/tmp/mem.db"
 
     handler = make_health_handler(
-        backend=HealthyBackend(),
-        memory_store=FakeStore(),
+        backend=cast(Any, HealthyBackend()),
+        memory_store=cast(Any, FakeStore()),
         extra_payload={"mode": "readonly"},
     )
-    resp = await handler(None)
-    payload = resp.body.decode("utf-8")
+    resp = await handler(cast(Any, None))
+    payload = bytes(resp.body).decode("utf-8")
 
     assert '"status":"ok"' in payload
     assert '"mode":"readonly"' in payload
@@ -97,9 +99,11 @@ async def test_health_handler_handles_backend_error(monkeypatch):
     class FakeStore:
         db_path = "/tmp/mem.db"
 
-    handler = make_health_handler(backend=FailingBackend(), memory_store=FakeStore())
-    resp = await handler(None)
-    payload = resp.body.decode("utf-8")
+    handler = make_health_handler(
+        backend=cast(Any, FailingBackend()), memory_store=cast(Any, FakeStore())
+    )
+    resp = await handler(cast(Any, None))
+    payload = bytes(resp.body).decode("utf-8")
 
     assert '"backend":{"status":"error","detail":"down"}' in payload
     assert '"auth_enabled":false' in payload

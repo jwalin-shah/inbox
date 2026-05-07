@@ -6,6 +6,7 @@ All data fetching, auth, mutation, audio, and LLM logic lives here.
 from __future__ import annotations
 
 import base64
+import contextlib
 import fcntl
 import json
 import mimetypes
@@ -20,12 +21,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 if TYPE_CHECKING:
     from pydantic import BaseModel as PydanticBaseModel
-
-import contextlib
 
 import httpx
 from google.auth.transport.requests import Request
@@ -50,6 +49,20 @@ from service_models import (
     Spreadsheet,
     ThreadSummary,
 )
+
+
+class UnsubscribeInfo(TypedDict):
+    url: str | None
+    mailto: str | None
+    one_click: bool
+    raw: str
+
+
+class UnsubscribeResult(TypedDict):
+    method: str
+    ok: bool
+    raw: str
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -328,12 +341,12 @@ def _load_creds(token_path: Path) -> Credentials | None:
 
 
 def google_auth_all() -> tuple[
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
 ]:
     """Auth all accounts from tokens/ dir. Returns (gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs, tasks_svcs)."""
     TOKENS_DIR.mkdir(parents=True, exist_ok=True)
@@ -357,12 +370,12 @@ def google_auth_all() -> tuple[
                     dest = TOKENS_DIR / f"{email}.json"
                     _write_text_with_lock(dest, new_creds.to_json())
 
-    gmail_svcs: dict[str, object] = {}
-    cal_svcs: dict[str, object] = {}
-    drive_svcs: dict[str, object] = {}
-    sheets_svcs: dict[str, object] = {}
-    docs_svcs: dict[str, object] = {}
-    tasks_svcs: dict[str, object] = {}
+    gmail_svcs: dict[str, Any] = {}
+    cal_svcs: dict[str, Any] = {}
+    drive_svcs: dict[str, Any] = {}
+    sheets_svcs: dict[str, Any] = {}
+    docs_svcs: dict[str, Any] = {}
+    tasks_svcs: dict[str, Any] = {}
 
     for token_path in sorted(TOKENS_DIR.glob("*.json")):
         creds = _load_creds(token_path)
@@ -1008,7 +1021,7 @@ def gmail_archive(service, msg_id: str) -> bool:
         return False
 
 
-def gmail_get_unsubscribe_info(service, msg_id: str) -> dict[str, str]:
+def gmail_get_unsubscribe_info(service, msg_id: str) -> UnsubscribeInfo:
     """Return {'url': ..., 'mailto': ..., 'one_click': bool} from List-Unsubscribe headers."""
     try:
         msg = (
@@ -1041,7 +1054,7 @@ def gmail_get_unsubscribe_info(service, msg_id: str) -> dict[str, str]:
         return {"url": None, "mailto": None, "one_click": False, "raw": ""}
 
 
-def gmail_unsubscribe(service, msg_id: str) -> dict[str, str]:
+def gmail_unsubscribe(service, msg_id: str) -> UnsubscribeResult:
     """
     Execute unsubscribe via List-Unsubscribe header, then archive the message.
     Returns {"method": "url|mailto|none", "ok": bool}.
@@ -1473,7 +1486,7 @@ def gmail_contacts_by_label(
 
 
 def calendar_events(
-    cal_services: dict[str, object],
+    cal_services: dict[str, Any],
     date: datetime | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
@@ -1782,7 +1795,7 @@ def gmail_label_create(service, name: str, visibility: str = "labelShow") -> dic
 
 
 def calendar_find_conflicts(
-    cal_services: dict[str, object], start: datetime, end: datetime
+    cal_services: dict[str, Any], start: datetime, end: datetime
 ) -> list[CalendarEvent]:
     """Find calendar events that conflict with time range [start, end] across all accounts."""
     conflicts = []
@@ -1854,11 +1867,12 @@ def ai_extract_memory(text: str) -> dict[str, object]:
                 schema=MemoryExtractionResult,
             )
         if result:
+            extracted = cast(MemoryExtractionResult, result)
             return {
-                "people": [p.dict() for p in result.people],
-                "projects": [p.dict() for p in result.projects],
-                "commitments": [c.dict() for c in result.commitments],
-                "action_items": result.action_items,
+                "people": [p.dict() for p in extracted.people],
+                "projects": [p.dict() for p in extracted.projects],
+                "commitments": [c.dict() for c in extracted.commitments],
+                "action_items": extracted.action_items,
             }
     except Exception:
         _log_service_failure("ai_extract_memory")
@@ -2021,14 +2035,30 @@ def parse_quick_event(text: str) -> dict:
 # ── WhatsApp (via macOS Accessibility API) ───────────────────────────────────
 
 
+def _foundation_module() -> Any:
+    import Foundation
+
+    return cast(Any, Foundation)
+
+
+def _application_services() -> Any:
+    import ApplicationServices
+
+    return cast(Any, ApplicationServices)
+
+
+def _core_foundation() -> Any:
+    import CoreFoundation
+
+    return cast(Any, CoreFoundation)
+
+
 def _whatsapp_pid() -> int | None:
     """Find WhatsApp.app PID via NSRunningApplication.
     Returns None if WhatsApp is not running or Objective-C imports fail.
     """
     try:
-        from Foundation import NSWorkspace
-
-        ws = NSWorkspace.sharedWorkspace()
+        ws = _foundation_module().NSWorkspace.sharedWorkspace()
         apps = ws.runningApplications()
         for app in apps:
             if app.bundleIdentifier() == "net.whatsapp.WhatsApp":
@@ -2041,9 +2071,7 @@ def _whatsapp_pid() -> int | None:
 def _ax_attr(el: Any, name: str) -> Any:
     """Safe AX attribute getter. Returns None on failure."""
     try:
-        from ApplicationServices import AXUIElementCopyAttributeValue
-
-        err, val = AXUIElementCopyAttributeValue(el, name, None)
+        err, val = _application_services().AXUIElementCopyAttributeValue(el, name, None)
         if err != 0:
             return None
         return val
@@ -2078,26 +2106,20 @@ def whatsapp_check_accessibility(prompt: bool = False) -> bool:
     """Check if this process has Accessibility permission. If prompt=True, shows system dialog."""
     try:
         if prompt:
-            from ApplicationServices import AXIsProcessTrustedWithOptions
-            from CoreFoundation import (
-                CFDictionaryCreate,
-                kCFTypeDictionaryKeyCallBacks,
-                kCFTypeDictionaryValueCallBacks,
-            )
+            app_services = _application_services()
+            core_foundation = _core_foundation()
 
             key = "AXTrustedCheckOptionPrompt"
-            opts = CFDictionaryCreate(
+            opts = core_foundation.CFDictionaryCreate(
                 None,
                 [key],
                 [True],
                 1,
-                kCFTypeDictionaryKeyCallBacks,
-                kCFTypeDictionaryValueCallBacks,
+                core_foundation.kCFTypeDictionaryKeyCallBacks,
+                core_foundation.kCFTypeDictionaryValueCallBacks,
             )
-            return bool(AXIsProcessTrustedWithOptions(opts))
-        from ApplicationServices import AXIsProcessTrusted
-
-        return bool(AXIsProcessTrusted())
+            return bool(app_services.AXIsProcessTrustedWithOptions(opts))
+        return bool(_application_services().AXIsProcessTrusted())
     except Exception:
         return False
 
@@ -2128,9 +2150,7 @@ def _whatsapp_app_ref() -> Any:
         pid = _whatsapp_pid()
         if not pid:
             return None
-        from ApplicationServices import AXUIElementCreateApplication
-
-        return AXUIElementCreateApplication(pid)
+        return _application_services().AXUIElementCreateApplication(pid)
     except Exception:
         return None
 
@@ -2258,7 +2278,7 @@ def whatsapp_contacts(limit: int = 20) -> list[Contact]:
 def _whatsapp_select_chat(chat_name: str) -> bool:
     """Click the sidebar AXButton whose parsed name matches chat_name."""
     try:
-        from ApplicationServices import AXUIElementPerformAction
+        app_services = _application_services()
 
         window = _whatsapp_main_window()
         if not window:
@@ -2277,7 +2297,7 @@ def _whatsapp_select_chat(chat_name: str) -> bool:
             if parsed[0].lower() == target_lower:
                 # AXStaticText = already-selected row, no press needed
                 if role == "AXButton":
-                    AXUIElementPerformAction(row, "AXPress")
+                    app_services.AXUIElementPerformAction(row, "AXPress")
                 return True
         return False
     except Exception:
@@ -2310,26 +2330,28 @@ def _cg_type_text(text: str) -> None:
     """Type a unicode string via synthesized keyboard events at HID level."""
     import Quartz
 
-    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    quartz = cast(Any, Quartz)
+    src = quartz.CGEventSourceCreate(quartz.kCGEventSourceStateHIDSystemState)
     # Chunk into pieces CGEventKeyboardSetUnicodeString can carry (<= 20 chars per event)
     for i in range(0, len(text), 20):
         chunk = text[i : i + 20]
-        down = Quartz.CGEventCreateKeyboardEvent(src, 0, True)
-        Quartz.CGEventKeyboardSetUnicodeString(down, len(chunk), chunk)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-        up = Quartz.CGEventCreateKeyboardEvent(src, 0, False)
-        Quartz.CGEventKeyboardSetUnicodeString(up, len(chunk), chunk)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+        down = quartz.CGEventCreateKeyboardEvent(src, 0, True)
+        quartz.CGEventKeyboardSetUnicodeString(down, len(chunk), chunk)
+        quartz.CGEventPost(quartz.kCGHIDEventTap, down)
+        up = quartz.CGEventCreateKeyboardEvent(src, 0, False)
+        quartz.CGEventKeyboardSetUnicodeString(up, len(chunk), chunk)
+        quartz.CGEventPost(quartz.kCGHIDEventTap, up)
 
 
 def _cg_press_key(keycode: int) -> None:
     import Quartz
 
-    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
-    down = Quartz.CGEventCreateKeyboardEvent(src, keycode, True)
-    up = Quartz.CGEventCreateKeyboardEvent(src, keycode, False)
-    Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-    Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+    quartz = cast(Any, Quartz)
+    src = quartz.CGEventSourceCreate(quartz.kCGEventSourceStateHIDSystemState)
+    down = quartz.CGEventCreateKeyboardEvent(src, keycode, True)
+    up = quartz.CGEventCreateKeyboardEvent(src, keycode, False)
+    quartz.CGEventPost(quartz.kCGHIDEventTap, down)
+    quartz.CGEventPost(quartz.kCGHIDEventTap, up)
 
 
 def whatsapp_send(chat_name: str, text: str) -> bool:
@@ -2343,7 +2365,7 @@ def whatsapp_send(chat_name: str, text: str) -> bool:
             return False
         if not text.strip():
             return False
-        from ApplicationServices import AXUIElementSetAttributeValue
+        app_services = _application_services()
 
         if not _wa_activate_app():
             return False
@@ -2365,7 +2387,7 @@ def whatsapp_send(chat_name: str, text: str) -> bool:
         areas = _ax_walk(window, is_compose, max_depth=25)
         if not areas:
             return False
-        AXUIElementSetAttributeValue(areas[0], "AXFocused", True)
+        app_services.AXUIElementSetAttributeValue(areas[0], "AXFocused", True)
         time.sleep(0.2)
 
         _cg_type_text(text)
@@ -2383,7 +2405,7 @@ def whatsapp_scroll_sidebar(pages: int = 1) -> int:
     try:
         if not whatsapp_check_accessibility(prompt=False):
             return 0
-        from ApplicationServices import AXUIElementPerformAction
+        app_services = _application_services()
 
         window = _whatsapp_main_window()
         if not window:
@@ -2395,7 +2417,7 @@ def whatsapp_scroll_sidebar(pages: int = 1) -> int:
         import time
 
         for _ in range(max(1, pages)):
-            err = AXUIElementPerformAction(chat_list, "AXScrollDownByPage")
+            err = app_services.AXUIElementPerformAction(chat_list, "AXScrollDownByPage")
             if err != 0:
                 break
             done += 1
@@ -2413,7 +2435,7 @@ def whatsapp_contacts_all(max_pages: int = 10) -> list[Contact]:
     try:
         if not whatsapp_check_accessibility(prompt=False):
             return []
-        from ApplicationServices import AXUIElementPerformAction
+        app_services = _application_services()
 
         window = _whatsapp_main_window()
         if not window:
@@ -2425,7 +2447,7 @@ def whatsapp_contacts_all(max_pages: int = 10) -> list[Contact]:
 
         # Rewind to top
         for _ in range(max_pages):
-            err = AXUIElementPerformAction(chat_list, "AXScrollUpByPage")
+            err = app_services.AXUIElementPerformAction(chat_list, "AXScrollUpByPage")
             if err != 0:
                 break
             time.sleep(0.1)
@@ -2437,7 +2459,7 @@ def whatsapp_contacts_all(max_pages: int = 10) -> list[Contact]:
                 if c.name and c.name not in seen:
                     seen[c.name] = c
             before = len(seen)
-            err = AXUIElementPerformAction(chat_list, "AXScrollDownByPage")
+            err = app_services.AXUIElementPerformAction(chat_list, "AXScrollDownByPage")
             if err != 0:
                 break
             time.sleep(0.3)
@@ -2463,7 +2485,7 @@ def whatsapp_thread_full(chat_name: str, max_loads: int = 10, limit: int = 500) 
     try:
         if not whatsapp_check_accessibility(prompt=False):
             return []
-        from ApplicationServices import AXUIElementPerformAction
+        app_services = _application_services()
 
         if not _wa_activate_app():
             return []
@@ -2487,14 +2509,14 @@ def whatsapp_thread_full(chat_name: str, max_loads: int = 10, limit: int = 500) 
             if not hits:
                 break
             # The clickable is typically a parent AXButton of the static text; press static too
-            err = AXUIElementPerformAction(hits[0], "AXPress")
+            err = app_services.AXUIElementPerformAction(hits[0], "AXPress")
             if err != 0:
                 # Try parent
-                from ApplicationServices import AXUIElementCopyAttributeValue
-
-                p_err, parent = AXUIElementCopyAttributeValue(hits[0], "AXParent", None)
+                p_err, parent = app_services.AXUIElementCopyAttributeValue(
+                    hits[0], "AXParent", None
+                )
                 if parent is not None:
-                    AXUIElementPerformAction(parent, "AXPress")
+                    app_services.AXUIElementPerformAction(parent, "AXPress")
             time.sleep(0.8)
 
         return whatsapp_thread(chat_name, limit=limit)
@@ -3259,6 +3281,7 @@ def _get_gemini_model(model_name: str = "gemini-2.5-flash"):
     try:
         import google.generativeai as genai
 
+        genai = cast(Any, genai)
         genai.configure(api_key=api_key)
         _gemini_model = genai.GenerativeModel(model_name)
         return _gemini_model
@@ -4024,7 +4047,7 @@ def drive_download(drive_service, file_id: str) -> tuple[bytes, str] | None:
 
 
 def sheets_list(
-    drive_service: object, query: str = "", limit: int = 20, account: str = ""
+    drive_service: Any, query: str = "", limit: int = 20, account: str = ""
 ) -> list[Spreadsheet]:
     """List spreadsheets from Drive. Returns list of Spreadsheet, empty on error."""
     try:
@@ -4053,7 +4076,7 @@ def sheets_list(
         return []
 
 
-def sheets_get(sheets_service: object, spreadsheet_id: str) -> Spreadsheet | None:
+def sheets_get(sheets_service: Any, spreadsheet_id: str) -> Spreadsheet | None:
     """Get spreadsheet metadata including sheet tabs."""
     try:
         result = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
@@ -4081,7 +4104,7 @@ def sheets_get(sheets_service: object, spreadsheet_id: str) -> Spreadsheet | Non
 
 
 def sheets_create(
-    sheets_service: object, title: str, sheets: list[str] | None = None
+    sheets_service: Any, title: str, sheets: list[str] | None = None
 ) -> Spreadsheet | None:
     """Create a new spreadsheet with optional sheet tabs."""
     _assert_live_write_allowed("create Google Sheet")
@@ -4109,7 +4132,7 @@ def sheets_create(
         return None
 
 
-def sheets_delete(drive_service: object, spreadsheet_id: str) -> bool:
+def sheets_delete(drive_service: Any, spreadsheet_id: str) -> bool:
     """Soft-delete (trash) a spreadsheet."""
     _assert_live_write_allowed("delete Google Sheet")
     try:
@@ -4120,9 +4143,7 @@ def sheets_delete(drive_service: object, spreadsheet_id: str) -> bool:
         return False
 
 
-def sheets_values_get(
-    sheets_service: object, spreadsheet_id: str, range_: str
-) -> list[list] | None:
+def sheets_values_get(sheets_service: Any, spreadsheet_id: str, range_: str) -> list[list] | None:
     """Read a range from a spreadsheet. Returns list[list] or None on error."""
     try:
         result = (
@@ -4138,7 +4159,7 @@ def sheets_values_get(
 
 
 def sheets_values_batch_get(
-    sheets_service: object, spreadsheet_id: str, ranges: list[str]
+    sheets_service: Any, spreadsheet_id: str, ranges: list[str]
 ) -> dict[str, list[list]] | None:
     """Read multiple ranges. Returns dict[range: list[list]] or None on error."""
     try:
@@ -4159,7 +4180,7 @@ def sheets_values_batch_get(
 
 
 def sheets_values_update(
-    sheets_service: object,
+    sheets_service: Any,
     spreadsheet_id: str,
     range_: str,
     values: list[list],
@@ -4186,7 +4207,7 @@ def sheets_values_update(
 
 
 def sheets_values_batch_update(
-    sheets_service: object,
+    sheets_service: Any,
     spreadsheet_id: str,
     data: list[dict],
     value_input: str = "USER_ENTERED",
@@ -4213,7 +4234,7 @@ def sheets_values_batch_update(
 
 
 def sheets_values_append(
-    sheets_service: object,
+    sheets_service: Any,
     spreadsheet_id: str,
     range_: str,
     values: list[list],
@@ -4239,7 +4260,7 @@ def sheets_values_append(
         return None
 
 
-def sheets_values_clear(sheets_service: object, spreadsheet_id: str, range_: str) -> bool:
+def sheets_values_clear(sheets_service: Any, spreadsheet_id: str, range_: str) -> bool:
     """Clear a range."""
     _assert_live_write_allowed("clear Google Sheet values")
     try:
@@ -4253,7 +4274,7 @@ def sheets_values_clear(sheets_service: object, spreadsheet_id: str, range_: str
 
 
 def sheets_add_sheet(
-    sheets_service: object,
+    sheets_service: Any,
     spreadsheet_id: str,
     title: str,
     rows: int = 1000,
@@ -4296,7 +4317,7 @@ def sheets_add_sheet(
         return None
 
 
-def sheets_delete_sheet(sheets_service: object, spreadsheet_id: str, sheet_id: int) -> bool:
+def sheets_delete_sheet(sheets_service: Any, spreadsheet_id: str, sheet_id: int) -> bool:
     """Delete a sheet tab by sheet_id."""
     _assert_live_write_allowed("delete Google Sheet tab")
     try:
@@ -4313,7 +4334,7 @@ def sheets_delete_sheet(sheets_service: object, spreadsheet_id: str, sheet_id: i
 
 
 def sheets_rename_sheet(
-    sheets_service: object, spreadsheet_id: str, sheet_id: int, new_title: str
+    sheets_service: Any, spreadsheet_id: str, sheet_id: int, new_title: str
 ) -> bool:
     """Rename a sheet tab."""
     try:
@@ -4338,7 +4359,7 @@ def sheets_rename_sheet(
         return False
 
 
-def sheets_format(sheets_service: object, spreadsheet_id: str, requests: list[dict]) -> dict | None:
+def sheets_format(sheets_service: Any, spreadsheet_id: str, requests: list[dict]) -> dict | None:
     """Apply formatting via raw batchUpdate requests. For max flexibility."""
     try:
         result = (
@@ -4356,7 +4377,7 @@ def sheets_format(sheets_service: object, spreadsheet_id: str, requests: list[di
 
 
 def sheets_copy_to(
-    sheets_service: object, spreadsheet_id: str, sheet_id: int, dest_spreadsheet_id: str
+    sheets_service: Any, spreadsheet_id: str, sheet_id: int, dest_spreadsheet_id: str
 ) -> SheetTab | None:
     """Copy a sheet to another spreadsheet."""
     try:
@@ -4392,7 +4413,7 @@ def sheets_copy_to(
 
 
 def docs_list(
-    drive_service: object, query: str = "", limit: int = 20, account: str = ""
+    drive_service: Any, query: str = "", limit: int = 20, account: str = ""
 ) -> list[Document]:
     """List documents from Drive. Returns list of Document, empty on error."""
     try:
@@ -4420,7 +4441,7 @@ def docs_list(
         return []
 
 
-def docs_get(docs_service: object, document_id: str) -> Document | None:
+def docs_get(docs_service: Any, document_id: str) -> Document | None:
     """Get document metadata and content."""
     try:
         result = docs_service.documents().get(documentId=document_id).execute()
@@ -4434,7 +4455,7 @@ def docs_get(docs_service: object, document_id: str) -> Document | None:
         return None
 
 
-def docs_create(docs_service: object, title: str) -> Document | None:
+def docs_create(docs_service: Any, title: str) -> Document | None:
     """Create a new Google Doc."""
     _assert_live_write_allowed("create Google Doc")
     try:
@@ -4450,7 +4471,7 @@ def docs_create(docs_service: object, title: str) -> Document | None:
         return None
 
 
-def docs_delete(drive_service: object, document_id: str) -> bool:
+def docs_delete(drive_service: Any, document_id: str) -> bool:
     """Soft-delete (trash) a document."""
     _assert_live_write_allowed("delete Google Doc")
     try:
@@ -4462,7 +4483,7 @@ def docs_delete(drive_service: object, document_id: str) -> bool:
 
 
 def docs_export(
-    drive_service: object, document_id: str, mime_type: str = "text/plain"
+    drive_service: Any, document_id: str, mime_type: str = "text/plain"
 ) -> bytes | None:
     """Export document content. Supports: text/plain, application/pdf, text/html."""
     try:
@@ -4473,7 +4494,7 @@ def docs_export(
         return None
 
 
-def docs_insert_text(docs_service: object, document_id: str, text: str, index: int = 1) -> bool:
+def docs_insert_text(docs_service: Any, document_id: str, text: str, index: int = 1) -> bool:
     """Insert text into a document at specified index."""
     try:
         docs_service.documents().batchUpdate(
@@ -4495,7 +4516,7 @@ def docs_insert_text(docs_service: object, document_id: str, text: str, index: i
         return False
 
 
-def docs_get_text(docs_service: object, document_id: str) -> str | None:
+def docs_get_text(docs_service: Any, document_id: str) -> str | None:
     """Get plain text content of a document."""
     try:
         result = docs_service.documents().get(documentId=document_id).execute()
@@ -5585,7 +5606,7 @@ def save_favorites(ids: set[str]) -> None:
 
 
 def contacts_search(
-    gmail_services: dict[str, object],
+    gmail_services: dict[str, Any],
     q: str,
     limit: int = 20,
 ) -> list[dict]:
@@ -5710,8 +5731,8 @@ def contacts_search(
 
 def contacts_profile(
     contact_id: str,
-    gmail_services: dict[str, object],
-    cal_services: dict[str, object],
+    gmail_services: dict[str, Any],
+    cal_services: dict[str, Any],
 ) -> dict:
     """Aggregate cross-source profile for a contact."""
 
@@ -6192,7 +6213,7 @@ def _event_to_calendar(
         return None
 
 
-def calendar_list_calendars(cal_services: dict[str, object]) -> list[dict]:
+def calendar_list_calendars(cal_services: dict[str, Any]) -> list[dict]:
     """List all calendars across all accounts."""
     result: list[dict] = []
     for account, svc in cal_services.items():
@@ -6330,7 +6351,7 @@ def calendar_get_recurring_instances(
 
 
 def calendar_search_events(
-    cal_services: dict[str, object],
+    cal_services: dict[str, Any],
     query: str = "",
     attendee_email: str = "",
     location: str = "",

@@ -82,6 +82,126 @@ def test_collect_refresh_data_preserves_other_data_on_partial_failure() -> None:
     assert snapshot.status == "[red]Calendar refresh failed (HTTP 500)[/]"
 
 
+def test_collect_auxiliary_data_uses_needs_action_rollup_for_now_tab() -> None:
+    client = MagicMock()
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
+    client.needs_action.return_value = {
+        "threads": [
+            {
+                "thread_id": "t1",
+                "subject": "Reply needed",
+                "source": "gmail",
+                "owning_account": "me@gmail.com",
+                "actionability": "reply",
+            }
+        ],
+        "tasks": [
+            {
+                "id": "task-1",
+                "title": "Pay bill",
+                "status": "needsAction",
+                "list_id": "@default",
+                "list_title": "My Tasks",
+                "due": "2026-05-06T00:00:00+00:00",
+                "notes": "",
+                "account": "me@gmail.com",
+                "workflow": "finance",
+            }
+        ],
+        "events": [
+            {
+                "event_id": "event-1",
+                "summary": "Doctor visit",
+                "start": "2026-05-06T13:00:00+00:00",
+                "end": "2026-05-06T14:00:00+00:00",
+                "account": "me@gmail.com",
+                "calendar_id": "primary",
+                "workflow": "medical",
+            }
+        ],
+    }
+
+    def index_view(view: str, *, limit: int) -> dict:
+        return {"threads": [{"thread_id": view, "limit": limit}]}
+
+    client.index_view.side_effect = index_view
+    app = _make_app(client)
+
+    snapshot = app._collect_auxiliary_data()
+
+    assert [item["now_kind"] for item in snapshot.now_threads] == ["thread", "task", "event"]
+    assert snapshot.now_threads[0]["thread_id"] == "t1"
+    assert snapshot.now_threads[1]["title"] == "Pay bill"
+    assert snapshot.now_threads[2]["title"] == "Doctor visit"
+    assert snapshot.actionable_threads == [{"thread_id": "actionable", "limit": 20}]
+    assert snapshot.waiting_threads == [{"thread_id": "waiting-on", "limit": 20}]
+    client.needs_action.assert_called_once_with()
+    assert [call.args[0] for call in client.index_view.call_args_list] == [
+        "actionable",
+        "waiting-on",
+    ]
+
+
+def test_collect_auxiliary_data_falls_back_to_now_index_view() -> None:
+    client = MagicMock()
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
+    client.needs_action.side_effect = RuntimeError("rollup down")
+
+    def index_view(view: str, *, limit: int) -> dict:
+        return {"threads": [{"thread_id": view, "limit": limit}]}
+
+    client.index_view.side_effect = index_view
+    app = _make_app(client)
+
+    snapshot = app._collect_auxiliary_data()
+
+    assert snapshot.now_threads == [{"thread_id": "now", "limit": 20}]
+    assert "Now refresh failed: rollup down" in snapshot.errors
+    assert [call.args[0] for call in client.index_view.call_args_list] == [
+        "now",
+        "actionable",
+        "waiting-on",
+    ]
+
+
+def test_index_thread_message_ref_routes_gmail_by_owner_account() -> None:
+    ref = inbox._index_thread_message_ref(
+        {
+            "source": "gmail",
+            "thread_id": "thread-1",
+            "latest_external_id": "msg-1",
+            "owning_account": "me@gmail.com",
+        }
+    )
+
+    assert ref == {
+        "source": "gmail",
+        "conv_id": "msg-1",
+        "thread_id": "thread-1",
+        "account": "me@gmail.com",
+    }
+
+
+def test_index_thread_message_ref_routes_imessage_by_chat_id() -> None:
+    ref = inbox._index_thread_message_ref(
+        {
+            "source": "imessage",
+            "thread_id": "42",
+            "latest_external_id": "99",
+        }
+    )
+
+    assert ref == {"source": "imessage", "conv_id": "42", "thread_id": "", "account": ""}
+
+
 def test_collect_poll_data_reports_server_unreachable() -> None:
     client = MagicMock()
     client.conversations.side_effect = httpx.ConnectError(
@@ -469,7 +589,7 @@ def test_status_bar_clears_unreachable_message_after_recovery() -> None:
             assert "unreachable" not in status, (
                 f"Status bar still shows outage after recovery: {status!r}"
             )
-            assert "indexed threads" in status
+            assert "now items" in status
 
     asyncio.run(runner())
 

@@ -66,18 +66,19 @@ def main():
     for item in result.get("results", []):
         msg_id = item["msg_id"]
         email = next((c for c in newsletters if c["id"] == msg_id), None)
+        email_name = email["name"] if email is not None else msg_id
 
         if "error" in item:
-            print(f"  ❌ {email['name'][:40]:40s} - {item['error']}")
+            print(f"  ❌ {email_name[:40]:40s} - {item['error']}")
             fail_count += 1
         else:
             method = item.get("method", "unknown")
             ok = item.get("ok", False)
             if method == "none":
-                print(f"  ⚠️  {email['name'][:40]:40s} - No unsubscribe header")
+                print(f"  ⚠️  {email_name[:40]:40s} - No unsubscribe header")
             else:
                 status = "✓" if ok else "⚠️"
-                print(f"  {status}  {email['name'][:40]:40s} - {method}")
+                print(f"  {status}  {email_name[:40]:40s} - {method}")
                 if ok:
                     success_count += 1
                 else:

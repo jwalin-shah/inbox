@@ -112,7 +112,9 @@ class MemoryStore:
                     metadata_json,
                 ),
             )
-            entry_id = int(cursor.lastrowid)
+            entry_id = cursor.lastrowid
+            if entry_id is None:
+                raise RuntimeError("SQLite did not return an id for the inserted memory entry")
         return self.get_entry(entry_id)
 
     def get_entry(self, entry_id: int) -> dict[str, object]:

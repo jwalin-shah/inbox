@@ -56,3 +56,5 @@ batch/.batch-state.lock
 # Hook-generated temp files
 CLAUDE.md.new
 .inbox_index.sqlite3
+.inbox_index.sqlite3-shm
+.inbox_index.sqlite3-wal

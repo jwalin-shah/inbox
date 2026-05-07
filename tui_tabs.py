@@ -24,8 +24,8 @@ TUI_TABS: tuple[TabMeta, ...] = (
         "mode": "message",
         "action": "action_filter_all",
         "command_id": "switch_all",
-        "command_name": "Switch to All",
-        "command_description": "Show all conversations",
+        "command_name": "Switch to Now",
+        "command_description": "Show high-signal indexed threads",
     },
     {
         "id": "actionable",

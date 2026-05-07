@@ -112,15 +112,26 @@ class TestClientIndexedInbox:
         client.index_view = MagicMock(return_value={"threads": []})
 
         assert client.indexed_recent_threads(limit=1) == {"threads": []}
-        assert client.indexed_actionable_threads(limit=2) == {"threads": []}
-        assert client.indexed_waiting_on_me_threads(limit=3) == {"threads": []}
-        assert client.indexed_waiting_on_others_threads(limit=4) == {"threads": []}
+        assert client.indexed_now_threads(limit=2) == {"threads": []}
+        assert client.indexed_actionable_threads(limit=3) == {"threads": []}
+        assert client.indexed_waiting_on_me_threads(limit=4) == {"threads": []}
+        assert client.indexed_waiting_on_others_threads(limit=5) == {"threads": []}
         assert client.index_view.call_args_list == [
             call("recent", limit=1),
-            call("actionable", limit=2),
-            call("waiting-on-me", limit=3),
-            call("waiting-on-others", limit=4),
+            call("now", limit=2),
+            call("actionable", limit=3),
+            call("waiting-on-me", limit=4),
+            call("waiting-on-others", limit=5),
         ]
+
+    def test_needs_action(self, client):
+        client._client.get.return_value = _mock_response({"threads": [], "tasks": [], "events": []})
+        result = client.needs_action(workflow="job_hunt", account="me@gmail.com")
+        assert result == {"threads": [], "tasks": [], "events": []}
+        client._client.get.assert_called_once_with(
+            "/inbox/needs-action",
+            params={"workflow": "job_hunt", "account": "me@gmail.com"},
+        )
 
 
 # ── Messages ────────────────────────────────────────────────────────────────
@@ -137,6 +148,12 @@ class TestClientMessages:
         client.messages("gmail", "msg1", thread_id="t1")
         call_args = client._client.get.call_args
         assert call_args[1]["params"]["thread_id"] == "t1"
+
+    def test_messages_with_account(self, client):
+        client._client.get.return_value = _mock_response([])
+        client.messages("gmail", "msg1", thread_id="t1", account="me@gmail.com")
+        call_args = client._client.get.call_args
+        assert call_args[1]["params"]["account"] == "me@gmail.com"
 
     def test_send(self, client):
         client._client.post.return_value = _mock_response({"ok": True})

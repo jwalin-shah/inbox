@@ -182,23 +182,24 @@ def main():
     for item in result.get("results", []):
         msg_id = item["msg_id"]
         email = next((c for c in candidates if c["id"] == msg_id), None)
+        email_name = email["name"] if email is not None else msg_id
 
         if "error" in item:
             error_count += 1
-            by_status["error"].append((email["name"], item["error"]))
+            by_status["error"].append((email_name, item["error"]))
         else:
             method = item.get("method", "unknown")
             ok = item.get("ok", False)
             if method == "none":
                 no_header_count += 1
-                by_status["no_header"].append(email["name"])
+                by_status["no_header"].append(email_name)
             else:
                 if ok:
                     success_count += 1
-                    by_status["success"].append(email["name"])
+                    by_status["success"].append(email_name)
                 else:
                     error_count += 1
-                    by_status["error"].append((email["name"], "unsubscribe failed"))
+                    by_status["error"].append((email_name, "unsubscribe failed"))
 
     print(f"✓  {success_count:3d} successfully unsubscribed")
     print(f"⚠️  {no_header_count:3d} archived (no unsubscribe header)")

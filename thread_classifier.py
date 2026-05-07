@@ -19,16 +19,20 @@ def classify_thread(*, latest: sqlite3.Row, sender_freq: float = 0.0) -> ThreadC
     subject = str(latest["subject"])
     body = str(latest["body_text"])
     sender = str(latest["sender"])
+    haystack = f"{subject}\n{body}"
 
     human_score = _human_score(latest_sender=sender, latest_subject=subject, latest_body=body)
     noise_class = _noise_class(latest_sender=sender, subject=subject, body=body)
     topic = _topic(subject=subject, body=body)
     urgency = _urgency(subject=subject, body=body)
+    direct_request = _has_direct_request(haystack)
     actionability = _actionability(
         human_score=human_score,
         noise_class=noise_class,
         urgency=urgency,
         topic=topic,
+        latest_sender=sender,
+        direct_request=direct_request,
         sender_freq=sender_freq,
     )
     needs_reply = int(actionability in {"reply", "review"} and sender != "Me")
@@ -58,13 +62,13 @@ def sender_freq_score(reply_count: int, thread_count: int) -> float:
 def _human_score(*, latest_sender: str, latest_subject: str, latest_body: str) -> float:
     sender = latest_sender.lower()
     haystack = f"{latest_subject}\n{latest_body}".lower()
-    score = 0.2
+    score = 0.15
     if latest_sender and latest_sender != "Me":
-        score += 0.3
+        score += 0.25
     if "noreply" not in sender and "no-reply" not in sender:
         score += 0.2
     if "unsubscribe" not in haystack and "verification code" not in haystack:
-        score += 0.2
+        score += 0.15
     if not sender.isdigit():
         score += 0.1
     return min(score, 1.0)
@@ -75,7 +79,21 @@ def _noise_class(*, latest_sender: str, subject: str, body: str) -> str:
     sender = latest_sender.lower()
     if "verification code" in haystack or "otp" in haystack:
         return "otp"
-    if "unsubscribe" in haystack or "job alert" in haystack:
+    if any(
+        token in haystack
+        for token in (
+            "unsubscribe",
+            "job alert",
+            "manage preferences",
+            "view in browser",
+            "weekly digest",
+            "daily digest",
+            "newsletter",
+            "promotion",
+            "limited time",
+            "webinar",
+        )
+    ):
         return "newsletter"
     if "appointment" in haystack or "your appt" in haystack:
         return "appointment"
@@ -87,6 +105,8 @@ def _noise_class(*, latest_sender: str, subject: str, body: str) -> str:
         return "security-alert"
     if "noreply" in sender or "no-reply" in sender:
         return "automated"
+    if _is_low_value_ack(haystack):
+        return "low-value-ack"
     return ""
 
 
@@ -115,19 +135,73 @@ def _urgency(*, subject: str, body: str) -> str:
 
 
 def _actionability(
-    *, human_score: float, noise_class: str, urgency: str, topic: str, sender_freq: float = 0.0
+    *,
+    human_score: float,
+    noise_class: str,
+    urgency: str,
+    topic: str,
+    latest_sender: str,
+    direct_request: bool,
+    sender_freq: float = 0.0,
 ) -> str:
     if noise_class in {"otp", "receipt", "survey"}:
         return "ignore"
-    if noise_class in {"newsletter", "automated"}:
+    if noise_class in {"newsletter", "automated", "low-value-ack"}:
         return "archive"
+    if latest_sender == "Me":
+        return "track" if topic in {"security", "health-admin", "opportunity"} else "archive"
     if topic in {"security", "health-admin"} and urgency in {"high", "medium"}:
         return "track"
-    if human_score >= 1.0 or sender_freq >= 0.5:
+    if direct_request and human_score >= 0.6:
+        return "reply"
+    if sender_freq >= 0.5 and human_score >= 0.6:
         return "reply"
     if topic == "opportunity":
         return "review"
+    if urgency == "high" and human_score >= 0.6:
+        return "review"
     return "track"
+
+
+def _has_direct_request(text: str) -> bool:
+    haystack = text.lower()
+    request_tokens = (
+        "can you",
+        "could you",
+        "would you",
+        "please",
+        "let me know",
+        "confirm",
+        "reply",
+        "respond",
+        "send",
+        "review",
+        "schedule",
+        "available",
+        "availability",
+        "open to",
+    )
+    return any(token in haystack for token in request_tokens)
+
+
+def _is_low_value_ack(haystack: str) -> bool:
+    compact = " ".join(haystack.split())
+    if len(compact) > 120:
+        return False
+    if _has_direct_request(compact):
+        return False
+    return any(
+        phrase in compact
+        for phrase in (
+            "thanks",
+            "thank you",
+            "got it",
+            "sounds good",
+            "looks good",
+            "ok",
+            "okay",
+        )
+    )
 
 
 def _open_loop(*, topic: str, actionability: str, latest: sqlite3.Row) -> str:

@@ -1070,7 +1070,7 @@ async def _process_followup_reminders() -> None:
                         contacts = await asyncio.to_thread(imsg_contacts, 200)
                         contact = next((c for c in contacts if c.id == fu["conv_id"]), None)
                     if contact:
-                        msgs = await asyncio.to_thread(imsg_thread, contact, 20)
+                        msgs = await asyncio.to_thread(imsg_thread, contact.id, 20)
                         replied = any(m.ts > created_at and not m.is_me for m in msgs)
 
                 if replied:
@@ -1411,13 +1411,17 @@ async def list_conversations(source: str = "all", limit: int = 50, account: str 
 
 
 @app.get("/messages/{source}/{conv_id}", response_model=list[MessageOut])
-async def get_messages(source: str, conv_id: str, thread_id: str = "", limit: int = 50):
+async def get_messages(
+    source: str, conv_id: str, thread_id: str = "", limit: int = 50, account: str = ""
+):
     if source == "imessage":
         msgs = await asyncio.to_thread(imsg_thread, conv_id, limit=limit)
     elif source == "gmail":
         # Find the right service
         contact = state.conv_cache.get(_cache_key("gmail", conv_id))
-        if contact and contact.gmail_account in state.gmail_services:
+        if account and account in state.gmail_services:
+            svc = state.gmail_services[account]
+        elif contact and contact.gmail_account in state.gmail_services:
             svc = state.gmail_services[contact.gmail_account]
         elif state.gmail_services:
             svc = next(iter(state.gmail_services.values()))
@@ -2769,6 +2773,13 @@ def _get_docs_service_for_account(account: str = "") -> tuple[str, object]:
 
 
 def _index_view_rows(view: str, limit: int) -> list[dict[str, object]]:
+    if view == "now":
+        return state.index_store.list_threads(
+            limit=limit,
+            actions=("reply", "review", "track"),
+            newest_only=True,
+            sort_mode="priority",
+        )
     if view == "actionable":
         return state.index_store.list_threads(
             limit=limit,
@@ -3514,7 +3525,7 @@ async def set_reminders(
     req: EventRemindersRequest,
 ):
     acct, svc = _get_cal_service_for_account(req.account)
-    reminders_dict = {"useDefault": req.use_default}
+    reminders_dict: dict[str, Any] = {"useDefault": req.use_default}
     if not req.use_default:
         reminders_dict["overrides"] = req.overrides
     ok = await asyncio.to_thread(
@@ -3605,8 +3616,8 @@ async def check_calendar_conflicts(start: str, end: str, account: str = ""):
         return {
             "conflicts": [
                 {
-                    "id": c.id,
-                    "title": c.title,
+                    "id": c.event_id,
+                    "title": c.summary,
                     "start": c.start,
                     "end": c.end,
                     "location": c.location or "",
@@ -3622,7 +3633,7 @@ async def check_calendar_conflicts(start: str, end: str, account: str = ""):
 async def extract_memory_endpoint(text: str, source: str = "manual", auto_save: bool = False):
     """Extract memory entities from text and optionally save to memory store."""
     try:
-        extracted = await asyncio.to_thread(ai_extract_memory, text)
+        extracted: Any = await asyncio.to_thread(ai_extract_memory, text)
         saved_count = 0
 
         if auto_save:
@@ -3902,11 +3913,11 @@ async def cross_silo_query(req: _QueryRequest):
     Returns gracefully with 503 when not installed.
     """
     try:
-        import gemma4_hackathon.silos.calendar  # noqa: F401
-        import gemma4_hackathon.silos.gmail  # noqa: F401
-        import gemma4_hackathon.silos.imessage  # noqa: F401  trigger registration
-        import gemma4_hackathon.silos.memory  # noqa: F401
-        import gemma4_hackathon.silos.photos  # noqa: F401
+        import gemma4_hackathon.silos.calendar  # type: ignore[reportMissingImports]  # noqa: F401
+        import gemma4_hackathon.silos.gmail  # type: ignore[reportMissingImports]  # noqa: F401
+        import gemma4_hackathon.silos.imessage  # type: ignore[reportMissingImports]  # noqa: F401
+        import gemma4_hackathon.silos.memory  # type: ignore[reportMissingImports]  # noqa: F401
+        import gemma4_hackathon.silos.photos  # type: ignore[reportMissingImports]  # noqa: F401
         from gemma4_hackathon.orchestrator import Orchestrator  # type: ignore
     except ImportError as exc:
         raise HTTPException(503, f"gemma4_hackathon not installed: {exc}") from exc

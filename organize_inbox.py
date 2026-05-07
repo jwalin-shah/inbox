@@ -54,8 +54,8 @@ def main():
                 print(f"  {label_name}: 0 emails matched")
                 continue
 
-            # Get message IDs
-            msg_ids = [conv["message_id"] for conv in conversations if conv.get("message_id")]
+            # gmail_search returns Contact objects whose id is the Gmail message id.
+            msg_ids = [conv.id for conv in conversations if conv.id]
 
             if msg_ids:
                 # Batch apply label (no removal, no archiving)

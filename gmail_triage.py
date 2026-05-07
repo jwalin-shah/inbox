@@ -29,6 +29,12 @@ class GmailThreadSummaryOut(BaseModel):
     rank: float = 0.0
     brief: str = ""
     rich_data: dict[str, str] = {}
+    source: str = "gmail"
+    latest_external_id: str = ""
+    actionability: str = ""
+    urgency: str = ""
+    noise_class: str = ""
+    open_loop: str = ""
 
 
 class ThreadBriefOut(BaseModel):
@@ -252,6 +258,7 @@ def contact_to_thread_summary(c: Contact) -> GmailThreadSummaryOut:
         rank=rank,
         brief=" ".join(brief_parts),
         rich_data=extract_rich_data(wf, c.snippet),
+        source="gmail",
     )
 
 
@@ -260,7 +267,8 @@ def indexed_thread_to_summary(row: dict[str, object]) -> GmailThreadSummaryOut:
     summary = str(row.get("summary", "") or subject)
     workflow = classify_workflow(f"{subject}\n{summary}")
     needs_reply = bool(row.get("needs_reply"))
-    action_items = [str(row["open_loop"])] if row.get("open_loop") else []
+    open_loop = str(row.get("open_loop", "") or "")
+    action_items = [open_loop] if open_loop else []
     last_message_at = str(row.get("latest_item_at", ""))
     rank = rank_thread(
         last_message_at,
@@ -302,6 +310,12 @@ def indexed_thread_to_summary(row: dict[str, object]) -> GmailThreadSummaryOut:
         rank=rank,
         brief=" ".join(brief_parts),
         rich_data=extract_rich_data(workflow, rich_text),
+        source=str(row.get("source", "")),
+        latest_external_id=str(row.get("latest_external_id", "")),
+        actionability=str(row.get("actionability", "")),
+        urgency=str(row.get("urgency", "")),
+        noise_class=str(row.get("noise_class", "")),
+        open_loop=open_loop,
     )
 
 
@@ -334,4 +348,5 @@ def thread_summary_to_out(ts: ThreadSummary, label_map: dict[str, str]) -> Gmail
         rank=rank,
         brief=" ".join(brief_parts),
         rich_data=extract_rich_data(workflow, text),
+        source="gmail",
     )

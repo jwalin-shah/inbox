@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -141,6 +142,11 @@ class TestIndexEndpoints:
                     "needs_reply": 1,
                     "message_count": 2,
                     "latest_sender": "Mehak Bhatia",
+                    "source": "gmail",
+                    "latest_external_id": "m2",
+                    "actionability": "reply",
+                    "urgency": "medium",
+                    "noise_class": "",
                 }
             ]
         )
@@ -155,6 +161,9 @@ class TestIndexEndpoints:
         assert data["threads"][0]["thread_id"] == "t1"
         assert data["threads"][0]["needs_reply"] is True
         assert data["threads"][0]["workflow"] == ""
+        assert data["threads"][0]["source"] == "gmail"
+        assert data["threads"][0]["latest_external_id"] == "m2"
+        assert data["threads"][0]["actionability"] == "reply"
         assert "body_text" not in data["threads"][0]
 
     def test_index_status_exposes_counts_and_sync_states(self, client):
@@ -306,6 +315,25 @@ class TestIndexEndpoints:
         assert "body_text" not in data["threads"][0]
         inbox_server.state.index_store.list_threads.assert_called_once_with(
             limit=5,
+            actions=("reply", "review", "track"),
+            newest_only=True,
+            sort_mode="priority",
+        )
+
+    def test_index_view_now_routes_to_priority_index_store(self, client):
+        import inbox_server
+
+        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+
+        resp = client.get("/index/views/now", params={"limit": 6})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["view"] == "now"
+        assert data["read_model"] == "index"
+        assert data["raw_provider_fetch"] is False
+        assert data["threads"] == []
+        inbox_server.state.index_store.list_threads.assert_called_once_with(
+            limit=6,
             actions=("reply", "review", "track"),
             newest_only=True,
             sort_mode="priority",
@@ -915,6 +943,29 @@ class TestDrive:
 
 
 class TestGmailExtensions:
+    @patch("inbox_server.gmail_thread")
+    def test_get_gmail_messages_uses_requested_account(self, mock_thread, client):
+        import inbox_server
+
+        other_svc = MagicMock()
+        requested_svc = MagicMock()
+        inbox_server.state.gmail_services = {
+            "other@gmail.com": other_svc,
+            "me@gmail.com": requested_svc,
+        }
+        mock_thread.return_value = [
+            Msg(sender="Alice", body="hello", ts=datetime(2026, 5, 6), is_me=False, source="gmail")
+        ]
+
+        resp = client.get(
+            "/messages/gmail/msg1",
+            params={"thread_id": "thread-1", "account": "me@gmail.com"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()[0]["body"] == "hello"
+        mock_thread.assert_called_once_with(requested_svc, "msg1", "thread-1")
+
     @patch("inbox_server.gmail_search")
     def test_gmail_search(self, mock_search, client):
         import inbox_server
@@ -1018,7 +1069,7 @@ class TestSourceAdapters:
 
         fake_adapter = FakeGmailAdapter()
         inbox_server.state.gmail_services = {"fake@example.com": object()}
-        inbox_server.state.source_adapters.gmail = fake_adapter
+        cast(Any, inbox_server.state.source_adapters).gmail = fake_adapter
 
         resp = client.get(
             "/gmail/search",
@@ -1068,7 +1119,7 @@ class TestSourceAdapters:
 
         fake_adapter = FakeCalendarAdapter()
         inbox_server.state.cal_services = {"fake@example.com": object()}
-        inbox_server.state.source_adapters.calendar = fake_adapter
+        cast(Any, inbox_server.state.source_adapters).calendar = fake_adapter
 
         resp = client.get(
             "/calendar/events",
