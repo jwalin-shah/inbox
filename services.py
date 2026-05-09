@@ -4337,6 +4337,7 @@ def sheets_rename_sheet(
     sheets_service: Any, spreadsheet_id: str, sheet_id: int, new_title: str
 ) -> bool:
     """Rename a sheet tab."""
+    _assert_live_write_allowed("rename Google Sheet tab")
     try:
         sheets_service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
@@ -4361,6 +4362,7 @@ def sheets_rename_sheet(
 
 def sheets_format(sheets_service: Any, spreadsheet_id: str, requests: list[dict]) -> dict | None:
     """Apply formatting via raw batchUpdate requests. For max flexibility."""
+    _assert_live_write_allowed("format Google Sheet")
     try:
         result = (
             sheets_service.spreadsheets()
@@ -4380,6 +4382,7 @@ def sheets_copy_to(
     sheets_service: Any, spreadsheet_id: str, sheet_id: int, dest_spreadsheet_id: str
 ) -> SheetTab | None:
     """Copy a sheet to another spreadsheet."""
+    _assert_live_write_allowed("copy Google Sheet tab")
     try:
         result = (
             sheets_service.spreadsheets()
@@ -4496,6 +4499,7 @@ def docs_export(
 
 def docs_insert_text(docs_service: Any, document_id: str, text: str, index: int = 1) -> bool:
     """Insert text into a document at specified index."""
+    _assert_live_write_allowed("insert Google Doc text")
     try:
         docs_service.documents().batchUpdate(
             documentId=document_id,

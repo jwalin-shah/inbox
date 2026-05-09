@@ -941,8 +941,16 @@ def test_test_mode_blocks_extended_live_writes(monkeypatch):
         services.drive_create_folder(_WriteShouldNotRun(), "Test folder")
     with pytest.raises(LiveWriteBlocked, match="Google Sheet"):
         services.sheets_values_update(_WriteShouldNotRun(), "sheet-id", "A1", [["x"]])
+    with pytest.raises(LiveWriteBlocked, match="Google Sheet"):
+        services.sheets_rename_sheet(_WriteShouldNotRun(), "sheet-id", 123, "New name")
+    with pytest.raises(LiveWriteBlocked, match="Google Sheet"):
+        services.sheets_format(_WriteShouldNotRun(), "sheet-id", [{"repeatCell": {}}])
+    with pytest.raises(LiveWriteBlocked, match="Google Sheet"):
+        services.sheets_copy_to(_WriteShouldNotRun(), "sheet-id", 123, "dest-sheet-id")
     with pytest.raises(LiveWriteBlocked, match="Google Doc"):
         services.docs_create(_WriteShouldNotRun(), "Test doc")
+    with pytest.raises(LiveWriteBlocked, match="Google Doc"):
+        services.docs_insert_text(_WriteShouldNotRun(), "doc-id", "hello")
     with pytest.raises(LiveWriteBlocked, match="GitHub notification"):
         services.github_mark_read("notification-id")
     with pytest.raises(LiveWriteBlocked, match="desktop notification"):
