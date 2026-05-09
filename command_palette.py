@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from tui_tabs import TUI_TABS
@@ -10,6 +11,24 @@ from tui_tabs import TUI_TABS
 # ── Command data model ───────────────────────────────────────────────────────
 
 CommandDict = dict[str, Any]
+LlmAvailabilityProvider = Callable[[], bool]
+JsonGenerator = Callable[[str, type[Any]], Any]
+NlpClassifier = Callable[[str, list[CommandDict]], dict[str, Any] | None]
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    id: str
+    label: str
+    category: str
+    description: str
+    action_name: str
+
+    def bind(self, app: Any) -> CommandDict:
+        def action() -> None:
+            getattr(app, self.action_name)()
+
+        return make_command(self.id, self.label, self.description, self.category, action)
 
 
 def make_command(
@@ -26,6 +45,113 @@ def make_command(
         "category": category,
         "action": action,
     }
+
+
+COMMAND_REGISTRY: tuple[CommandSpec, ...] = (
+    *(
+        CommandSpec(
+            id=tab["command_id"],
+            label=tab["command_name"],
+            category="Navigate",
+            description=tab["command_description"],
+            action_name=tab["action"],
+        )
+        for tab in TUI_TABS
+    ),
+    CommandSpec(
+        id="refresh",
+        label="Refresh",
+        category="Action",
+        description="Reload all data from server",
+        action_name="action_refresh",
+    ),
+    CommandSpec(
+        id="quit",
+        label="Quit",
+        category="Action",
+        description="Exit the application",
+        action_name="action_quit",
+    ),
+    CommandSpec(
+        id="toggle_ambient",
+        label="Toggle Ambient Listening",
+        category="Action",
+        description="Start or stop ambient audio capture",
+        action_name="action_toggle_ambient",
+    ),
+    CommandSpec(
+        id="mark_all_gh_read",
+        label="Mark All GitHub Notifications Read",
+        category="Action",
+        description="Mark all GitHub notifications as read",
+        action_name="action_mark_all_notifications_read",
+    ),
+    CommandSpec(
+        id="ask_inbox_assistant",
+        label="Ask Inbox Assistant",
+        category="AI",
+        description="Run a readonly local assistant against the current Inbox context",
+        action_name="action_ask_assistant",
+    ),
+    CommandSpec(
+        id="new_event",
+        label="New Calendar Event",
+        category="Create",
+        description="Create a new calendar event",
+        action_name="action_new_event",
+    ),
+    CommandSpec(
+        id="delete_event",
+        label="Delete Calendar Event",
+        category="Create",
+        description="Delete the selected calendar event",
+        action_name="action_delete_event",
+    ),
+    CommandSpec(
+        id="jump_to_date",
+        label="Jump to Date",
+        category="Create",
+        description="Navigate the calendar to a specific date",
+        action_name="action_jump_to_date",
+    ),
+    CommandSpec(
+        id="new_reminder",
+        label="New Reminder",
+        category="Create",
+        description="Switch to Reminders tab to create a reminder",
+        action_name="action_filter_rem",
+    ),
+    CommandSpec(
+        id="filter_reminder_list",
+        label="Filter Reminder List",
+        category="Create",
+        description="Filter by reminder list",
+        action_name="action_filter_reminder_list",
+    ),
+    CommandSpec(
+        id="gmail_compose",
+        label="New Gmail Message",
+        category="Create",
+        description="Compose a new Gmail message",
+        action_name="action_gmail_compose",
+    ),
+    CommandSpec(
+        id="add_account",
+        label="Add Google Account",
+        category="Settings",
+        description="Add a new Google account via OAuth",
+        action_name="action_add_account",
+    ),
+    CommandSpec(
+        id="reauth_account",
+        label="Re-auth Account",
+        category="Settings",
+        description="Re-authenticate the current Google account",
+        action_name="action_reauth_account",
+    ),
+)
+
+COMMAND_SPECS: tuple[CommandSpec, ...] = COMMAND_REGISTRY
 
 
 # ── Fuzzy filter ─────────────────────────────────────────────────────────────
@@ -93,27 +219,54 @@ def _build_command_list(commands: list[CommandDict]) -> str:
     return "\n".join(f"  {c['id']}: {c['name']}" for c in commands)
 
 
+def llm_is_available(provider: LlmAvailabilityProvider | None = None) -> bool:
+    """Return whether NLP classification can use the local LLM."""
+    try:
+        if provider is not None:
+            return provider()
+
+        import services
+
+        return services.llm_is_loaded()
+    except Exception:
+        return False
+
+
+def _generate_json(prompt: str, schema: type[Any]) -> Any:
+    import services
+
+    return services.generate_json(prompt, schema)
+
+
+def _result_value(result: Any, key: str, default: Any) -> Any:
+    if isinstance(result, dict):
+        return result.get(key, default)
+    return getattr(result, key, default)
+
+
 def nlp_classify(
     query: str,
     commands: list[CommandDict],
+    *,
+    llm_available: LlmAvailabilityProvider | None = None,
+    json_generator: JsonGenerator | None = None,
 ) -> dict[str, Any] | None:
     """Use the LLM to classify a natural-language query into a command.
 
     Returns a dict with command_id + confidence, or None if LLM is unavailable.
     """
     try:
-        import services  # imported lazily to avoid hard dep in tests
-
-        if not services.llm_is_loaded():
+        if not llm_is_available(llm_available):
             return None
 
         try:
             from pydantic import BaseModel as _Base
+            from pydantic import Field as _Field
 
             class _NlpResult(_Base):
                 command_id: str | None = None
                 confidence: float = 0.0
-                args: dict = {}  # type: ignore[assignment]
+                args: dict[str, Any] = _Field(default_factory=dict)
                 reason: str = ""
 
         except ImportError:
@@ -123,12 +276,13 @@ def nlp_classify(
             command_list=_build_command_list(commands),
             query=query,
         )
-        result = services.generate_json(prompt, _NlpResult)
+        generate = json_generator or _generate_json
+        result = generate(prompt, _NlpResult)
         return {
-            "command_id": getattr(result, "command_id", None),
-            "confidence": getattr(result, "confidence", 0.0),
-            "args": getattr(result, "args", {}),
-            "reason": getattr(result, "reason", ""),
+            "command_id": _result_value(result, "command_id", None),
+            "confidence": _result_value(result, "confidence", 0.0),
+            "args": _result_value(result, "args", {}),
+            "reason": _result_value(result, "reason", ""),
         }
     except Exception:
         return None
@@ -138,12 +292,15 @@ def resolve_nlp(
     query: str,
     commands: list[CommandDict],
     confidence_threshold: float = 0.6,
+    *,
+    classifier: NlpClassifier | None = None,
 ) -> tuple[CommandDict | None, str]:
     """Try NLP classification; return (matched_command_or_None, status_message).
 
     status_message is used for UI feedback.
     """
-    result = nlp_classify(query, commands)
+    classify = classifier or nlp_classify
+    result = classify(query, commands)
     if result is None:
         return None, "LLM unavailable — try exact command name"
 
@@ -172,104 +329,4 @@ def resolve_nlp(
 
 def build_commands(app: Any) -> list[CommandDict]:
     """Build the full command list by binding to the app's action_ methods."""
-
-    def act(method_name: str) -> Callable[[], None]:
-        return lambda: getattr(app, method_name)()
-
-    commands: list[CommandDict] = [
-        *[
-            make_command(
-                tab["command_id"],
-                tab["command_name"],
-                tab["command_description"],
-                "Navigate",
-                act(tab["action"]),
-            )
-            for tab in TUI_TABS
-        ],
-        make_command(
-            "refresh", "Refresh", "Reload all data from server", "Action", act("action_refresh")
-        ),
-        make_command("quit", "Quit", "Exit the application", "Action", act("action_quit")),
-        make_command(
-            "toggle_ambient",
-            "Toggle Ambient Listening",
-            "Start or stop ambient audio capture",
-            "Action",
-            act("action_toggle_ambient"),
-        ),
-        make_command(
-            "mark_all_gh_read",
-            "Mark All GitHub Notifications Read",
-            "Mark all GitHub notifications as read",
-            "Action",
-            act("action_mark_all_notifications_read"),
-        ),
-        make_command(
-            "ask_inbox_assistant",
-            "Ask Inbox Assistant",
-            "Run a readonly local assistant against the current Inbox context",
-            "AI",
-            act("action_ask_assistant"),
-        ),
-        # Create
-        make_command(
-            "new_event",
-            "New Calendar Event",
-            "Create a new calendar event",
-            "Create",
-            act("action_new_event"),
-        ),
-        make_command(
-            "delete_event",
-            "Delete Calendar Event",
-            "Delete the selected calendar event",
-            "Create",
-            act("action_delete_event"),
-        ),
-        make_command(
-            "jump_to_date",
-            "Jump to Date",
-            "Navigate the calendar to a specific date",
-            "Create",
-            act("action_jump_to_date"),
-        ),
-        make_command(
-            "new_reminder",
-            "New Reminder",
-            "Switch to Reminders tab to create a reminder",
-            "Create",
-            act("action_filter_rem"),
-        ),
-        make_command(
-            "filter_reminder_list",
-            "Filter Reminder List",
-            "Filter by reminder list",
-            "Create",
-            act("action_filter_reminder_list"),
-        ),
-        make_command(
-            "gmail_compose",
-            "New Gmail Message",
-            "Compose a new Gmail message",
-            "Create",
-            act("action_gmail_compose"),
-        ),
-        # Settings
-        make_command(
-            "add_account",
-            "Add Google Account",
-            "Add a new Google account via OAuth",
-            "Settings",
-            act("action_add_account"),
-        ),
-        make_command(
-            "reauth_account",
-            "Re-auth Account",
-            "Re-authenticate the current Google account",
-            "Settings",
-            act("action_reauth_account"),
-        ),
-    ]
-
-    return commands
+    return [spec.bind(app) for spec in COMMAND_REGISTRY]
