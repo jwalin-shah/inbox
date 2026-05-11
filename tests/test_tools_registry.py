@@ -3,6 +3,13 @@ import inspect
 
 from tools_registry import TOOLS, register_all
 
+INDEX_TOOL_NAMES = {
+    "get_index_health",
+    "get_index_status",
+    "list_index_view",
+    "list_needs_action",
+}
+
 
 class DummyMCP:
     def __init__(self):
@@ -53,6 +60,23 @@ def test_readonly_registration_preserved():
     assert all(name not in registered for name in write_names)
 
 
+def test_readonly_registration_includes_index_tools():
+    mcp = DummyMCP()
+    registered = register_all(mcp, DummyBackend(), readonly_only=True)
+
+    assert set(registered) >= INDEX_TOOL_NAMES
+
+
+def test_index_tools_are_readonly_and_do_not_require_confirm():
+    tools_by_name = {tool.name: tool for tool in TOOLS}
+    handlers = _handlers()
+
+    for name in INDEX_TOOL_NAMES:
+        assert tools_by_name[name].readonly is True
+        assert tools_by_name[name].confirm is False
+        assert "confirm" not in inspect.signature(handlers[name]).parameters
+
+
 def test_confirm_param_is_added_only_for_confirm_tools():
     mcp = DummyMCP()
     register_all(mcp, DummyBackend(), readonly_only=False)
@@ -87,6 +111,56 @@ def test_registry_handler_signatures_include_required_tool_params():
 
     assert missing == []
     assert optional_marked_required == []
+
+
+def test_index_health_status_and_needs_action_dispatch_to_compact_routes():
+    handlers = _handlers()
+
+    health = asyncio.run(handlers["get_index_health"]())
+    status = asyncio.run(handlers["get_index_status"]())
+    needs_action = asyncio.run(
+        handlers["list_needs_action"](
+            workflow="job_hunt",
+            account="me@example.com",
+        )
+    )
+
+    assert health == {
+        "method": "GET",
+        "path": "/index/health",
+        "params": None,
+        "json": None,
+    }
+    assert status == {
+        "method": "GET",
+        "path": "/index/status",
+        "params": None,
+        "json": None,
+    }
+    assert needs_action == {
+        "method": "GET",
+        "path": "/inbox/needs-action",
+        "params": {"workflow": "job_hunt", "account": "me@example.com"},
+        "json": None,
+    }
+
+
+def test_index_view_dispatches_to_named_index_route():
+    handlers = _handlers()
+
+    result = asyncio.run(
+        handlers["list_index_view"](
+            view_name="waiting-on-me",
+            limit=7,
+        )
+    )
+
+    assert result == {
+        "method": "GET",
+        "path": "/index/views/waiting-on-me",
+        "params": {"limit": 7},
+        "json": None,
+    }
 
 
 def test_sheet_path_params_are_encoded_and_query_params_remain_query_values():
