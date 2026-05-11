@@ -107,5 +107,8 @@ Result: passed, 158 tests.
 
 - PR URL: https://github.com/jwalin-shah/inbox/pull/45
 - Implementation commit SHA: `5ac5e46fa7a5bc2bd3953c1c6389e8597f87dfc1`
-- Review evidence commit SHA: pending push.
+- Review/factory validation evidence commit SHA before this metadata correction:
+  `c4a73c3822ca7c18f45619224b8382a7bf753d77`
+- Use the live GitHub PR head plus the Linear MAX-38 evidence comments for the
+  current state if this workpad receives later metadata-only commits.
 - Blockers: none.
