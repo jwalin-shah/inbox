@@ -1935,6 +1935,141 @@ class TestPhase4:
         assert data["raw_thread_provider_fetch"] is False
         mock_gmail.assert_not_called()
 
+    @patch("inbox_server.gmail_search")
+    @patch("inbox_server.tasks_list")
+    @patch("inbox_server.calendar_events")
+    def test_inbox_now_compact_brief_includes_health_refs_and_waiting_items(
+        self, mock_events, mock_tasks, mock_gmail, client
+    ):
+        import inbox_server
+
+        action_row = {
+            "thread_id": "t-action",
+            "account": "me@gmail.com",
+            "participants_json": ["Recruiter"],
+            "latest_subject": "Interview follow up",
+            "latest_snippet": "Can you reply today?",
+            "latest_item_at": "2026-04-18T01:00:00+00:00",
+            "summary": "Recruiter needs a reply",
+            "open_loop": "Reply to recruiter",
+            "topic": "opportunity",
+            "needs_reply": 1,
+            "message_count": 2,
+            "latest_sender": "Recruiter",
+        }
+        waiting_row = {
+            "thread_id": "t-wait",
+            "account": "me@gmail.com",
+            "participants_json": ["Hiring Manager"],
+            "latest_subject": "Offer timing",
+            "latest_snippet": "We will get back to you",
+            "latest_item_at": "2026-04-17T01:00:00+00:00",
+            "summary": "Waiting for offer update",
+            "open_loop": "Track offer response",
+            "topic": "opportunity",
+            "needs_reply": 0,
+            "message_count": 4,
+            "latest_sender": "Me",
+        }
+
+        def list_threads(**kwargs):
+            if kwargs.get("has_open_loop"):
+                return [waiting_row]
+            return [action_row]
+
+        inbox_server.state.index_store.list_threads = MagicMock(side_effect=list_threads)
+        inbox_server.state.index_store.list_sync_states = MagicMock(
+            return_value=[
+                {
+                    "source": "gmail",
+                    "account": "me@gmail.com",
+                    "checkpoint_type": "internalDateMs",
+                    "checkpoint_value": "123",
+                    "last_success_at": datetime.now(UTC).isoformat(),
+                    "last_full_sync_at": "2026-04-18T00:00:00+00:00",
+                    "status": "idle",
+                    "last_run_started_at": "2026-04-18T00:55:00+00:00",
+                    "last_error": "",
+                    "metadata": {},
+                }
+            ]
+        )
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.tasks_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.cal_services = {"me@gmail.com": MagicMock()}
+        mock_tasks.return_value = [
+            GoogleTask(
+                id="task-1",
+                title="Submit take-home",
+                status="needsAction",
+                list_id="@default",
+                list_title="My Tasks",
+                due=datetime.now() - timedelta(days=1),
+            )
+        ]
+        mock_events.return_value = [
+            CalendarEvent(
+                summary="Interview",
+                start=datetime.now(),
+                end=datetime.now() + timedelta(hours=1),
+                account="me@gmail.com",
+                event_id="event-1",
+            )
+        ]
+
+        resp = client.get("/inbox/now", params={"limit": 5})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["read_model"] == "inbox_now"
+        assert data["read_only"] is True
+        assert data["raw_thread_provider_fetch"] is False
+        assert data["write_actions"] == []
+        assert data["index_health"]["healthy"] is True
+        assert data["reasons"] == []
+        assert [item["now_kind"] for item in data["now_items"]] == [
+            "thread",
+            "task",
+            "event",
+        ]
+        assert data["now_items"][0]["ref"]["thread_id"] == "t-action"
+        assert data["actionable_threads"][0]["thread_id"] == "t-action"
+        assert data["waiting_threads"][0]["thread_id"] == "t-wait"
+        assert {item["kind"] for item in data["commitments"]} == {"task", "thread"}
+        assert any(ref["reason"] == "Reply to recruiter" for ref in data["source_refs"])
+        assert any(ref["reason"] == "Track offer response" for ref in data["source_refs"])
+        mock_gmail.assert_not_called()
+
+    @patch("inbox_server.gmail_search")
+    @patch("inbox_server.tasks_list")
+    @patch("inbox_server.calendar_events")
+    def test_inbox_now_surfaces_no_index_state_when_empty(
+        self, mock_events, mock_tasks, mock_gmail, client
+    ):
+        import inbox_server
+
+        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+        inbox_server.state.index_store.list_sync_states = MagicMock(return_value=[])
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.tasks_services = {}
+        inbox_server.state.cal_services = {}
+        mock_tasks.return_value = []
+        mock_events.return_value = []
+
+        resp = client.get("/inbox/now")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["now_items"] == []
+        assert data["index_health"]["healthy"] is False
+        assert data["index_health"]["stale"] is True
+        assert data["index_health"]["reasons"] == ["no_sync_state"]
+        assert data["reasons"] == [
+            "index:no_sync_state",
+            "now_empty_with_unhealthy_index",
+        ]
+        mock_gmail.assert_not_called()
+
     @patch("inbox_server.drive_create_folder")
     def test_workflow_folder_display_name(self, mock_create, client):
         import inbox_server

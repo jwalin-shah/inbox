@@ -122,6 +122,15 @@ class TestClientIndexedInbox:
             call("waiting-on-others", limit=4),
         ]
 
+    def test_inbox_now(self, client):
+        client._client.get.return_value = _mock_response({"now_items": [], "index_health": {}})
+        result = client.inbox_now(workflow="job_hunt", account="me@gmail.com", limit=8)
+        assert result == {"now_items": [], "index_health": {}}
+        client._client.get.assert_called_once_with(
+            "/inbox/now",
+            params={"limit": 8, "workflow": "job_hunt", "account": "me@gmail.com"},
+        )
+
 
 # ── Messages ────────────────────────────────────────────────────────────────
 

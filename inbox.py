@@ -101,6 +101,17 @@ def _index_health_label(index_health: dict | None) -> str | None:
     return f"Index: {', '.join(reason_labels)}"
 
 
+def _format_index_health_warning(index_health: dict | None) -> str | None:
+    if not isinstance(index_health, dict) or index_health.get("healthy") is not False:
+        return None
+    reasons = _index_health_reasons(index_health)
+    if not reasons:
+        return "Index unhealthy"
+    if "no_sync_state" in reasons:
+        return f"Index has no sync state: {', '.join(reasons)}"
+    return f"Index unhealthy: {', '.join(reasons)}"
+
+
 def _index_health_style(index_health: dict | None) -> str:
     reasons = _index_health_reasons(index_health)
     if "sync_error" in reasons:
@@ -453,8 +464,9 @@ class IndexedThreadItem(ListItem):
             t.append("↩ ", style="bold yellow")
         else:
             t.append("• ", style="dim")
-        t.append(d.get("subject", "Untitled"), style="bold white")
-        participants = ", ".join(d.get("participants", [])[:2])
+        t.append(d.get("subject") or d.get("title") or "Untitled", style="bold white")
+        raw_participants = d.get("participants", [])
+        participants = ", ".join(raw_participants[:2]) if isinstance(raw_participants, list) else ""
         meta_parts: list[str] = []
         if participants:
             meta_parts.append(participants)
@@ -463,7 +475,7 @@ class IndexedThreadItem(ListItem):
             meta_parts.append(workflow)
         if meta_parts:
             t.append(f"\n  {' · '.join(meta_parts)}", style="dim")
-        brief = d.get("brief", "") or d.get("summary", "")
+        brief = d.get("brief", "") or d.get("summary", "") or d.get("reason", "")
         if brief:
             t.append(f"\n  {brief[:72]}", style="dim")
         yield Static(t)
@@ -1802,7 +1814,7 @@ class InboxApp(App):
             self._render_index_health_notice(lv)
             for thread in self.now_threads:
                 lv.append(IndexedThreadItem(thread))
-            status = f"[green]{len(self.now_threads)} indexed threads[/]"
+            status = f"[green]{len(self.now_threads)} now items[/]"
             status += self._index_status_suffix()
             status += "  [dim]Now view · summaries first[/]"
             self._update_sidebar_status(status)
@@ -2444,30 +2456,49 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("GitHub refresh", exc))
 
+        used_now_brief = False
         try:
-            result = self.client.index_health()
+            result = self.client.inbox_now(limit=20)
             if isinstance(result, dict):
-                index_health = result
+                now_threads = result.get("now_items", []) or []
+                actionable_threads = result.get("actionable_threads", []) or []
+                waiting_threads = result.get("waiting_threads", []) or []
+                if isinstance(result.get("index_health"), dict):
+                    index_health = result["index_health"]
+                warning = _format_index_health_warning(index_health)
+                if warning:
+                    errors.append(warning)
+                used_now_brief = True
+        except AttributeError:
+            pass
         except Exception as exc:
-            errors.append(_format_request_error("Index health refresh", exc))
+            errors.append(_format_request_error("Inbox Now refresh", exc))
 
-        try:
-            result = self.client.index_view("recent", limit=20)
-            now_threads = result.get("threads", []) if isinstance(result, dict) else []
-        except Exception as exc:
-            errors.append(_format_request_error("Indexed recent refresh", exc))
+        if not used_now_brief:
+            try:
+                result = self.client.index_health()
+                if isinstance(result, dict):
+                    index_health = result
+            except Exception as exc:
+                errors.append(_format_request_error("Index health refresh", exc))
 
-        try:
-            result = self.client.index_view("actionable", limit=20)
-            actionable_threads = result.get("threads", []) if isinstance(result, dict) else []
-        except Exception as exc:
-            errors.append(_format_request_error("Indexed actionable refresh", exc))
+            try:
+                result = self.client.index_view("recent", limit=20)
+                now_threads = result.get("threads", []) if isinstance(result, dict) else []
+            except Exception as exc:
+                errors.append(_format_request_error("Indexed recent refresh", exc))
 
-        try:
-            result = self.client.index_view("waiting-on", limit=20)
-            waiting_threads = result.get("threads", []) if isinstance(result, dict) else []
-        except Exception as exc:
-            errors.append(_format_request_error("Indexed waiting refresh", exc))
+            try:
+                result = self.client.index_view("actionable", limit=20)
+                actionable_threads = result.get("threads", []) if isinstance(result, dict) else []
+            except Exception as exc:
+                errors.append(_format_request_error("Indexed actionable refresh", exc))
+
+            try:
+                result = self.client.index_view("waiting-on", limit=20)
+                waiting_threads = result.get("threads", []) if isinstance(result, dict) else []
+            except Exception as exc:
+                errors.append(_format_request_error("Indexed waiting refresh", exc))
 
         return AuxiliaryDataSnapshot(
             events=events,
@@ -2857,19 +2888,20 @@ class InboxApp(App):
         if thread.get("brief"):
             lines.append("")
             lines.append(str(thread["brief"]))
-        body = "\n".join(lines).strip() or thread.get("subject", "")
+        body = "\n".join(lines).strip() or thread.get("subject", "") or thread.get("title", "")
         mv.ai_summary = None
         mv.messages = [
             {
                 "body": body,
-                "ts": thread.get("last_message_at", ""),
-                "sender": "Inbox Index",
+                "ts": thread.get("last_message_at", "") or thread.get("start", ""),
+                "sender": "Inbox Now" if thread.get("now_kind") else "Inbox Index",
                 "is_me": False,
             }
         ]
-        subject = thread.get("subject", "Untitled")
+        subject = thread.get("subject") or thread.get("title") or "Untitled"
         workflow = thread.get("workflow", "")
-        status = f"[bold]{subject}[/]  [dim]indexed"
+        kind = thread.get("now_kind") or "indexed"
+        status = f"[bold]{subject}[/]  [dim]{kind}"
         if workflow:
             status += f" · {workflow}"
         if thread.get("needs_reply"):

@@ -130,6 +130,16 @@ class InboxClient:
     def indexed_waiting_on_others_threads(self, *, limit: int = 20) -> dict:
         return self.index_view("waiting-on-others", limit=limit)
 
+    def inbox_now(self, *, workflow: str = "", account: str = "", limit: int = 20) -> dict:
+        params: dict[str, str | int] = {"limit": limit}
+        if workflow:
+            params["workflow"] = workflow
+        if account:
+            params["account"] = account
+        r = self._client.get("/inbox/now", params=params)
+        r.raise_for_status()
+        return r.json()
+
     # ── Messages ─────────────────────────────────────────────────────────
 
     def messages(

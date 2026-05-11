@@ -2072,6 +2072,41 @@ def test_collect_auxiliary_data_fetches_index_health_and_indexed_views() -> None
     assert snapshot.errors == []
 
 
+def test_collect_auxiliary_data_uses_inbox_now_brief_and_surfaces_index_health() -> None:
+    client = MagicMock()
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
+    client.inbox_now.return_value = {
+        "now_items": [{"now_kind": "thread", "thread_id": "now-1", "title": "Reply"}],
+        "actionable_threads": [{"thread_id": "action-1"}],
+        "waiting_threads": [{"thread_id": "wait-1"}],
+        "index_health": {
+            "healthy": False,
+            "stale": True,
+            "reasons": ["no_sync_state"],
+        },
+    }
+
+    app = _make_app(client)
+    snapshot = app._collect_auxiliary_data()
+
+    assert snapshot.now_threads == [{"now_kind": "thread", "thread_id": "now-1", "title": "Reply"}]
+    assert snapshot.actionable_threads == [{"thread_id": "action-1"}]
+    assert snapshot.waiting_threads == [{"thread_id": "wait-1"}]
+    assert snapshot.index_health == {
+        "healthy": False,
+        "stale": True,
+        "reasons": ["no_sync_state"],
+    }
+    assert "Index has no sync state: no_sync_state" in snapshot.errors
+    client.inbox_now.assert_called_once_with(limit=20)
+    client.index_health.assert_not_called()
+    client.index_view.assert_not_called()
+
+
 def test_collect_poll_data_marks_changed_when_index_health_changes() -> None:
     client = MagicMock()
     client.conversations.return_value = []
