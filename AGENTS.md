@@ -65,3 +65,30 @@ Stats: 50 obs (16,813t read) | 407,521t work | 96% savings
 
 Access 408k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
+
+# Inbox Agent Notes
+
+## Validation
+
+Default agent-safe local validation:
+
+```bash
+scripts/validate_agent_safe.sh
+```
+
+CI should hydrate the locked environment first, then run the same safe wrapper:
+
+```bash
+uv sync --frozen --all-groups
+scripts/validate_agent_safe.sh
+```
+
+For the focused live-write guard slice:
+
+```bash
+INBOX_TEST_MODE=1 uv run pytest tests/test_inbox_test_mode.py tests/test_services.py -k "test_mode_blocks" -q --no-cov
+```
+
+## Platform Dependencies
+
+MLX and PyObjC dependencies are Darwin-only in `pyproject.toml` so non-mac CI does not fail resolving mac-only wheels. On macOS, the default install includes them via platform markers; `uv sync --extra mac` makes the full macOS runtime dependency set explicit.

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  safe-validation:
+    name: Safe validation
+    runs-on: ubuntu-latest
+    env:
+      INBOX_TEST_MODE: "1"
+      INBOX_TEST_DATA_DIR: ${{ runner.temp }}/inbox-test-data
+      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Hydrate locked dependencies
+        run: uv sync --frozen --all-groups --no-progress
+
+      - name: Run agent-safe validation
+        run: scripts/validate_agent_safe.sh
