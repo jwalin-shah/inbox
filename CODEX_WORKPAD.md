@@ -23,6 +23,7 @@ Base: origin/main @ 42a32a2
 - Pass: `UV_CACHE_DIR=/tmp/uv-cache INBOX_TEST_MODE=1 uv run pytest tests/test_server.py tests/test_client.py tests/test_inbox_app.py -q -k "now or needs_action or index_health"` (`26 passed, 327 deselected`)
 - Pass: `uv run ruff check inbox_server.py inbox_client.py inbox.py tests/test_server.py tests/test_client.py tests/test_inbox_app.py`
 - Pass: `git diff --check`
+- 2026-05-11 factory privacy audit: `/inbox/now` no longer copies raw Google Task notes or Calendar event descriptions into `now_items`; focused regression asserts raw note/description text is absent.
 
 ## Evidence
 

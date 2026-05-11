@@ -3042,9 +3042,9 @@ def _task_now_item(task: TaskOut) -> dict[str, Any]:
         "account": task.account,
         "status": task.status,
         "due": task.due,
-        "notes": task.notes,
+        "has_notes": bool(task.notes),
         "workflow": task.workflow,
-        "summary": task.notes,
+        "summary": "Task has notes" if task.notes else "",
         "actionability": "task",
         "now_meta": [
             "task",
@@ -3070,9 +3070,9 @@ def _event_now_item(event: CalendarEventOut) -> dict[str, Any]:
         "start": event.start,
         "end": event.end,
         "location": event.location,
-        "description": event.description,
+        "has_description": bool(event.description),
         "workflow": event.workflow,
-        "summary": event.description or event.location,
+        "summary": event.location,
         "actionability": "prep",
         "now_meta": [
             "calendar",

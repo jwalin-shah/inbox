@@ -2005,6 +2005,7 @@ class TestPhase4:
                 list_id="@default",
                 list_title="My Tasks",
                 due=datetime.now() - timedelta(days=1),
+                notes="private task notes should not appear",
             )
         ]
         mock_events.return_value = [
@@ -2014,6 +2015,7 @@ class TestPhase4:
                 end=datetime.now() + timedelta(hours=1),
                 account="me@gmail.com",
                 event_id="event-1",
+                description="private event description should not appear",
             )
         ]
 
@@ -2036,6 +2038,15 @@ class TestPhase4:
         assert data["actionable_threads"][0]["thread_id"] == "t-action"
         assert data["waiting_threads"][0]["thread_id"] == "t-wait"
         assert {item["kind"] for item in data["commitments"]} == {"task", "thread"}
+        raw = resp.text
+        assert "private task notes should not appear" not in raw
+        assert "private event description should not appear" not in raw
+        task_item = next(item for item in data["now_items"] if item["now_kind"] == "task")
+        event_item = next(item for item in data["now_items"] if item["now_kind"] == "event")
+        assert "notes" not in task_item
+        assert task_item["has_notes"] is True
+        assert "description" not in event_item
+        assert event_item["has_description"] is True
         assert any(ref["reason"] == "Reply to recruiter" for ref in data["source_refs"])
         assert any(ref["reason"] == "Track offer response" for ref in data["source_refs"])
         mock_gmail.assert_not_called()
