@@ -150,6 +150,49 @@ TOOLS: list[Tool] = [
             Param("label", str, "", "query"),
         ],
     ),
+    # ---------- Indexed inbox (read) ----------
+    Tool(
+        name="get_index_health",
+        method="GET",
+        path="/index/health",
+        description="Get inbox index health, freshness, and sync-state diagnostics.",
+        readonly=True,
+    ),
+    Tool(
+        name="get_index_status",
+        method="GET",
+        path="/index/status",
+        description="Get inbox index counts and sync-state overview.",
+        readonly=True,
+    ),
+    Tool(
+        name="list_index_view",
+        method="GET",
+        path="/index/views/{view_name}",
+        description=(
+            "List a compact indexed inbox view by name, such as recent, actionable, "
+            "waiting-on, waiting-on-me, or waiting-on-others."
+        ),
+        readonly=True,
+        params=[
+            Param("view_name", str, _EMPTY, "path"),
+            Param("limit", int, 20, "query"),
+        ],
+    ),
+    Tool(
+        name="list_needs_action",
+        method="GET",
+        path="/inbox/needs-action",
+        description=(
+            "List the compact cross-source needs-action rollup from indexed threads, "
+            "tasks, and upcoming calendar events."
+        ),
+        readonly=True,
+        params=[
+            Param("workflow", str, "", "query"),
+            Param("account", str, "", "query"),
+        ],
+    ),
     # ---------- Gmail (write) ----------
     Tool(
         name="send_email_reply",
