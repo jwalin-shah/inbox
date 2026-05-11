@@ -3,10 +3,12 @@
 ## Work order
 
 - Linear: MAX-48
+- Pull request: https://github.com/jwalin-shah/inbox/pull/46
 - Repo: `/Users/jwalinshah/projects/inbox`
 - Worktree: `/Users/jwalinshah/projects/inbox-MAX-48-inbox-needs-action-rollup`
 - Branch: `codex/MAX-48-inbox-needs-action-rollup`
 - Base: `origin/main` at `42a32a2`
+- Implementation commit: `26f021f`
 
 ## Acceptance
 
