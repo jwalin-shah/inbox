@@ -50,7 +50,11 @@ uv run python inbox_server.py   # Runs on localhost:9849
 
 ## API Reference
 
-All endpoints available at `localhost:9849`. Optional token-based auth via `INBOX_SERVER_TOKEN` env var.
+All endpoints are available at `localhost:9849`. `/health` is unauthenticated for local
+supervision; every other endpoint requires `INBOX_SERVER_TOKEN` by default.
+Requests must send `Authorization: Bearer <token>` or `X-API-Key: <token>`.
+For isolated dev/test work only, set `INBOX_SERVER_ALLOW_UNAUTHENTICATED=1` to
+allow non-health requests without a token.
 
 **Conversations & Messages:**
 ```

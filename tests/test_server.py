@@ -369,11 +369,67 @@ class TestIndexEndpoints:
 
 
 class TestAuth:
-    def test_auth_not_required_when_token_unset(self, client):
+    def test_health_does_not_require_auth_when_token_unset(self, client):
         resp = client.get("/health")
         assert resp.status_code == 200
+        assert resp.json()["api_auth_required"] is False
 
-    def test_auth_required_when_token_set(self):
+    def test_health_does_not_require_auth_when_non_health_auth_is_fail_closed(self):
+        import inbox_server
+
+        with (
+            patch.dict(
+                os.environ,
+                {"INBOX_SERVER_TOKEN": "", "INBOX_SERVER_ALLOW_UNAUTHENTICATED": "0"},
+                clear=False,
+            ),
+            patch("inbox_server.init_contacts", return_value=0),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
+            TestClient(inbox_server.app, raise_server_exceptions=False) as client,
+        ):
+            resp = client.get("/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["api_auth_required"] is True
+        assert data["api_auth_configured"] is False
+        assert data["api_auth_dev_bypass"] is False
+
+    def test_non_health_auth_required_when_token_unset_without_dev_bypass(self):
+        import inbox_server
+
+        with (
+            patch.dict(
+                os.environ,
+                {"INBOX_SERVER_TOKEN": "", "INBOX_SERVER_ALLOW_UNAUTHENTICATED": "0"},
+                clear=False,
+            ),
+            patch("inbox_server.init_contacts", return_value=0),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
+            TestClient(inbox_server.app, raise_server_exceptions=False) as client,
+        ):
+            resp = client.get("/accounts")
+
+        assert resp.status_code == 401
+
+    def test_explicit_dev_bypass_allows_non_health_when_token_unset(self):
+        import inbox_server
+
+        with (
+            patch.dict(
+                os.environ,
+                {"INBOX_SERVER_TOKEN": "", "INBOX_SERVER_ALLOW_UNAUTHENTICATED": "1"},
+                clear=False,
+            ),
+            patch("inbox_server.init_contacts", return_value=0),
+            patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
+            TestClient(inbox_server.app, raise_server_exceptions=False) as client,
+        ):
+            resp = client.get("/accounts")
+
+        assert resp.status_code == 200
+
+    def test_non_health_auth_required_when_token_set(self):
         import inbox_server
 
         with (
@@ -382,7 +438,7 @@ class TestAuth:
             patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             TestClient(inbox_server.app, raise_server_exceptions=False) as client,
         ):
-            resp = client.get("/health")
+            resp = client.get("/accounts")
         assert resp.status_code == 401
 
     def test_bearer_auth_allows_request(self):
@@ -394,7 +450,7 @@ class TestAuth:
             patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             TestClient(inbox_server.app, raise_server_exceptions=False) as client,
         ):
-            resp = client.get("/health", headers={"Authorization": "Bearer secret-token"})
+            resp = client.get("/accounts", headers={"Authorization": "Bearer secret-token"})
         assert resp.status_code == 200
 
     def test_x_api_key_auth_allows_request(self):
@@ -406,7 +462,7 @@ class TestAuth:
             patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
             TestClient(inbox_server.app, raise_server_exceptions=False) as client,
         ):
-            resp = client.get("/health", headers={"X-API-Key": "secret-token"})
+            resp = client.get("/accounts", headers={"X-API-Key": "secret-token"})
         assert resp.status_code == 200
 
 

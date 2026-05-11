@@ -211,6 +211,8 @@ _gmail_triage_reexports = (
 
 PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
+AUTH_BYPASS_ENV = "INBOX_SERVER_ALLOW_UNAUTHENTICATED"
+AUTH_BYPASS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
     dict[str, object],
@@ -1314,19 +1316,30 @@ def _auth_token() -> str:
     return os.getenv(AUTH_TOKEN_ENV, "").strip()
 
 
+def _auth_bypass_enabled() -> bool:
+    return os.getenv(AUTH_BYPASS_ENV, "").strip().lower() in AUTH_BYPASS_TRUE_VALUES
+
+
+def _non_health_auth_required() -> bool:
+    return bool(_auth_token()) or not _auth_bypass_enabled()
+
+
 def _is_authorized(request: Request) -> bool:
-    token = _auth_token()
-    if not token:
+    if request.url.path == "/health":
         return True
 
-    auth_header = request.headers.get("authorization", "")
-    if auth_header.lower().startswith("bearer "):
-        provided = auth_header[7:].strip()
-        if provided and compare_digest(provided, token):
-            return True
+    token = _auth_token()
+    if token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            provided = auth_header[7:].strip()
+            if provided and compare_digest(provided, token):
+                return True
 
-    api_key = request.headers.get("x-api-key", "").strip()
-    return bool(api_key) and compare_digest(api_key, token)
+        api_key = request.headers.get("x-api-key", "").strip()
+        return bool(api_key) and compare_digest(api_key, token)
+
+    return _auth_bypass_enabled()
 
 
 @app.middleware("http")
@@ -1354,6 +1367,9 @@ async def health():
         "drive_accounts": list(state.drive_services.keys()),
         "sheets_accounts": list(state.sheets_services.keys()),
         "github_configured": _github_token() is not None,
+        "api_auth_required": _non_health_auth_required(),
+        "api_auth_configured": bool(_auth_token()),
+        "api_auth_dev_bypass": _auth_bypass_enabled(),
     }
 
 
