@@ -29,6 +29,12 @@ Base: origin/main @ 42a32a2
 - Pass: `uv run ruff check inbox_server.py inbox_client.py inbox.py tests/test_server.py tests/test_client.py tests/test_inbox_app.py`
 - Pass: `UV_CACHE_DIR=/tmp/uv-cache INBOX_TEST_MODE=1 uv run pytest tests/test_server.py -q -k "inbox_now"` (`2 passed, 123 deselected`)
 - Pass: `UV_CACHE_DIR=/tmp/uv-cache INBOX_TEST_MODE=1 uv run pytest tests/test_server.py tests/test_client.py tests/test_inbox_app.py -q -k "now or needs_action or index_health"` (`26 passed, 327 deselected`)
+- 2026-05-11 full-suite review: the documented `uv run pytest -q` initially exposed a stale TUI recovery assertion that still expected the old `indexed threads` label after outage recovery. MAX-90 intentionally makes the default `all` tab render the Inbox Now status, so the regression now asserts the outage clears to `now items` / `Now view`.
+- Pass: `UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .`
+- Pass: `git diff --check`
+- Pass: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_inbox_app.py::test_status_bar_clears_unreachable_message_after_recovery -q` (`1 passed`)
+- Pass: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` (`886 passed`)
+- Non-gating observation: full `UV_CACHE_DIR=/tmp/uv-cache INBOX_TEST_MODE=1 uv run pyright` still fails with repo-wide pre-existing/dynamic typing diagnostics; it is not the acceptance gate for this slice.
 
 ## Evidence
 

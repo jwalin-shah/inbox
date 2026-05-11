@@ -494,7 +494,8 @@ def test_status_bar_clears_unreachable_message_after_recovery() -> None:
             assert "unreachable" not in status, (
                 f"Status bar still shows outage after recovery: {status!r}"
             )
-            assert "indexed threads" in status
+            assert "now items" in status
+            assert "Now view" in status
 
     asyncio.run(runner())
 
