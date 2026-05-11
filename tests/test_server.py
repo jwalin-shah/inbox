@@ -2016,10 +2016,18 @@ class TestPhase4:
                 account="me@gmail.com",
                 event_id="event-1",
                 description="private event description should not appear",
-            )
+            ),
+            CalendarEvent(
+                summary="Other account private event",
+                start=datetime.now(),
+                end=datetime.now() + timedelta(hours=2),
+                account="other@gmail.com",
+                event_id="event-2",
+                description="other private description should not appear",
+            ),
         ]
 
-        resp = client.get("/inbox/now", params={"limit": 5})
+        resp = client.get("/inbox/now", params={"limit": 5, "account": "me@gmail.com"})
 
         assert resp.status_code == 200
         data = resp.json()
@@ -2041,8 +2049,11 @@ class TestPhase4:
         raw = resp.text
         assert "private task notes should not appear" not in raw
         assert "private event description should not appear" not in raw
+        assert "Other account private event" not in raw
+        assert "other private description should not appear" not in raw
         task_item = next(item for item in data["now_items"] if item["now_kind"] == "task")
         event_item = next(item for item in data["now_items"] if item["now_kind"] == "event")
+        assert event_item["account"] == "me@gmail.com"
         assert "notes" not in task_item
         assert task_item["has_notes"] is True
         assert "description" not in event_item

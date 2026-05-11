@@ -3982,6 +3982,8 @@ async def get_needs_action(workflow: str = "", account: str = ""):
             )
             for e in evts:
                 ev = _event_to_out(e)
+                if account and ev.account != account:
+                    continue
                 if workflow and ev.workflow != workflow:
                     continue
                 events.append(ev)
