@@ -62,6 +62,67 @@ def _format_request_error(action: str, exc: Exception) -> str:
     return f"{action} failed: {exc}"
 
 
+_INDEX_HEALTH_REASON_LABELS = {
+    "no_sync_state": "no sync state",
+    "missing_checkpoint": "missing checkpoint",
+    "stale_checkpoint": "stale checkpoint",
+    "sync_error": "sync error",
+}
+
+
+def _index_health_reasons(index_health: dict | None) -> list[str]:
+    if not isinstance(index_health, dict):
+        return []
+    reasons = index_health.get("reasons")
+    if not isinstance(reasons, list):
+        return []
+    return [str(reason) for reason in reasons if reason]
+
+
+def _index_health_label(index_health: dict | None) -> str | None:
+    if not isinstance(index_health, dict):
+        return None
+    reasons = _index_health_reasons(index_health)
+    if index_health.get("healthy") is True and not reasons:
+        return "Index: healthy"
+    if not reasons:
+        return "Index: unhealthy"
+    reason_labels = [
+        _INDEX_HEALTH_REASON_LABELS.get(reason, reason.replace("_", " ")) for reason in reasons
+    ]
+    return f"Index: {', '.join(reason_labels)}"
+
+
+def _index_health_style(index_health: dict | None) -> str:
+    reasons = _index_health_reasons(index_health)
+    if "sync_error" in reasons:
+        return "red"
+    if isinstance(index_health, dict) and index_health.get("healthy") is False:
+        return "yellow"
+    return "green"
+
+
+def _index_health_markup(index_health: dict | None) -> str | None:
+    label = _index_health_label(index_health)
+    if label is None:
+        return None
+    return f"[{_index_health_style(index_health)}]{label}[/]"
+
+
+def _index_health_is_unhealthy(index_health: dict | None) -> bool:
+    return isinstance(index_health, dict) and index_health.get("healthy") is False
+
+
+def _index_health_signature(index_health: dict | None) -> tuple | None:
+    if not isinstance(index_health, dict):
+        return None
+    return (
+        index_health.get("healthy"),
+        index_health.get("stale"),
+        tuple(_index_health_reasons(index_health)),
+    )
+
+
 @dataclass(frozen=True)
 class AuxiliaryDataSnapshot:
     events: list[dict]
@@ -72,6 +133,7 @@ class AuxiliaryDataSnapshot:
     now_threads: list[dict]
     actionable_threads: list[dict]
     waiting_threads: list[dict]
+    index_health: dict | None
     errors: list[str]
 
 
@@ -86,6 +148,7 @@ class RefreshDataSnapshot:
     now_threads: list[dict]
     actionable_threads: list[dict]
     waiting_threads: list[dict]
+    index_health: dict | None
     status: str | None
 
 
@@ -1224,6 +1287,7 @@ class InboxApp(App):
         self.now_threads: list[dict] = []
         self.actionable_threads: list[dict] = []
         self.waiting_threads: list[dict] = []
+        self.index_health: dict | None = None
         self.events: list[dict] = []
         self.notes_data: list[dict] = []
         self.reminders_data: list[dict] = []
@@ -1574,6 +1638,20 @@ class InboxApp(App):
     def _update_sidebar_status(self, status: str) -> None:
         self.query_one("#status", Static).update(self._sidebar_status_override or status)
 
+    def _render_index_health_notice(self, lv: ListView) -> None:
+        if not _index_health_is_unhealthy(self.index_health):
+            return
+        label = _index_health_label(self.index_health)
+        if label is None:
+            return
+        lv.append(
+            ListItem(Static(Text(f"  {label}", style=_index_health_style(self.index_health))))
+        )
+
+    def _index_status_suffix(self) -> str:
+        health_markup = _index_health_markup(self.index_health)
+        return f"  {health_markup}" if health_markup else ""
+
     def _render_sidebar(self) -> None:
         lv = self.query_one("#contact-list", ListView)
         lv.clear()
@@ -1700,25 +1778,31 @@ class InboxApp(App):
             return
 
         if self._active_filter == "all":
+            self._render_index_health_notice(lv)
             for thread in self.now_threads:
                 lv.append(IndexedThreadItem(thread))
             status = f"[green]{len(self.now_threads)} indexed threads[/]"
+            status += self._index_status_suffix()
             status += "  [dim]Now view · summaries first[/]"
             self._update_sidebar_status(status)
             return
 
         if self._active_filter == "actionable":
+            self._render_index_health_notice(lv)
             for thread in self.actionable_threads:
                 lv.append(IndexedThreadItem(thread))
             status = f"[green]{len(self.actionable_threads)} actionable threads[/]"
+            status += self._index_status_suffix()
             status += "  [dim]reply / review / track[/]"
             self._update_sidebar_status(status)
             return
 
         if self._active_filter == "waiting":
+            self._render_index_health_notice(lv)
             for thread in self.waiting_threads:
                 lv.append(IndexedThreadItem(thread))
             status = f"[green]{len(self.waiting_threads)} waiting-on threads[/]"
+            status += self._index_status_suffix()
             status += "  [dim]open loops being tracked[/]"
             self._update_sidebar_status(status)
             return
@@ -2173,6 +2257,7 @@ class InboxApp(App):
                     snapshot.now_threads,
                     snapshot.actionable_threads,
                     snapshot.waiting_threads,
+                    snapshot.index_health,
                     status_override,
                 )
                 return
@@ -2180,6 +2265,7 @@ class InboxApp(App):
             self.now_threads = snapshot.now_threads
             self.actionable_threads = snapshot.actionable_threads
             self.waiting_threads = snapshot.waiting_threads
+            self.index_health = snapshot.index_health
             self.call_from_thread(self.query_one("#status", Static).update, status_override)
             return
 
@@ -2199,6 +2285,7 @@ class InboxApp(App):
                 snapshot.now_threads,
                 snapshot.actionable_threads,
                 snapshot.waiting_threads,
+                snapshot.index_health,
                 status_override,
             )
             return
@@ -2207,6 +2294,7 @@ class InboxApp(App):
         self.now_threads = snapshot.now_threads
         self.actionable_threads = snapshot.actionable_threads
         self.waiting_threads = snapshot.waiting_threads
+        self.index_health = snapshot.index_health
         if self._poll_had_error:
             self._poll_had_error = False
             self.call_from_thread(self._render_sidebar)
@@ -2225,6 +2313,7 @@ class InboxApp(App):
             snapshot.now_threads,
             snapshot.actionable_threads,
             snapshot.waiting_threads,
+            snapshot.index_health,
             snapshot.status,
         )
 
@@ -2239,6 +2328,7 @@ class InboxApp(App):
         now_threads: list[dict] | None = None,
         actionable_threads: list[dict] | None = None,
         waiting_threads: list[dict] | None = None,
+        index_health: dict | None = None,
         status_override: str | None = None,
     ) -> None:
         self._sidebar_status_override = status_override
@@ -2272,6 +2362,8 @@ class InboxApp(App):
             self.actionable_threads = actionable_threads
         if waiting_threads is not None:
             self.waiting_threads = waiting_threads
+        if index_health is not None:
+            self.index_health = index_health
         self._update_bell_indicator()
         self._render_sidebar()
         if status_override:
@@ -2303,6 +2395,7 @@ class InboxApp(App):
         now_threads = self.now_threads
         actionable_threads = self.actionable_threads
         waiting_threads = self.waiting_threads
+        index_health = self.index_health
         errors: list[str] = []
 
         try:
@@ -2331,6 +2424,13 @@ class InboxApp(App):
             errors.append(_format_request_error("GitHub refresh", exc))
 
         try:
+            result = self.client.index_health()
+            if isinstance(result, dict):
+                index_health = result
+        except Exception as exc:
+            errors.append(_format_request_error("Index health refresh", exc))
+
+        try:
             result = self.client.index_view("recent", limit=20)
             now_threads = result.get("threads", []) if isinstance(result, dict) else []
         except Exception as exc:
@@ -2357,6 +2457,7 @@ class InboxApp(App):
             now_threads=now_threads,
             actionable_threads=actionable_threads,
             waiting_threads=waiting_threads,
+            index_health=index_health,
             errors=errors,
         )
 
@@ -2383,6 +2484,7 @@ class InboxApp(App):
             now_threads=auxiliary.now_threads,
             actionable_threads=auxiliary.actionable_threads,
             waiting_threads=auxiliary.waiting_threads,
+            index_health=auxiliary.index_health,
             status=self._merge_status_errors(errors),
         )
 
@@ -2402,6 +2504,7 @@ class InboxApp(App):
                 now_threads=self.now_threads,
                 actionable_threads=self.actionable_threads,
                 waiting_threads=self.waiting_threads,
+                index_health=self.index_health,
                 status=self._merge_status_errors([_format_request_error("Auto-refresh", exc)]),
                 changed=False,
             )
@@ -2423,10 +2526,13 @@ class InboxApp(App):
             new_action_ids = [t.get("thread_id") for t in auxiliary.actionable_threads]
             old_wait_ids = [t.get("thread_id") for t in self.waiting_threads]
             new_wait_ids = [t.get("thread_id") for t in auxiliary.waiting_threads]
+            old_health = _index_health_signature(self.index_health)
+            new_health = _index_health_signature(auxiliary.index_health)
             changed = (
                 old_now_ids != new_now_ids
                 or old_action_ids != new_action_ids
                 or old_wait_ids != new_wait_ids
+                or old_health != new_health
             )
         if not changed:
             return PollDataSnapshot(
@@ -2439,6 +2545,7 @@ class InboxApp(App):
                 now_threads=auxiliary.now_threads,
                 actionable_threads=auxiliary.actionable_threads,
                 waiting_threads=auxiliary.waiting_threads,
+                index_health=auxiliary.index_health,
                 status=self._merge_status_errors(auxiliary.errors),
                 changed=False,
             )
@@ -2453,6 +2560,7 @@ class InboxApp(App):
             now_threads=auxiliary.now_threads,
             actionable_threads=auxiliary.actionable_threads,
             waiting_threads=auxiliary.waiting_threads,
+            index_health=auxiliary.index_health,
             status=self._merge_status_errors(auxiliary.errors),
             changed=True,
         )

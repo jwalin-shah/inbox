@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 from textual.widgets import Input, ListView, Static
 
 import inbox
@@ -40,6 +41,30 @@ def _make_app(client: MagicMock | None = None) -> HarnessInboxApp:
 
 def _status_text(app: InboxApp) -> str:
     return str(app.query_one("#status", Static).content)
+
+
+def _sidebar_text(app: InboxApp) -> str:
+    lv = app.query_one("#contact-list", ListView)
+    return "\n".join(str(widget.content) for widget in lv.query(Static))
+
+
+def _make_index_health(
+    *,
+    healthy: bool = True,
+    reasons: list[str] | None = None,
+    stale: bool = False,
+) -> dict:
+    return {
+        "db_path": ".inbox_index.sqlite3",
+        "healthy": healthy,
+        "stale": stale,
+        "checked_at": "2026-05-10T00:00:00+00:00",
+        "stale_after_seconds": 1800,
+        "newest_success_at": None,
+        "newest_success_age_seconds": None,
+        "reasons": reasons or [],
+        "sync_states": [],
+    }
 
 
 def test_poll_interval_reads_env_override(monkeypatch) -> None:
@@ -2019,6 +2044,120 @@ def test_collect_auxiliary_data_fetches_github() -> None:
 
     assert len(snapshot.github_data) == 1
     assert snapshot.errors == []
+
+
+def test_collect_auxiliary_data_fetches_index_health_and_indexed_views() -> None:
+    client = MagicMock()
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
+    client.index_health.return_value = _make_index_health()
+    client.index_view.side_effect = [
+        {"threads": [{"thread_id": "now"}]},
+        {"threads": [{"thread_id": "actionable"}]},
+        {"threads": [{"thread_id": "waiting"}]},
+    ]
+
+    app = _make_app(client)
+    snapshot = app._collect_auxiliary_data()
+
+    client.index_health.assert_called_once_with()
+    assert client.index_view.call_count == 3
+    assert snapshot.index_health == _make_index_health()
+    assert [thread["thread_id"] for thread in snapshot.now_threads] == ["now"]
+    assert [thread["thread_id"] for thread in snapshot.actionable_threads] == ["actionable"]
+    assert [thread["thread_id"] for thread in snapshot.waiting_threads] == ["waiting"]
+    assert snapshot.errors == []
+
+
+def test_collect_poll_data_marks_changed_when_index_health_changes() -> None:
+    client = MagicMock()
+    client.conversations.return_value = []
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
+    client.index_health.return_value = _make_index_health(
+        healthy=False,
+        stale=True,
+        reasons=["stale_checkpoint"],
+    )
+    client.index_view.side_effect = [{"threads": []}, {"threads": []}, {"threads": []}]
+
+    app = _make_app(client)
+    app.conversations = []
+    app.index_health = _make_index_health()
+
+    snapshot = app._collect_poll_data()
+
+    assert snapshot.changed is True
+    assert snapshot.index_health == _make_index_health(
+        healthy=False,
+        stale=True,
+        reasons=["stale_checkpoint"],
+    )
+    assert snapshot.status is None
+
+
+@pytest.mark.parametrize(
+    ("active_filter", "threads_attr", "health", "expected", "notice_expected"),
+    [
+        ("all", "now_threads", _make_index_health(), "Index: healthy", False),
+        (
+            "all",
+            "now_threads",
+            _make_index_health(healthy=False, stale=True, reasons=["no_sync_state"]),
+            "Index: no sync state",
+            True,
+        ),
+        (
+            "all",
+            "now_threads",
+            _make_index_health(healthy=False, stale=True, reasons=["missing_checkpoint"]),
+            "Index: missing checkpoint",
+            True,
+        ),
+        (
+            "actionable",
+            "actionable_threads",
+            _make_index_health(healthy=False, stale=True, reasons=["stale_checkpoint"]),
+            "Index: stale checkpoint",
+            True,
+        ),
+        (
+            "waiting",
+            "waiting_threads",
+            _make_index_health(healthy=False, reasons=["sync_error"]),
+            "Index: sync error",
+            True,
+        ),
+    ],
+)
+def test_indexed_tabs_show_index_health_state(
+    active_filter: str,
+    threads_attr: str,
+    health: dict,
+    expected: str,
+    notice_expected: bool,
+) -> None:
+    async def runner() -> None:
+        app = _make_app(MagicMock())
+        app.index_health = health
+        setattr(app, threads_attr, [])
+
+        async with app.run_test() as pilot:
+            app._active_filter = active_filter
+            app._render_sidebar()
+            await pilot.pause()
+
+            assert expected in _status_text(app)
+            if notice_expected:
+                assert expected in _sidebar_text(app)
+
+    asyncio.run(runner())
 
 
 def test_collect_auxiliary_data_github_failure_preserves_old() -> None:
