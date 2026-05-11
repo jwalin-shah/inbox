@@ -26,5 +26,6 @@ Base: origin/main @ 42a32a2
 
 ## Evidence
 
-- Pending PR URL.
-- Pending commit SHA.
+- PR: https://github.com/jwalin-shah/inbox/pull/48
+- Implementation commit: `70c626980e57b83af1843a928f421a86c73eebd1`
+- No blockers.
