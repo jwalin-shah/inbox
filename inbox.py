@@ -63,6 +63,20 @@ def _format_request_error(action: str, exc: Exception) -> str:
     return f"{action} failed: {exc}"
 
 
+def _format_index_health_warning(health: Any) -> str:
+    if not isinstance(health, dict):
+        return ""
+    if health.get("healthy") is True and not health.get("stale"):
+        return ""
+    reasons = [str(reason) for reason in health.get("reasons", []) if reason]
+    reason_text = ", ".join(reasons) if reasons else "unknown"
+    if "no_sync_state" in reasons:
+        return f"Index has no sync state: {reason_text}"
+    if health.get("stale"):
+        return f"Index stale: {reason_text}"
+    return f"Index unhealthy: {reason_text}"
+
+
 def _now_item_key(item: dict) -> str:
     if item.get("now_id"):
         return str(item["now_id"])
@@ -2488,28 +2502,45 @@ class InboxApp(App):
         except Exception as exc:
             errors.append(_format_request_error("GitHub refresh", exc))
 
+        used_now_brief = False
         try:
-            result = self.client.needs_action()
-            now_threads = _normalize_needs_action(result) if isinstance(result, dict) else []
+            result = self.client.inbox_now(limit=20)
+            if isinstance(result, dict):
+                now_threads = result.get("now_items", []) or []
+                actionable_threads = result.get("actionable_threads", []) or []
+                waiting_threads = result.get("waiting_threads", []) or []
+                warning = _format_index_health_warning(result.get("index_health"))
+                if warning:
+                    errors.append(warning)
+                used_now_brief = True
+        except AttributeError:
+            pass
         except Exception as exc:
             errors.append(_format_request_error("Now refresh", exc))
+
+        if not used_now_brief:
             try:
-                result = self.client.index_view("now", limit=20)
-                now_threads = result.get("threads", []) if isinstance(result, dict) else []
-            except Exception:
-                pass
+                result = self.client.needs_action()
+                now_threads = _normalize_needs_action(result) if isinstance(result, dict) else []
+            except Exception as exc:
+                errors.append(_format_request_error("Now refresh", exc))
+                try:
+                    result = self.client.index_view("now", limit=20)
+                    now_threads = result.get("threads", []) if isinstance(result, dict) else []
+                except Exception:
+                    pass
 
-        try:
-            result = self.client.index_view("actionable", limit=20)
-            actionable_threads = result.get("threads", []) if isinstance(result, dict) else []
-        except Exception as exc:
-            errors.append(_format_request_error("Indexed actionable refresh", exc))
+            try:
+                result = self.client.index_view("actionable", limit=20)
+                actionable_threads = result.get("threads", []) if isinstance(result, dict) else []
+            except Exception as exc:
+                errors.append(_format_request_error("Indexed actionable refresh", exc))
 
-        try:
-            result = self.client.index_view("waiting-on", limit=20)
-            waiting_threads = result.get("threads", []) if isinstance(result, dict) else []
-        except Exception as exc:
-            errors.append(_format_request_error("Indexed waiting refresh", exc))
+            try:
+                result = self.client.index_view("waiting-on", limit=20)
+                waiting_threads = result.get("threads", []) if isinstance(result, dict) else []
+            except Exception as exc:
+                errors.append(_format_request_error("Indexed waiting refresh", exc))
 
         return AuxiliaryDataSnapshot(
             events=events,

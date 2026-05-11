@@ -143,6 +143,16 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def inbox_now(self, *, workflow: str = "", account: str = "", limit: int = 20) -> dict:
+        params: dict[str, str | int] = {"limit": limit}
+        if workflow:
+            params["workflow"] = workflow
+        if account:
+            params["account"] = account
+        r = self._client.get("/inbox/now", params=params)
+        r.raise_for_status()
+        return r.json()
+
     # ── Messages ─────────────────────────────────────────────────────────
 
     def messages(
