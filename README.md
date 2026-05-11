@@ -40,6 +40,9 @@ cd inbox
 uv run python inbox.py          # Starts server + TUI automatically
 ```
 
+**macOS runtime dependencies:**
+MLX and PyObjC packages are guarded with `sys_platform == 'darwin'` markers so Linux CI can install and test the repo without mac-only wheels. On macOS, the default install includes them; use `uv sync --extra mac` when you want to make the full macOS runtime set explicit.
+
 **Server-only (for agent access):**
 ```bash
 uv run python inbox_server.py   # Runs on localhost:9849
@@ -152,9 +155,11 @@ ambient_daemon.py    — Background audio capture + ASR + extraction
 ## Development
 
 ```bash
-uv run ruff check --fix .   # Lint
-uv run pyright              # Type check
-uv run pytest               # Tests (stubs ML/macOS deps)
+scripts/validate_agent_safe.sh
+uv sync --frozen --all-groups && scripts/validate_agent_safe.sh
+INBOX_TEST_MODE=1 uv run pytest tests/test_inbox_test_mode.py tests/test_services.py -k "test_mode_blocks" -q --no-cov
+uv run ruff check --fix .
+uv run pyright
 ```
 
 ## Design Decisions
