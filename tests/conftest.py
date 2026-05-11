@@ -21,6 +21,13 @@ def _stub_module(name: str):
         sys.modules[name] = MagicMock()
 
 
+@pytest.fixture(autouse=True)
+def _allow_unauthenticated_server_for_existing_tests(monkeypatch):
+    """Existing endpoint tests use TestClient without auth unless they opt out."""
+    monkeypatch.setenv("INBOX_SERVER_TOKEN", "")
+    monkeypatch.setenv("INBOX_SERVER_ALLOW_UNAUTHENTICATED", "1")
+
+
 # These are hardware/ML deps that may not be present in CI
 for mod in [
     "mlx_lm",

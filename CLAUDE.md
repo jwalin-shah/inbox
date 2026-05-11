@@ -113,7 +113,11 @@ oci_retry.sh                   — retry utility for OCI operations
 - Requires: labels to exist, server running, `gmail.settings.basic` scope (re-auth: Ctrl+Shift+A in TUI)
 
 ## Server authentication
-Optional token-based auth via `INBOX_SERVER_TOKEN` environment variable. If set, all requests must include `Authorization: Bearer <token>` header.
+`/health` is unauthenticated for local supervision. Every other endpoint requires
+`INBOX_SERVER_TOKEN` by default and must include `Authorization: Bearer <token>`
+or `X-API-Key: <token>`. For isolated dev/test work only, set
+`INBOX_SERVER_ALLOW_UNAUTHENTICATED=1` to bypass token auth on non-health
+endpoints.
 
 ## API endpoints (localhost:9849)
 ```
