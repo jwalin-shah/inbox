@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       INBOX_TEST_MODE: "1"
-      INBOX_TEST_DATA_DIR: ${{ runner.temp }}/inbox-test-data
-      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+      INBOX_TEST_DATA_DIR: /tmp/inbox-test-data
+      UV_CACHE_DIR: /tmp/uv-cache
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
