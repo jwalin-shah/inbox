@@ -35,10 +35,14 @@ Base: origin/main @ 42a32a2
 - Pass: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_inbox_app.py::test_status_bar_clears_unreachable_message_after_recovery -q` (`1 passed`)
 - Pass: `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q` (`886 passed`)
 - Non-gating observation: full `UV_CACHE_DIR=/tmp/uv-cache INBOX_TEST_MODE=1 uv run pyright` still fails with repo-wide pre-existing/dynamic typing diagnostics; it is not the acceptance gate for this slice.
+- Use the live GitHub PR head plus the Linear MAX-90 evidence comments for the
+  current state if this workpad receives later metadata-only commits.
 
 ## Evidence
 
 - PR: https://github.com/jwalin-shah/inbox/pull/48
 - Implementation commit: `70c626980e57b83af1843a928f421a86c73eebd1`
 - Privacy/account-isolation review commit: `4ce53b14662358d9cbbe3d2a20a29bcdf6ad7450`
+- Full-suite recovery-status alignment commit before this metadata refresh:
+  `61a604bfcfe984dc6802038a23d78051d0d95af0`
 - No blockers.
