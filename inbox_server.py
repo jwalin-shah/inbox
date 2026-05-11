@@ -3766,7 +3766,9 @@ async def get_needs_action(workflow: str = "", account: str = ""):
                 task_out = _task_to_out(t, acct)
                 if workflow and task_out.workflow != workflow:
                     continue
-                if (t.due and t.due <= today) or (t.status == "needs_action" and not t.due):
+                if (t.due and t.due <= today) or (
+                    t.status in {"needsAction", "needs_action"} and not t.due
+                ):
                     tasks.append(task_out)
                 if len(tasks) >= 10:
                     break
@@ -3776,9 +3778,14 @@ async def get_needs_action(workflow: str = "", account: str = ""):
     events: list[CalendarEventOut] = []
     if state.cal_services:
         try:
+            cal_services = (
+                {account: state.cal_services[account]}
+                if account and account in state.cal_services
+                else ({} if account else state.cal_services)
+            )
             evts = await asyncio.to_thread(
                 calendar_events,
-                state.cal_services,
+                cal_services,
                 start_date=today,
                 end_date=three_days_out,
             )
