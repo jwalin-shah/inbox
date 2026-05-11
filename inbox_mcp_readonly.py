@@ -44,7 +44,7 @@ health = make_health_handler(
 @mcp.tool()
 async def read_daily_note(date: str = "") -> dict:
     """Read today's daily note or a specific YYYY-MM-DD note if present."""
-    path = ambient_notes._today_file() if not date else ambient_notes.VAULT_DIR / f"{date}.md"
+    path = ambient_notes._today_file() if not date else ambient_notes.DAILY_DIR / f"{date}.md"
     if not path.exists():
         return {"ok": False, "path": str(path), "content": ""}
     return {"ok": True, "path": str(path), "content": path.read_text(encoding="utf-8")}
