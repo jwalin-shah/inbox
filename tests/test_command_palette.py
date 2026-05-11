@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from command_palette import (
+    COMMAND_REGISTRY,
+    COMMAND_SPECS,
+    CommandSpec,
     build_commands,
     filter_commands,
     fuzzy_score,
+    llm_is_available,
     make_command,
+    nlp_classify,
     resolve_nlp,
 )
 from inbox import CommandPaletteScreen, InboxApp
@@ -166,6 +171,53 @@ def test_build_commands_action_calls_app_method():
     app.action_filter_all.assert_called_once()
 
 
+def test_command_registry_contains_typed_specs():
+    assert COMMAND_SPECS is COMMAND_REGISTRY
+    assert all(isinstance(spec, CommandSpec) for spec in COMMAND_REGISTRY)
+
+
+def test_build_commands_uses_registry_ids_unchanged():
+    app = _mock_app()
+    commands = build_commands(app)
+    assert [cmd["id"] for cmd in commands] == [spec.id for spec in COMMAND_REGISTRY]
+
+
+def test_command_registry_action_names_exist_on_inbox_app():
+    missing = [
+        f"{spec.id}:{spec.action_name}"
+        for spec in COMMAND_REGISTRY
+        if not hasattr(InboxApp, spec.action_name)
+    ]
+    assert missing == []
+
+
+def test_llm_is_available_uses_injected_provider():
+    assert llm_is_available(lambda: True) is True
+
+
+def test_nlp_classify_uses_injected_dependencies():
+    cmds = _sample_commands()
+
+    def generate_json(prompt: str, schema: type) -> dict:
+        assert "switch_calendar" in prompt
+        assert schema is not None
+        return {"command_id": "switch_calendar", "confidence": 0.9, "args": {}, "reason": ""}
+
+    result = nlp_classify(
+        "open calendar",
+        cmds,
+        llm_available=lambda: True,
+        json_generator=generate_json,
+    )
+
+    assert result == {
+        "command_id": "switch_calendar",
+        "confidence": 0.9,
+        "args": {},
+        "reason": "",
+    }
+
+
 # ── resolve_nlp ───────────────────────────────────────────────────────────────
 
 
@@ -176,30 +228,39 @@ def _sample_commands() -> list[dict]:
 
 def test_resolve_nlp_returns_none_when_llm_unavailable():
     cmds = _sample_commands()
-    with patch("command_palette.nlp_classify", return_value=None):
-        matched, msg = resolve_nlp("open calendar", cmds)
+    matched, msg = resolve_nlp("open calendar", cmds, classifier=lambda query, commands: None)
     assert matched is None
     assert "LLM unavailable" in msg
 
 
 def test_resolve_nlp_low_confidence_shows_suggestions():
     cmds = _sample_commands()
-    with patch(
-        "command_palette.nlp_classify",
-        return_value={"command_id": "switch_calendar", "confidence": 0.3, "args": {}, "reason": ""},
-    ):
-        matched, msg = resolve_nlp("open calendar", cmds)
+    matched, msg = resolve_nlp(
+        "open calendar",
+        cmds,
+        classifier=lambda query, commands: {
+            "command_id": "switch_calendar",
+            "confidence": 0.3,
+            "args": {},
+            "reason": "",
+        },
+    )
     assert matched is None
     assert "Low confidence" in msg or "try" in msg.lower()
 
 
 def test_resolve_nlp_high_confidence_returns_command():
     cmds = _sample_commands()
-    with patch(
-        "command_palette.nlp_classify",
-        return_value={"command_id": "switch_calendar", "confidence": 0.9, "args": {}, "reason": ""},
-    ):
-        matched, msg = resolve_nlp("open calendar", cmds)
+    matched, msg = resolve_nlp(
+        "open calendar",
+        cmds,
+        classifier=lambda query, commands: {
+            "command_id": "switch_calendar",
+            "confidence": 0.9,
+            "args": {},
+            "reason": "",
+        },
+    )
     assert matched is not None
     assert matched["id"] == "switch_calendar"
     assert msg == ""
@@ -207,27 +268,32 @@ def test_resolve_nlp_high_confidence_returns_command():
 
 def test_resolve_nlp_null_command_id_returns_none():
     cmds = _sample_commands()
-    with patch(
-        "command_palette.nlp_classify",
-        return_value={"command_id": None, "confidence": 0.0, "args": {}, "reason": "ambiguous"},
-    ):
-        matched, msg = resolve_nlp("do something weird", cmds)
+    matched, msg = resolve_nlp(
+        "do something weird",
+        cmds,
+        classifier=lambda query, commands: {
+            "command_id": None,
+            "confidence": 0.0,
+            "args": {},
+            "reason": "ambiguous",
+        },
+    )
     assert matched is None
     assert "ambiguous" in msg
 
 
 def test_resolve_nlp_unknown_command_id_returns_none():
     cmds = _sample_commands()
-    with patch(
-        "command_palette.nlp_classify",
-        return_value={
+    matched, msg = resolve_nlp(
+        "something",
+        cmds,
+        classifier=lambda query, commands: {
             "command_id": "nonexistent_cmd",
             "confidence": 0.95,
             "args": {},
             "reason": "",
         },
-    ):
-        matched, msg = resolve_nlp("something", cmds)
+    )
     assert matched is None
     assert "Unknown command id" in msg
 

@@ -37,7 +37,15 @@ from textual.widgets import (
     Tabs,
 )
 
-from command_palette import CommandDict, build_commands, filter_commands, resolve_nlp
+from command_palette import (
+    CommandDict,
+    LlmAvailabilityProvider,
+    NlpClassifier,
+    build_commands,
+    filter_commands,
+    llm_is_available,
+    resolve_nlp,
+)
 from inbox_client import InboxClient
 from tui_tabs import TAB_BY_TEXTUAL_ID, TUI_TABS
 
@@ -819,11 +827,17 @@ class CommandPaletteScreen(ModalScreen[CommandDict | None]):
         Binding("escape", "dismiss", "Close"),
     ]
 
-    def __init__(self, commands: list[CommandDict], llm_available: bool = False) -> None:
+    def __init__(
+        self,
+        commands: list[CommandDict],
+        llm_available: bool = False,
+        nlp_classifier: NlpClassifier | None = None,
+    ) -> None:
         super().__init__()
         self._commands = commands
         self._filtered: list[CommandDict] = list(commands)
         self._llm_available = llm_available
+        self._nlp_classifier = nlp_classifier
         self._nlp_hint: str = ""
 
     def compose(self) -> ComposeResult:
@@ -886,7 +900,7 @@ class CommandPaletteScreen(ModalScreen[CommandDict | None]):
             self.dismiss(self._filtered[0])
 
     def _try_nlp(self, query: str) -> None:
-        matched, msg = resolve_nlp(query, self._commands)
+        matched, msg = resolve_nlp(query, self._commands, classifier=self._nlp_classifier)
         if matched is not None:
             self.dismiss(matched)
         else:
@@ -1279,10 +1293,17 @@ class InboxApp(App):
     # Bell indicator: reactive string shown in the header sub-title area
     bell_indicator: reactive[str] = reactive("", recompose=False)
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        llm_available_provider: LlmAvailabilityProvider | None = None,
+        nlp_classifier: NlpClassifier | None = None,
+    ) -> None:
         super().__init__()
         # Use longer timeout for first requests (data loading can be slow)
         self.client = InboxClient(timeout=60)
+        self._llm_available_provider = llm_available_provider
+        self._nlp_classifier = nlp_classifier
         self.conversations: list[dict] = []
         self.now_threads: list[dict] = []
         self.actionable_threads: list[dict] = []
@@ -2037,15 +2058,15 @@ class InboxApp(App):
 
     def action_command_palette(self) -> None:
         """Open the command palette (Ctrl+P)."""
-        try:
-            from services import llm_is_loaded
-
-            llm_avail = llm_is_loaded()
-        except Exception:
-            llm_avail = False
+        llm_avail = llm_is_available(self._llm_available_provider)
         commands = build_commands(self)
         self.push_screen(
-            CommandPaletteScreen(commands, llm_available=llm_avail), self._on_palette_result
+            CommandPaletteScreen(
+                commands,
+                llm_available=llm_avail,
+                nlp_classifier=self._nlp_classifier,
+            ),
+            self._on_palette_result,
         )
 
     def _on_palette_result(self, result: CommandDict | None) -> None:
