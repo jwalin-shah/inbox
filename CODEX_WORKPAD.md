@@ -34,5 +34,5 @@ Base: origin/main @ 42a32a2
 
 - PR: https://github.com/jwalin-shah/inbox/pull/48
 - Implementation commit: `70c626980e57b83af1843a928f421a86c73eebd1`
-- Privacy/account-isolation review commit: pending
+- Privacy/account-isolation review commit: `4ce53b14662358d9cbbe3d2a20a29bcdf6ad7450`
 - No blockers.
