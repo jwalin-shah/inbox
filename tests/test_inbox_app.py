@@ -39,6 +39,20 @@ def _make_app(client: MagicMock | None = None) -> HarnessInboxApp:
     return app
 
 
+def test_tab_activation_before_content_mount_does_not_crash() -> None:
+    app = _make_app()
+
+    class _Tab:
+        id = "tab-notes"
+
+    class _Event:
+        tab = _Tab()
+
+    app.on_tab_activated(_Event())
+
+    assert app._active_filter == "notes"
+
+
 def _status_text(app: InboxApp) -> str:
     return str(app.query_one("#status", Static).content)
 

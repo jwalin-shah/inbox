@@ -20,9 +20,10 @@ from rich.align import Align
 from rich.panel import Panel
 from rich.text import Text
 from textual import on, work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
@@ -1498,6 +1499,16 @@ class InboxApp(App):
 
     # ── Tab switching ────────────────────────────────────────────────────
 
+    def _tab_content_ready(self) -> bool:
+        try:
+            self.query_one("#contact-list", ListView)
+            self.query_one("#messages", MessageView)
+            self.query_one("#detail-view", DetailView)
+            self.query_one("#compose", Input)
+        except (NoMatches, ScreenStackError):
+            return False
+        return True
+
     def _save_tab_state(self, tab_name: str) -> None:
         """Save the current tab's state so it can be restored later."""
         state: dict = {}
@@ -1616,6 +1627,9 @@ class InboxApp(App):
     def on_tab_activated(self, event: Tabs.TabActivated) -> None:
         tab = TAB_BY_TEXTUAL_ID.get(event.tab.id or "")
         new_filter = (tab or {"id": "all"})["id"]
+        if not self._tab_content_ready():
+            self._active_filter = new_filter
+            return
         # Save state of the tab we're leaving
         if self._active_filter != new_filter:
             self._save_tab_state(self._active_filter)
