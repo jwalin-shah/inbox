@@ -634,6 +634,21 @@ class IndexedThreadListOut(BaseModel):
     threads: list[GmailThreadSummaryOut]
 
 
+class InboxNowOut(BaseModel):
+    read_model: str = "inbox_now"
+    read_only: bool = True
+    raw_thread_provider_fetch: bool = False
+    write_actions: list[str] = []
+    index_health: IndexHealthOut
+    reasons: list[str]
+    now_items: list[dict[str, Any]]
+    actionable_threads: list[GmailThreadSummaryOut]
+    waiting_threads: list[GmailThreadSummaryOut]
+    commitments: list[dict[str, Any]]
+    source_refs: list[dict[str, str]]
+    workflow_counts: dict[str, int]
+
+
 class WorkflowFolderRequest(BaseModel):
     workflow: str
     name: str = ""
@@ -2919,6 +2934,189 @@ def _build_index_health(sync_states: list[dict[str, Any]]) -> IndexHealthOut:
     )
 
 
+def _thread_source(thread: GmailThreadSummaryOut) -> str:
+    return str(getattr(thread, "source", "") or "gmail")
+
+
+def _thread_external_id(thread: GmailThreadSummaryOut) -> str:
+    return str(getattr(thread, "latest_external_id", "") or "")
+
+
+def _thread_open_loop(thread: GmailThreadSummaryOut) -> str:
+    open_loop = str(getattr(thread, "open_loop", "") or "")
+    if open_loop:
+        return open_loop
+    return thread.action_items[0] if thread.action_items else ""
+
+
+def _thread_actionability(thread: GmailThreadSummaryOut) -> str:
+    actionability = str(getattr(thread, "actionability", "") or "")
+    if actionability:
+        return actionability
+    if thread.needs_reply:
+        return "reply"
+    return "track" if thread.action_items else ""
+
+
+def _thread_urgency(thread: GmailThreadSummaryOut) -> str:
+    return str(getattr(thread, "urgency", "") or "")
+
+
+def _thread_ref(thread: GmailThreadSummaryOut, reason: str) -> dict[str, str]:
+    return {
+        "kind": "thread",
+        "source": _thread_source(thread),
+        "thread_id": thread.thread_id,
+        "external_id": _thread_external_id(thread),
+        "account": thread.owning_account,
+        "reason": reason,
+    }
+
+
+def _task_ref(task: TaskOut, reason: str) -> dict[str, str]:
+    return {
+        "kind": "task",
+        "source": "google_tasks",
+        "id": task.id,
+        "list_id": task.list_id,
+        "account": task.account,
+        "reason": reason,
+    }
+
+
+def _event_ref(event: CalendarEventOut, reason: str) -> dict[str, str]:
+    return {
+        "kind": "event",
+        "source": "calendar",
+        "id": event.event_id,
+        "calendar_id": event.calendar_id,
+        "account": event.account,
+        "reason": reason,
+    }
+
+
+def _append_source_ref(refs: list[dict[str, str]], ref: dict[str, str]) -> None:
+    if ref not in refs:
+        refs.append(ref)
+
+
+def _thread_reason(thread: GmailThreadSummaryOut) -> str:
+    return (
+        _thread_open_loop(thread)
+        or _thread_actionability(thread)
+        or ("needs_reply" if thread.needs_reply else "")
+        or thread.workflow
+        or "indexed_thread"
+    )
+
+
+def _thread_now_item(thread: GmailThreadSummaryOut, reason: str) -> dict[str, Any]:
+    source = _thread_source(thread)
+    actionability = _thread_actionability(thread)
+    urgency = _thread_urgency(thread)
+    return {
+        "now_kind": "thread",
+        "kind": "thread",
+        "title": thread.subject or "Untitled thread",
+        "source": source,
+        "reason": reason,
+        "ref": _thread_ref(thread, reason),
+        "thread_id": thread.thread_id,
+        "owning_account": thread.owning_account,
+        "latest_external_id": _thread_external_id(thread),
+        "participants": thread.participants,
+        "last_message_at": thread.last_message_at,
+        "summary": thread.summary,
+        "brief": thread.brief,
+        "open_loop": _thread_open_loop(thread),
+        "action_items": thread.action_items,
+        "needs_reply": thread.needs_reply,
+        "workflow": thread.workflow,
+        "actionability": actionability,
+        "urgency": urgency,
+        "now_meta": [
+            source,
+            actionability,
+            urgency,
+            thread.workflow,
+        ],
+    }
+
+
+def _task_now_item(task: TaskOut) -> dict[str, Any]:
+    reason = "overdue_task" if task.due else "needs_action_task"
+    return {
+        "now_kind": "task",
+        "kind": "task",
+        "title": task.title or "Untitled task",
+        "source": "google_tasks",
+        "reason": reason,
+        "ref": _task_ref(task, reason),
+        "id": task.id,
+        "list_id": task.list_id,
+        "list_title": task.list_title,
+        "account": task.account,
+        "status": task.status,
+        "due": task.due,
+        "has_notes": bool(task.notes),
+        "workflow": task.workflow,
+        "summary": "Task has notes" if task.notes else "",
+        "actionability": "task",
+        "now_meta": [
+            "task",
+            task.due or "",
+            task.list_title,
+            task.workflow,
+        ],
+    }
+
+
+def _event_now_item(event: CalendarEventOut) -> dict[str, Any]:
+    reason = "upcoming_event"
+    return {
+        "now_kind": "event",
+        "kind": "event",
+        "title": event.summary or "Untitled event",
+        "source": "calendar",
+        "reason": reason,
+        "ref": _event_ref(event, reason),
+        "event_id": event.event_id,
+        "calendar_id": event.calendar_id,
+        "account": event.account,
+        "start": event.start,
+        "end": event.end,
+        "location": event.location,
+        "has_description": bool(event.description),
+        "workflow": event.workflow,
+        "summary": event.location,
+        "actionability": "prep",
+        "now_meta": [
+            "calendar",
+            event.start,
+            event.location,
+            event.workflow,
+        ],
+    }
+
+
+def _thread_matches_inbox_now_filters(
+    thread: GmailThreadSummaryOut,
+    workflow: str,
+    account: str,
+) -> bool:
+    if workflow and thread.workflow != workflow:
+        return False
+    return not (account and thread.owning_account != account)
+
+
+def _inbox_now_health_reasons(index_health: IndexHealthOut) -> list[str]:
+    if index_health.healthy and not index_health.stale:
+        return []
+    if index_health.reasons:
+        return [f"index:{reason}" for reason in index_health.reasons]
+    return ["index:unhealthy"]
+
+
 def _preflight_google_write(
     kind: str,
     account: str = "",
@@ -3807,6 +4005,8 @@ async def get_needs_action(workflow: str = "", account: str = ""):
             )
             for e in evts:
                 ev = _event_to_out(e)
+                if account and ev.account != account:
+                    continue
                 if workflow and ev.workflow != workflow:
                     continue
                 events.append(ev)
@@ -3823,6 +4023,73 @@ async def get_needs_action(workflow: str = "", account: str = ""):
             counts[wf] = counts.get(wf, 0) + 1
 
     return NeedsActionOut(threads=threads, tasks=tasks, events=events, workflow_counts=counts)
+
+
+@app.get("/inbox/now", response_model=InboxNowOut)
+async def get_inbox_now(workflow: str = "", account: str = "", limit: int = 20):
+    """Compact read-only model for the current inbox state."""
+    index_health = _build_index_health(state.index_store.list_sync_states())
+    needs_action = await get_needs_action(workflow=workflow, account=account)
+
+    source_refs: list[dict[str, str]] = []
+    now_items: list[dict[str, Any]] = []
+    commitments: list[dict[str, Any]] = []
+
+    for thread in needs_action.threads[:limit]:
+        reason = _thread_reason(thread)
+        item = _thread_now_item(thread, reason)
+        now_items.append(item)
+        _append_source_ref(source_refs, item["ref"])
+
+    for task in needs_action.tasks[:limit]:
+        item = _task_now_item(task)
+        now_items.append(item)
+        commitments.append(item)
+        _append_source_ref(source_refs, item["ref"])
+
+    for event in needs_action.events[:limit]:
+        item = _event_now_item(event)
+        now_items.append(item)
+        _append_source_ref(source_refs, item["ref"])
+
+    actionable_threads = [
+        _indexed_thread_to_summary(row) for row in _index_view_rows("actionable", limit)
+    ]
+    actionable_threads = [
+        thread
+        for thread in actionable_threads
+        if _thread_matches_inbox_now_filters(thread, workflow, account)
+    ][:limit]
+    for thread in actionable_threads:
+        _append_source_ref(source_refs, _thread_ref(thread, _thread_reason(thread)))
+
+    waiting_threads = [
+        _indexed_thread_to_summary(row) for row in _index_view_rows("waiting-on", limit)
+    ]
+    waiting_threads = [
+        thread
+        for thread in waiting_threads
+        if _thread_matches_inbox_now_filters(thread, workflow, account)
+    ][:limit]
+    for thread in waiting_threads:
+        reason = _thread_reason(thread)
+        commitments.append(_thread_now_item(thread, reason))
+        _append_source_ref(source_refs, _thread_ref(thread, reason))
+
+    reasons = _inbox_now_health_reasons(index_health)
+    if not now_items and reasons:
+        reasons.append("now_empty_with_unhealthy_index")
+
+    return InboxNowOut(
+        index_health=index_health,
+        reasons=reasons,
+        now_items=now_items[:limit],
+        actionable_threads=actionable_threads,
+        waiting_threads=waiting_threads,
+        commitments=commitments[:limit],
+        source_refs=source_refs,
+        workflow_counts=needs_action.workflow_counts,
+    )
 
 
 @app.get("/index/threads", response_model=IndexStatusOut)
