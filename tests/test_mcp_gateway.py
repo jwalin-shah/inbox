@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib
+import sys
+
 import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -14,6 +17,7 @@ from mcp_gateway import (
     make_health_handler,
     make_memory_store,
 )
+from tools_registry import TOOLS
 
 pytestmark = pytest.mark.safe
 
@@ -31,6 +35,12 @@ def _app():
         routes=[Route("/health", _health), Route("/secure", _ok)],
         middleware=[Middleware(PublicAuthMiddleware)],
     )
+
+
+def _load_readonly_mcp(monkeypatch, tmp_path):
+    monkeypatch.setenv(MEMORY_DB_ENV, str(tmp_path / "memory.sqlite3"))
+    sys.modules.pop("inbox_mcp_readonly", None)
+    return importlib.import_module("inbox_mcp_readonly")
 
 
 def test_public_auth_middleware_allows_health_without_token(monkeypatch):
@@ -103,3 +113,56 @@ async def test_health_handler_handles_backend_error(monkeypatch):
 
     assert '"backend":{"status":"error","detail":"down"}' in payload
     assert '"auth_enabled":false' in payload
+
+
+@pytest.mark.anyio
+async def test_readonly_mcp_reads_today_daily_note(tmp_path, tmp_vault, monkeypatch):
+    readonly_mcp = _load_readonly_mcp(monkeypatch, tmp_path)
+    note_path = readonly_mcp.ambient_notes._today_file()
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text("# Today\nInbox note")
+
+    result = await readonly_mcp.read_daily_note()
+
+    assert result == {
+        "ok": True,
+        "path": str(note_path),
+        "content": "# Today\nInbox note",
+    }
+
+
+@pytest.mark.anyio
+async def test_readonly_mcp_reads_dated_daily_note(tmp_path, tmp_vault, monkeypatch):
+    readonly_mcp = _load_readonly_mcp(monkeypatch, tmp_path)
+    note_path = tmp_vault / "daily" / "2026-05-11.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text("# May 11\nDated note")
+
+    result = await readonly_mcp.read_daily_note("2026-05-11")
+
+    assert result == {
+        "ok": True,
+        "path": str(note_path),
+        "content": "# May 11\nDated note",
+    }
+
+
+@pytest.mark.anyio
+async def test_readonly_mcp_missing_dated_note_returns_empty(tmp_path, tmp_vault, monkeypatch):
+    readonly_mcp = _load_readonly_mcp(monkeypatch, tmp_path)
+    expected_path = tmp_vault / "daily" / "1999-01-01.md"
+
+    result = await readonly_mcp.read_daily_note("1999-01-01")
+
+    assert result == {"ok": False, "path": str(expected_path), "content": ""}
+
+
+@pytest.mark.anyio
+async def test_readonly_mcp_excludes_mutating_registry_tools(tmp_path, monkeypatch):
+    readonly_mcp = _load_readonly_mcp(monkeypatch, tmp_path)
+
+    readonly_tool_names = {tool.name for tool in await readonly_mcp.mcp.list_tools()}
+    mutating_tool_names = {tool.name for tool in TOOLS if not tool.readonly}
+
+    assert {"read_daily_note", "get_memory", "list_open_commitments"} <= readonly_tool_names
+    assert readonly_tool_names.isdisjoint(mutating_tool_names)
