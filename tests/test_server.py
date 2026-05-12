@@ -1896,6 +1896,98 @@ class TestPhase4:
     @patch("inbox_server.gmail_search")
     @patch("inbox_server.tasks_list")
     @patch("inbox_server.calendar_events")
+    def test_needs_action_scopes_calendar_events_to_requested_account(
+        self, mock_events, mock_tasks, mock_gmail, client
+    ):
+        import inbox_server
+
+        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.tasks_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.cal_services = {
+            "me@gmail.com": MagicMock(),
+            "other@gmail.com": MagicMock(),
+        }
+        mock_gmail.return_value = []
+        mock_tasks.return_value = []
+        mock_events.return_value = [
+            CalendarEvent(
+                summary="Standup",
+                start=datetime.now(),
+                end=datetime.now() + timedelta(hours=1),
+                account="me@gmail.com",
+            )
+        ]
+
+        resp = client.get("/inbox/needs-action?account=me@gmail.com")
+
+        assert resp.status_code == 200
+        called_services = mock_events.call_args.args[0]
+        assert list(called_services) == ["me@gmail.com"]
+        assert resp.json()["events"][0]["account"] == "me@gmail.com"
+        mock_gmail.assert_not_called()
+
+    @patch("inbox_server.gmail_search")
+    @patch("inbox_server.tasks_list")
+    @patch("inbox_server.calendar_events")
+    def test_needs_action_unknown_account_does_not_query_all_calendars(
+        self, mock_events, mock_tasks, mock_gmail, client
+    ):
+        import inbox_server
+
+        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.tasks_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.cal_services = {
+            "me@gmail.com": MagicMock(),
+            "other@gmail.com": MagicMock(),
+        }
+        mock_gmail.return_value = []
+        mock_tasks.return_value = []
+        mock_events.return_value = []
+
+        resp = client.get("/inbox/needs-action?account=missing@gmail.com")
+
+        assert resp.status_code == 200
+        assert mock_events.call_args.args[0] == {}
+        assert resp.json()["events"] == []
+        mock_gmail.assert_not_called()
+
+    @patch("inbox_server.gmail_search")
+    @patch("inbox_server.tasks_list")
+    @patch("inbox_server.calendar_events")
+    def test_needs_action_includes_undated_needs_action_tasks(
+        self, mock_events, mock_tasks, mock_gmail, client
+    ):
+        import inbox_server
+
+        inbox_server.state.index_store.list_threads = MagicMock(return_value=[])
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.tasks_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.cal_services = {}
+        mock_gmail.return_value = []
+        mock_tasks.return_value = [
+            GoogleTask(
+                id="task-1",
+                title="Follow up",
+                status="needsAction",
+                list_id="@default",
+                list_title="Tasks",
+            )
+        ]
+        mock_events.return_value = []
+
+        resp = client.get("/inbox/needs-action?account=me@gmail.com")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [task["id"] for task in data["tasks"]] == ["task-1"]
+        assert data["tasks"][0]["status"] == "needsAction"
+        mock_gmail.assert_not_called()
+
+    @patch("inbox_server.gmail_search")
+    @patch("inbox_server.tasks_list")
+    @patch("inbox_server.calendar_events")
     def test_needs_action_workflow_counts(self, mock_events, mock_tasks, mock_gmail, client):
         import inbox_server
 
