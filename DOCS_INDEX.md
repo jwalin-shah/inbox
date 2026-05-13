@@ -34,15 +34,26 @@ Complete guide to inbox documentation. Start here to find what you need.
 ## 🛠️ Development
 
 **Contributing or modifying?**
+- **[AGENTS.md](AGENTS.md)** — Agent-specific validation rules and macOS dependency notes
 - **[CLAUDE.md](CLAUDE.md)** — Architecture, key design decisions, data sources
+- **[docs/TESTING_FOR_AGENTS.md](docs/TESTING_FOR_AGENTS.md)** — Safe local validation loop for agents
 - **[CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md)** — What to build next for first-class connectors and cleaner model-facing data
 - **[SHEETS_CHANGELOG.md](SHEETS_CHANGELOG.md)** — Recent changes, implementation notes
 - Dev commands:
   ```bash
-  uv run ruff check --fix .  # Lint
-  uv run pyright             # Type check
-  uv run pytest              # Tests (736 pass)
+  scripts/validate_agent_safe.sh  # Default agent-safe validation
+  uv run ruff check --fix .       # Human-invoked lint fix; mutates files
+  uv run pyright                  # Broad type check
+  uv run pytest                   # Broad test suite
   ```
+
+## 🤖 Agent Navigation
+
+**Starting an implementation or review?**
+- Read **[AGENTS.md](AGENTS.md)** first for the current validation contract.
+- Use **[docs/TESTING_FOR_AGENTS.md](docs/TESTING_FOR_AGENTS.md)** before running tests; this repo touches personal data and live provider APIs.
+- Use **[CLAUDE.md](CLAUDE.md#worktree-dev-workflow)** for worktree and alternate-port rules so the daily-driver inbox is not disrupted.
+- Use **[CLAUDE.md](CLAUDE.md#architecture)** for the module map before opening large files like `services.py`, `inbox_server.py`, or `inbox.py`.
 
 ## 📋 Documentation Files
 
@@ -50,7 +61,9 @@ Complete guide to inbox documentation. Start here to find what you need.
 | File | Purpose |
 |------|---------|
 | [README.md](README.md) | Project overview, quick start, features, key bindings |
+| [AGENTS.md](AGENTS.md) | Agent validation contract and platform dependency notes |
 | [CLAUDE.md](CLAUDE.md) | Complete project context, architecture, all endpoints, all systems |
+| [docs/TESTING_FOR_AGENTS.md](docs/TESTING_FOR_AGENTS.md) | Safe deterministic validation loop and test marker guidance |
 | [CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md) | Connector strategy, phased implementation, source-of-truth rules |
 | [DOCS_INDEX.md](DOCS_INDEX.md) | This file — documentation navigation |
 
@@ -93,7 +106,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 → [README.md](README.md#quick-start) (installation, setup)
 
 **...debug/contribute**
-→ [CLAUDE.md](CLAUDE.md#key-design-decisions) + [SHEETS_CHANGELOG.md](SHEETS_CHANGELOG.md#design-notes)
+→ [AGENTS.md](AGENTS.md) + [docs/TESTING_FOR_AGENTS.md](docs/TESTING_FOR_AGENTS.md) + [CLAUDE.md](CLAUDE.md#key-design-decisions)
 
 **...see what changed**
 → [SHEETS_CHANGELOG.md](SHEETS_CHANGELOG.md) (Sheets), [README.md](README.md) (overview)
@@ -137,7 +150,7 @@ curl http://localhost:9849/health
 - **TUI tab for Sheets** — coming later (agents can use API now)
 - **Multi-account supported** — specify `account` param for all operations
 - **Re-auth required once** — new `spreadsheets` OAuth scope
-- **All 736 tests pass** — production-ready
+- **Default validation is agent-safe** — use `scripts/validate_agent_safe.sh` before broader or live-data checks
 
 ## 🎓 Learning Paths
 
