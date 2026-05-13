@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 import ambient_notes
 import google_account_resolution as _gacct
+from connector_registry import CONNECTORS, connector_sync_plan, connectors_status, search_connectors
 from gmail_triage import (
     KIND_PREFIX as _KIND_PREFIX,
 )
@@ -213,6 +214,7 @@ PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
 AUTH_BYPASS_ENV = "INBOX_SERVER_ALLOW_UNAUTHENTICATED"
 AUTH_BYPASS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+CONNECTOR_SOURCE_IDS = frozenset(connector.id for connector in CONNECTORS) | {"connectors"}
 GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
     dict[str, object],
@@ -742,6 +744,16 @@ class SearchRequest(BaseModel):
     after: str = ""  # ISO date cutoff (inclusive lower bound)
     has_attachment: bool = False  # Gmail only
     is_unread: bool = False  # Gmail only
+
+
+class ConnectorSearchRequest(BaseModel):
+    q: str
+    sources: list[str] = ["all"]
+    limit: int = 20
+
+
+class ConnectorSyncRequest(BaseModel):
+    execute: bool = False
 
 
 class TriageRequest(BaseModel):
@@ -3237,12 +3249,48 @@ async def preflight_google_write(
 # ── Search ───────────────────────────────────────────────────────────────────
 
 
+@app.get("/connectors/status")
+async def connectors_status_endpoint():
+    return await asyncio.to_thread(connectors_status)
+
+
+@app.post("/connectors/search")
+async def connectors_search_endpoint(req: ConnectorSearchRequest):
+    return await asyncio.to_thread(
+        search_connectors,
+        req.q,
+        sources=req.sources,
+        limit=req.limit,
+    )
+
+
+@app.post("/connectors/{connector_id}/sync")
+async def connectors_sync_endpoint(connector_id: str, req: ConnectorSyncRequest):
+    result = await asyncio.to_thread(connector_sync_plan, connector_id, execute=req.execute)
+    if not result.get("ok"):
+        error = result.get("error")
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if error == "unknown_connector"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=status_code, detail=result)
+    return result
+
+
 @app.post("/search")
 async def search_endpoint(req: SearchRequest):
+    built_in_sources = [source for source in req.sources if source not in CONNECTOR_SOURCE_IDS]
+    connector_sources = [source for source in req.sources if source in CONNECTOR_SOURCE_IDS]
+    if "connectors" in connector_sources:
+        connector_sources = ["all"]
+    if not built_in_sources and not connector_sources:
+        built_in_sources = req.sources
+
     result = await asyncio.to_thread(
         search_all,
         query=req.q,
-        sources=req.sources,
+        sources=built_in_sources,
         limit=req.limit,
         gmail_services=state.gmail_services,
         cal_services=state.cal_services,
@@ -3252,6 +3300,18 @@ async def search_endpoint(req: SearchRequest):
         has_attachment=req.has_attachment,
         is_unread=req.is_unread,
     )
+    if connector_sources:
+        connector_result = await asyncio.to_thread(
+            search_connectors,
+            req.q,
+            sources=connector_sources,
+            limit=req.limit,
+        )
+        merged_results = [*result.get("results", []), *connector_result.get("results", [])]
+        merged_results.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
+        result["results"] = merged_results[: req.limit]
+        result["total"] = len(result["results"])
+        result["connector_errors"] = connector_result.get("errors", [])
     return result
 
 

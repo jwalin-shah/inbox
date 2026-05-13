@@ -99,6 +99,90 @@ class TestHealth:
         assert data["github_configured"] is True
 
 
+class TestConnectorEndpoints:
+    def test_connectors_status_endpoint(self, client):
+        with patch(
+            "inbox_server.connectors_status",
+            return_value={"connectors": [{"id": "whatsapp"}], "summary": {"total": 1}},
+        ):
+            resp = client.get("/connectors/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["connectors"][0]["id"] == "whatsapp"
+
+    def test_connectors_search_endpoint(self, client):
+        with patch(
+            "inbox_server.search_connectors",
+            return_value={
+                "query": "hello",
+                "total": 1,
+                "results": [{"source": "whatsapp", "id": "1"}],
+                "errors": [],
+            },
+        ) as mock_search:
+            resp = client.post(
+                "/connectors/search",
+                json={"q": "hello", "sources": ["whatsapp"], "limit": 3},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 1
+        mock_search.assert_called_once_with("hello", sources=["whatsapp"], limit=3)
+
+    def test_search_endpoint_can_include_explicit_connector_source(self, client):
+        with (
+            patch(
+                "inbox_server.search_all",
+                return_value={"query": "hello", "total": 0, "results": []},
+            ) as mock_builtin,
+            patch(
+                "inbox_server.search_connectors",
+                return_value={
+                    "query": "hello",
+                    "total": 1,
+                    "results": [
+                        {
+                            "source": "whatsapp",
+                            "id": "1",
+                            "timestamp": "2026-05-12T01:00:00",
+                        }
+                    ],
+                    "errors": [],
+                },
+            ) as mock_connectors,
+        ):
+            resp = client.post(
+                "/search",
+                json={"q": "hello", "sources": ["whatsapp"], "limit": 5},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["source"] == "whatsapp"
+        mock_builtin.assert_called_once()
+        assert mock_builtin.call_args.kwargs["sources"] == []
+        mock_connectors.assert_called_once_with("hello", sources=["whatsapp"], limit=5)
+
+    def test_connector_sync_endpoint_is_dry_run_by_default(self, client):
+        with patch(
+            "inbox_server.connector_sync_plan",
+            return_value={"ok": True, "connector": "whatsapp", "dry_run": True},
+        ) as mock_sync:
+            resp = client.post("/connectors/whatsapp/sync", json={})
+
+        assert resp.status_code == 200
+        assert resp.json()["dry_run"] is True
+        mock_sync.assert_called_once_with("whatsapp", execute=False)
+
+    def test_connector_sync_unknown_returns_404(self, client):
+        with patch(
+            "inbox_server.connector_sync_plan",
+            return_value={"ok": False, "connector": "missing", "error": "unknown_connector"},
+        ):
+            resp = client.post("/connectors/missing/sync", json={})
+
+        assert resp.status_code == 404
+
+
 class TestIndexEndpoints:
     def _sync_state_row(
         self,
