@@ -153,7 +153,7 @@ class TestConnectorEndpoints:
         ):
             resp = client.post(
                 "/search",
-                json={"q": "hello", "sources": ["whatsapp"], "limit": 5},
+                json={"q": "hello", "sources": ["connector:whatsapp"], "limit": 5},
             )
 
         assert resp.status_code == 200
@@ -161,6 +161,24 @@ class TestConnectorEndpoints:
         mock_builtin.assert_called_once()
         assert mock_builtin.call_args.kwargs["sources"] == []
         mock_connectors.assert_called_once_with("hello", sources=["whatsapp"], limit=5)
+
+    def test_search_endpoint_preserves_builtin_imessage_source(self, client):
+        with (
+            patch(
+                "inbox_server.search_all",
+                return_value={"query": "hello", "total": 0, "results": []},
+            ) as mock_builtin,
+            patch("inbox_server.search_connectors") as mock_connectors,
+        ):
+            resp = client.post(
+                "/search",
+                json={"q": "hello", "sources": ["imessage"], "limit": 5},
+            )
+
+        assert resp.status_code == 200
+        mock_builtin.assert_called_once()
+        assert mock_builtin.call_args.kwargs["sources"] == ["imessage"]
+        mock_connectors.assert_not_called()
 
     def test_connector_sync_endpoint_is_dry_run_by_default(self, client):
         with patch(

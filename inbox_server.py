@@ -214,7 +214,9 @@ PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
 AUTH_BYPASS_ENV = "INBOX_SERVER_ALLOW_UNAUTHENTICATED"
 AUTH_BYPASS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-CONNECTOR_SOURCE_IDS = frozenset(connector.id for connector in CONNECTORS) | {"connectors"}
+CONNECTOR_SOURCE_PREFIX = "connector:"
+CONNECTOR_ALL_SOURCE = "connectors"
+CONNECTOR_SOURCE_IDS = frozenset(connector.id for connector in CONNECTORS)
 GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
     dict[str, object],
@@ -3280,12 +3282,17 @@ async def connectors_sync_endpoint(connector_id: str, req: ConnectorSyncRequest)
 
 @app.post("/search")
 async def search_endpoint(req: SearchRequest):
-    built_in_sources = [source for source in req.sources if source not in CONNECTOR_SOURCE_IDS]
-    connector_sources = [source for source in req.sources if source in CONNECTOR_SOURCE_IDS]
-    if "connectors" in connector_sources:
-        connector_sources = ["all"]
-    if not built_in_sources and not connector_sources:
-        built_in_sources = req.sources
+    built_in_sources: list[str] = []
+    connector_sources: list[str] = []
+    for source in req.sources:
+        if source == CONNECTOR_ALL_SOURCE:
+            connector_sources = ["all"]
+        elif source.startswith(CONNECTOR_SOURCE_PREFIX):
+            connector_id = source.removeprefix(CONNECTOR_SOURCE_PREFIX)
+            if connector_id in CONNECTOR_SOURCE_IDS:
+                connector_sources.append(connector_id)
+        else:
+            built_in_sources.append(source)
 
     result = await asyncio.to_thread(
         search_all,

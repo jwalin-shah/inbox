@@ -18,14 +18,14 @@ Inbox uses local connector CLIs as adapters, while Inbox remains the product lay
 - `POST /connectors/search` searches connector CLIs directly.
 - `POST /connectors/{connector_id}/sync` returns a dry-run sync plan by default.
 - `POST /search` can opt into connector sources explicitly:
-  - `["whatsapp"]`
-  - `["imessage"]`
-  - `["discord"]`
-  - `["twitter"]`
-  - `["google"]`
+  - `["connector:whatsapp"]`
+  - `["connector:imessage"]`
+  - `["connector:discord"]`
+  - `["connector:twitter"]`
+  - `["connector:google"]`
   - `["connectors"]`
 
-`/search` with `["all"]` keeps the existing built-in Inbox behavior and does not automatically call external connector CLIs.
+`/search` with `["all"]`, `["imessage"]`, or `["gmail"]` keeps the existing built-in Inbox behavior and does not automatically call external connector CLIs.
 
 ## Safety
 
