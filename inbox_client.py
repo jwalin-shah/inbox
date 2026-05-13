@@ -881,6 +881,31 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    # ── External connectors ─────────────────────────────────────────────
+
+    def connectors_status(self) -> dict:
+        r = self._client.get("/connectors/status")
+        r.raise_for_status()
+        return r.json()
+
+    def connectors_search(
+        self,
+        q: str,
+        sources: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict:
+        payload: dict = {"q": q, "limit": limit}
+        if sources is not None:
+            payload["sources"] = sources
+        r = self._client.post("/connectors/search", json=payload)
+        r.raise_for_status()
+        return r.json()
+
+    def connector_sync(self, connector_id: str, *, execute: bool = False) -> dict:
+        r = self._client.post(f"/connectors/{connector_id}/sync", json={"execute": execute})
+        r.raise_for_status()
+        return r.json()
+
     def autocomplete(self, draft: str, **kwargs) -> str | None:  # type: ignore[type-arg]
         r = self._client.post("/autocomplete", json={"draft": draft, **kwargs})
         r.raise_for_status()
