@@ -54,6 +54,22 @@ def test_search_connectors_normalizes_json_results():
     assert result["errors"] == []
 
 
+def test_search_connectors_rejects_malformed_json_output():
+    from connector_registry import search_connectors
+
+    with (
+        patch("connector_registry.shutil.which", return_value="/usr/local/bin/wacli"),
+        patch("connector_registry._run", return_value=(0, "not json", "")),
+    ):
+        result = search_connectors("hello", sources=["whatsapp"], limit=5)
+
+    assert result["total"] == 0
+    assert result["results"] == []
+    assert result["errors"] == [
+        {"source": "whatsapp", "error": "malformed_json", "detail": "not json"}
+    ]
+
+
 def test_partition_search_sources_hides_connector_markers_from_callers():
     from connector_registry import partition_search_sources
 

@@ -244,16 +244,7 @@ def _normalize_search_results(connector_id: str, raw: str) -> list[dict[str, Any
     if parsed is None:
         if not raw:
             return []
-        return [
-            {
-                "source": connector_id,
-                "id": "",
-                "title": connector_id,
-                "snippet": raw[:500],
-                "timestamp": "",
-                "metadata": {"format": "text"},
-            }
-        ]
+        raise ValueError("malformed_json")
 
     if isinstance(parsed, dict):
         for key in ("results", "messages", "items", "data"):
@@ -348,7 +339,17 @@ def search_connectors(
                 }
             )
             continue
-        results.extend(_normalize_search_results(connector.id, stdout))
+        try:
+            results.extend(_normalize_search_results(connector.id, stdout))
+        except ValueError as exc:
+            errors.append(
+                {
+                    "source": connector.id,
+                    "error": str(exc),
+                    "detail": stdout[:1000],
+                }
+            )
+            continue
 
     results.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
     results = results[:limit]

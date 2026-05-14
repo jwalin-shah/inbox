@@ -1,3 +1,42 @@
+# WP-182 Workpad
+
+## Issue
+
+- Work pack: `WP-182`
+- Title: Harden one error boundary
+- Repo: `/Users/jwalinshah/projects/inbox`
+- Worktree: `/Users/jwalinshah/projects/.workpack-runs/WP-182`
+- Branch: `codex/WP-182-error-boundary-hardening`
+
+## Plan
+
+- Harden the connector search adapter boundary.
+- Reject malformed JSON emitted by connector CLIs that are invoked with `--json`.
+- Preserve valid JSON normalization and empty-output behavior.
+- Cover the malformed-output path with a negative test.
+
+## Validation
+
+```bash
+INBOX_TEST_MODE=1 uv run pytest tests/test_connector_registry.py tests/test_services.py tests/test_message_sync.py -q --no-cov
+```
+
+Result: passed, `91 passed in 5.91s`.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+## Handoff
+
+- PR: https://github.com/jwalin-shah/inbox/pull/59
+- Residual risk: connector search commands using `--json` now reject malformed
+  non-empty output instead of treating it as text.
+
+---
+
 # MAX-250 Workpad
 
 ## Issue
