@@ -22,7 +22,13 @@ from pydantic import BaseModel
 
 import ambient_notes
 import google_account_resolution as _gacct
-from connector_registry import CONNECTORS, connector_sync_plan, connectors_status, search_connectors
+from connector_registry import (
+    connector_sync_plan,
+    connectors_status,
+    merge_connector_search_results,
+    partition_search_sources,
+    search_connectors,
+)
 from gmail_triage import (
     KIND_PREFIX as _KIND_PREFIX,
 )
@@ -214,9 +220,6 @@ PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
 AUTH_BYPASS_ENV = "INBOX_SERVER_ALLOW_UNAUTHENTICATED"
 AUTH_BYPASS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-CONNECTOR_SOURCE_PREFIX = "connector:"
-CONNECTOR_ALL_SOURCE = "connectors"
-CONNECTOR_SOURCE_IDS = frozenset(connector.id for connector in CONNECTORS)
 GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
     dict[str, object],
@@ -3282,18 +3285,7 @@ async def connectors_sync_endpoint(connector_id: str, req: ConnectorSyncRequest)
 
 @app.post("/search")
 async def search_endpoint(req: SearchRequest):
-    built_in_sources: list[str] = []
-    connector_sources: list[str] = []
-    for source in req.sources:
-        if source == CONNECTOR_ALL_SOURCE:
-            connector_sources = ["all"]
-        elif source.startswith(CONNECTOR_SOURCE_PREFIX):
-            connector_id = source.removeprefix(CONNECTOR_SOURCE_PREFIX)
-            if connector_id in CONNECTOR_SOURCE_IDS:
-                connector_sources.append(connector_id)
-        else:
-            built_in_sources.append(source)
-
+    built_in_sources, connector_sources = partition_search_sources(req.sources)
     result = await asyncio.to_thread(
         search_all,
         query=req.q,
@@ -3314,11 +3306,7 @@ async def search_endpoint(req: SearchRequest):
             sources=connector_sources,
             limit=req.limit,
         )
-        merged_results = [*result.get("results", []), *connector_result.get("results", [])]
-        merged_results.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
-        result["results"] = merged_results[: req.limit]
-        result["total"] = len(result["results"])
-        result["connector_errors"] = connector_result.get("errors", [])
+        result = merge_connector_search_results(result, connector_result, limit=req.limit)
     return result
 
 

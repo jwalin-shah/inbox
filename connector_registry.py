@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_TIMEOUT_SECONDS = 12
+CONNECTOR_SOURCE_PREFIX = "connector:"
+CONNECTOR_ALL_SOURCE = "connectors"
 
 
 @dataclass(frozen=True)
@@ -194,6 +196,43 @@ def connectors_status() -> dict[str, Any]:
             ),
         },
     }
+
+
+def connector_source_ids() -> frozenset[str]:
+    return frozenset(connector.id for connector in CONNECTORS)
+
+
+def partition_search_sources(sources: list[str]) -> tuple[list[str], list[str]]:
+    built_in_sources: list[str] = []
+    connector_sources: list[str] = []
+    valid_connector_ids = connector_source_ids()
+
+    for source in sources:
+        if source == CONNECTOR_ALL_SOURCE:
+            connector_sources = ["all"]
+        elif source.startswith(CONNECTOR_SOURCE_PREFIX):
+            connector_id = source.removeprefix(CONNECTOR_SOURCE_PREFIX)
+            if connector_id in valid_connector_ids:
+                connector_sources.append(connector_id)
+        else:
+            built_in_sources.append(source)
+
+    return built_in_sources, connector_sources
+
+
+def merge_connector_search_results(
+    result: dict[str, Any],
+    connector_result: dict[str, Any],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    merged = dict(result)
+    merged_results = [*result.get("results", []), *connector_result.get("results", [])]
+    merged_results.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
+    merged["results"] = merged_results[:limit]
+    merged["total"] = len(merged["results"])
+    merged["connector_errors"] = connector_result.get("errors", [])
+    return merged
 
 
 def _connector_by_id(connector_id: str) -> ConnectorDefinition | None:
