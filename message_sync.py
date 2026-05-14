@@ -510,19 +510,21 @@ def _imessage_item(row: sqlite3.Row) -> IndexedItem:
     )
 
 
-def sync_imessage_bootstrap(store: MessageIndexStore) -> dict[str, int]:
+def _sync_imessage_from_local_store(store: MessageIndexStore, *, full_sync: bool) -> dict[str, int]:
     state = store.get_sync_state("imessage", "local") or {}
-    highest_rowid = int(state.get("checkpoint_value", "0") or 0)
+    checkpoint_rowid = int(state.get("checkpoint_value", "0") or 0)
+    highest_rowid = checkpoint_rowid
     count = 0
     store.mark_sync_started(
         source="imessage",
         account="local",
         checkpoint_type="rowid",
-        checkpoint_value=str(highest_rowid),
+        checkpoint_value=str(checkpoint_rowid),
         metadata={"messages_processed": 0},
     )
     try:
-        rows = _imessage_messages_after(highest_rowid or None)
+        start_after = (checkpoint_rowid or None) if full_sync else checkpoint_rowid
+        rows = _imessage_messages_after(start_after)
         for row in rows:
             highest_rowid = max(highest_rowid, int(row["message_rowid"]))
             body = _clean_imessage_body(row["text"] or "")
@@ -546,55 +548,19 @@ def sync_imessage_bootstrap(store: MessageIndexStore) -> dict[str, int]:
         account="local",
         checkpoint_type="rowid",
         checkpoint_value=str(highest_rowid),
-        full_sync=True,
+        full_sync=full_sync,
         status="idle",
         metadata={"messages_processed": count},
     )
     return {"local": count}
+
+
+def sync_imessage_bootstrap(store: MessageIndexStore) -> dict[str, int]:
+    return _sync_imessage_from_local_store(store, full_sync=True)
 
 
 def sync_imessage_incremental(store: MessageIndexStore) -> dict[str, int]:
-    state = store.get_sync_state("imessage", "local") or {}
-    last_rowid = int(state.get("checkpoint_value", "0") or 0)
-    highest_rowid = last_rowid
-    count = 0
-    store.mark_sync_started(
-        source="imessage",
-        account="local",
-        checkpoint_type="rowid",
-        checkpoint_value=str(last_rowid),
-        metadata={"messages_processed": 0},
-    )
-    try:
-        rows = _imessage_messages_after(last_rowid)
-        for row in rows:
-            highest_rowid = max(highest_rowid, int(row["message_rowid"]))
-            body = _clean_imessage_body(row["text"] or "")
-            if not body:
-                continue
-            store.upsert_item(_imessage_item(row))
-            count += 1
-            if count % IMESSAGE_PROGRESS_EVERY == 0:
-                store.update_sync_progress(
-                    source="imessage",
-                    account="local",
-                    checkpoint_type="rowid",
-                    checkpoint_value=str(highest_rowid),
-                    metadata={"messages_processed": count},
-                )
-    except Exception as exc:
-        store.record_sync_error(source="imessage", account="local", error=str(exc))
-        raise
-    store.set_sync_state(
-        source="imessage",
-        account="local",
-        checkpoint_type="rowid",
-        checkpoint_value=str(highest_rowid),
-        full_sync=False,
-        status="idle",
-        metadata={"messages_processed": count},
-    )
-    return {"local": count}
+    return _sync_imessage_from_local_store(store, full_sync=False)
 
 
 def _openhuman_whatsapp_rows() -> list[sqlite3.Row]:
