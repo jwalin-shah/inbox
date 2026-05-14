@@ -4,18 +4,18 @@ This repo contains personal-data integrations. Default agent runs must be determ
 
 ## Safe Commands
 
-Use the wrapper as the default read-only verification loop:
+Use the wrapper as the default pre-handoff verification loop:
 
 ```bash
 scripts/validate_agent_safe.sh
 ```
 
-The wrapper sets `INBOX_TEST_MODE=1`, points `UV_CACHE_DIR` at a writable temp cache, runs offline-only dependency hydration, and then runs:
+The wrapper sets `INBOX_TEST_MODE=1`, points `UV_CACHE_DIR` at a writable temp cache, checks that the locked offline environment is available, and then runs:
 
 ```bash
 uv run ruff check .
 uv run bandit -c pyproject.toml -r .
-INBOX_TEST_MODE=1 uv run pytest -m safe
+INBOX_TEST_MODE=1 uv run pytest tests/test_connector_registry.py tests/test_services.py tests/test_message_sync.py -q --no-cov
 ```
 
 The retired broad manual loop also included `uv run pyright`; do not use it as the default agent-safe gate unless the task explicitly asks for typechecking.
@@ -50,4 +50,4 @@ Do not run live-write tests unless explicitly instructed by the user.
 
 Do not run tests marked `local_data`, `live_write`, or live provider-specific integration tests unless the user asks for that class of verification by name.
 
-Do not replace `scripts/validate_agent_safe.sh` with broad `uv run pytest`, server startup, TUI startup, OAuth flows, provider clients, fix/format commands, or integrations against local personal data for default agent validation.
+Do not replace `scripts/validate_agent_safe.sh` with broad `uv run pytest`, marker-only subsets, server startup, TUI startup, OAuth flows, provider clients, fix/format commands, or integrations against local personal data for default agent validation.

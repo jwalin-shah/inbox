@@ -338,6 +338,8 @@ uv run pyright                  # broad type check
 uv run pytest                   # broad unit test suite
 ```
 
+Run `scripts/validate_agent_safe.sh` before PR handoff; it is the local gate mirrored by CI.
+
 ## Agent Slash Commands
 
 The inbox skill provides first-class slash commands for agent workflows:

@@ -158,10 +158,15 @@ ambient_daemon.py    — Background audio capture + ASR + extraction
 
 ## Development
 
+Default pre-handoff validation:
+
 ```bash
 scripts/validate_agent_safe.sh
-uv sync --frozen --all-groups && scripts/validate_agent_safe.sh
-INBOX_TEST_MODE=1 uv run pytest tests/test_inbox_test_mode.py tests/test_services.py -k "test_mode_blocks" -q --no-cov
+```
+
+Other local development commands:
+
+```bash
 uv run ruff check --fix .
 uv run pyright
 ```

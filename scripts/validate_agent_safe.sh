@@ -17,6 +17,11 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 UV_RUN=(uv run --offline --frozen --no-progress)
+PYTEST_GATE=(
+  tests/test_connector_registry.py
+  tests/test_services.py
+  tests/test_message_sync.py
+)
 
 is_dependency_blocker() {
   grep -Eiq \
@@ -82,4 +87,4 @@ PY
 
 run_uv "ruff check" ruff check --no-cache .
 run_uv "bandit scan" bandit -c pyproject.toml -r . -x .venv,tests,.factory,.claude -q
-run_uv "safe pytest lane" pytest -m safe -q --no-cov -p no:cacheprovider
+run_uv "authoritative pytest gate" pytest "${PYTEST_GATE[@]}" -q --no-cov -p no:cacheprovider
