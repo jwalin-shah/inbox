@@ -82,4 +82,5 @@ PY
 
 run_uv "ruff check" ruff check --no-cache .
 run_uv "bandit scan" bandit -c pyproject.toml -r . -x .venv,tests,.factory,.claude -q
+run_uv "message sync CLI smoke" python message_sync.py --smoke
 run_uv "safe pytest lane" pytest -m safe -q --no-cov -p no:cacheprovider
