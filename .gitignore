@@ -34,13 +34,21 @@ htmlcov/
 # Server logs
 *.log
 
+# Local runtime output
+.inbox_index.sqlite3*
+.inbox_scheduler.sqlite3*
+.inbox_memory.sqlite3*
+.inbox_runtime/
+.factory/runtime/
+.factory/outputs/
+.factory/runs/
+.factory/missions/
+
 # llm-tldr cache
 .tldr/
 
 # Claude Code & local MCP memory
 .claude/
-.inbox_memory.sqlite3
-.inbox_scheduler.sqlite3
 
 # Batch auto-generated state (keep inputs, ignore outputs)
 batch/triage-output.tsv
@@ -55,4 +63,3 @@ batch/.batch-state.lock
 
 # Hook-generated temp files
 CLAUDE.md.new
-.inbox_index.sqlite3
