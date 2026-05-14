@@ -496,6 +496,103 @@ def test_sync_imessage_bootstrap_advances_checkpoint_for_skipped_rows(tmp_path, 
     assert state["checkpoint_value"] == "2"
 
 
+def _create_openhuman_whatsapp_db(db_path):
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE wa_chats (
+            account_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            is_group INTEGER NOT NULL DEFAULT 0,
+            last_message_ts INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, chat_id)
+        );
+        CREATE TABLE wa_messages (
+            account_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
+            sender_jid TEXT,
+            from_me INTEGER NOT NULL DEFAULT 0,
+            body TEXT NOT NULL DEFAULT '',
+            timestamp INTEGER NOT NULL DEFAULT 0,
+            message_type TEXT,
+            source TEXT NOT NULL DEFAULT '',
+            ingested_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, chat_id, message_id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO wa_chats
+        (account_id, chat_id, display_name, is_group, last_message_ts, message_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("acct-1", "chat-1@c.us", "Alice", 0, 1_700_000_100, 2, 1_700_000_100),
+    )
+    conn.executemany(
+        """
+        INSERT INTO wa_messages
+        (account_id, chat_id, message_id, sender, from_me, body, timestamp, message_type, source, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "acct-1",
+                "chat-1@c.us",
+                "m1",
+                "Alice",
+                0,
+                "first",
+                1_700_000_000,
+                "chat",
+                "cdp-indexeddb",
+                1,
+            ),
+            (
+                "acct-1",
+                "chat-1@c.us",
+                "m2",
+                "me",
+                1,
+                "second",
+                1_700_000_100,
+                "chat",
+                "cdp-indexeddb",
+                1,
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_sync_whatsapp_bootstrap_indexes_openhuman_store(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    db_path = tmp_path / "openhuman" / "workspace" / "whatsapp_data" / "whatsapp_data.db"
+    _create_openhuman_whatsapp_db(db_path)
+    monkeypatch.setattr(message_sync, "_openhuman_whatsapp_db_path", lambda: db_path)
+
+    stats = message_sync.sync_whatsapp_bootstrap(store)
+    rebuilt = store.rebuild_threads(source="whatsapp", account="acct-1")
+
+    assert stats == {"acct-1": 2}
+    assert rebuilt == 1
+    state = store.get_sync_state("whatsapp", "acct-1")
+    assert state is not None
+    assert state["checkpoint_type"] == "unixTimestamp"
+    assert state["checkpoint_value"] == "1700000100"
+    rows = _thread_rows(store)
+    thread = rows[("whatsapp", "acct-1", "chat-1@c.us")]
+    assert thread["latest_external_id"] == "m2"
+    assert thread["latest_subject"] == "Alice"
+
+
 def test_incremental_rebuilds_only_changed_gmail_account(tmp_path, monkeypatch):
     store = MessageIndexStore(tmp_path / "index.sqlite3")
     store.upsert_item(
@@ -547,12 +644,14 @@ def test_incremental_rebuilds_only_changed_gmail_account(tmp_path, monkeypatch):
 
     monkeypatch.setattr(message_sync, "sync_gmail_incremental", fake_gmail_incremental)
     monkeypatch.setattr(message_sync, "sync_imessage_incremental", lambda _store: {"local": 0})
+    monkeypatch.setattr(message_sync, "sync_whatsapp_incremental", lambda _store: {})
 
     result = message_sync.incremental(store)
 
     assert result == {
         "gmail": {"acct@example.com": 1, "other@example.com": 0},
         "imessage": {"local": 0},
+        "whatsapp": {},
     }
     rows = _thread_rows(store)
     assert len(rows) == 3
@@ -611,12 +710,14 @@ def test_incremental_rebuilds_only_changed_imessage_scope(tmp_path, monkeypatch)
         message_sync, "sync_gmail_incremental", lambda _store: {"acct@example.com": 0}
     )
     monkeypatch.setattr(message_sync, "sync_imessage_incremental", fake_imessage_incremental)
+    monkeypatch.setattr(message_sync, "sync_whatsapp_incremental", lambda _store: {})
 
     result = message_sync.incremental(store)
 
     assert result == {
         "gmail": {"acct@example.com": 0},
         "imessage": {"local": 1},
+        "whatsapp": {},
     }
     rows = _thread_rows(store)
     assert len(rows) == 2

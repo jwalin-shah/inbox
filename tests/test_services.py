@@ -401,6 +401,7 @@ class TestAppleScriptEscaping:
         assert "\n" not in escaped
 
     def test_imessage_group_send_uses_escaped_expressions(self, monkeypatch):
+        monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
         captured: dict[str, str] = {}
 
         def fake_run(args: list[str], **kwargs: Any):
@@ -432,6 +433,7 @@ class TestAppleScriptEscaping:
         assert 'send "Check "quoted"' not in script
 
     def test_note_and_reminder_scripts_use_escaped_expressions(self, monkeypatch):
+        monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
         captured: list[str] = []
 
         def fake_run(args: list[str], **kwargs: Any):
@@ -599,7 +601,8 @@ class TestStructuredLogging:
         assert "limit=30" in log_output
         assert "chat db exploded" in log_output
 
-    def test_gmail_send_logs_exception(self):
+    def test_gmail_send_logs_exception(self, monkeypatch):
+        monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
         contact = services.Contact(
             id="msg-1",
             name="Alice",
@@ -799,12 +802,25 @@ class _FakeRefreshedCredentials:
         self.expired = True
         self.refresh_token = "refresh-token"
         self.scopes = list(services.GOOGLE_SCOPES)
+        self.expiry = datetime(2026, 1, 1, tzinfo=UTC)
 
     def refresh(self, request: Any) -> None:
         self.valid = True
 
     def to_json(self) -> str:
         return '{"token": "updated"}'
+
+
+class _FakeRevokedCredentials:
+    def __init__(self) -> None:
+        self.valid = False
+        self.expired = True
+        self.refresh_token = "refresh-token"
+        self.scopes = list(services.GOOGLE_SCOPES)
+        self.expiry = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def refresh(self, request: Any) -> None:
+        raise services.RefreshError("invalid_grant: Token has been expired or revoked.")
 
 
 class TestTokenFileLocking:
@@ -831,6 +847,32 @@ class TestTokenFileLocking:
         assert creds is fake_creds
         assert writes == [(token_path, '{"token": "updated"}')]
         assert token_path.read_text() == '{"token": "updated"}'
+
+    def test_google_auth_diagnostics_reports_revoked_refresh_token(self, monkeypatch, tmp_path):
+        tokens_dir = tmp_path / "tokens"
+        tokens_dir.mkdir()
+        (tokens_dir / "a@example.com.json").write_text("{}")
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps({"installed": {"project_id": "test-project"}}))
+
+        monkeypatch.setattr(services, "TOKENS_DIR", tokens_dir)
+        monkeypatch.setattr(services, "CREDS_FILE", creds_file)
+        monkeypatch.setattr(
+            services.Credentials,
+            "from_authorized_user_file",
+            lambda path: _FakeRevokedCredentials(),
+        )
+
+        diagnostics = services.google_auth_diagnostics(check_refresh=True)
+
+        assert diagnostics["credentials"]["project_id"] == "test-project"
+        assert diagnostics["counts"]["tokens_present"] == 1
+        assert diagnostics["counts"]["revoked_or_expired"] == 1
+        token = diagnostics["tokens"][0]
+        assert token["email_hint"] == "a@example.com"
+        assert token["refresh_status"] == "failed"
+        assert token["reason"] == "refresh_token_expired_or_revoked"
+        assert "oauth_consent_screen_testing_mode_possible" in diagnostics["likely_causes"]
 
     def test_write_text_with_lock_preserves_valid_json_under_concurrent_writes(self, tmp_path):
         token_path = tmp_path / "acct.json"
@@ -949,3 +991,92 @@ def test_test_mode_blocks_extended_live_writes(monkeypatch):
         services.send_notification("Title", "Body")
     with pytest.raises(LiveWriteBlocked, match="WhatsApp"):
         services.whatsapp_send("Alice", "hello")
+
+
+def _create_openhuman_whatsapp_db(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE wa_chats (
+            account_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            is_group INTEGER NOT NULL DEFAULT 0,
+            last_message_ts INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, chat_id)
+        );
+        CREATE TABLE wa_messages (
+            account_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
+            sender_jid TEXT,
+            from_me INTEGER NOT NULL DEFAULT 0,
+            body TEXT NOT NULL DEFAULT '',
+            timestamp INTEGER NOT NULL DEFAULT 0,
+            message_type TEXT,
+            source TEXT NOT NULL DEFAULT '',
+            ingested_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, chat_id, message_id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO wa_chats
+        (account_id, chat_id, display_name, is_group, last_message_ts, message_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("acct-1", "chat-1@c.us", "Alice", 0, 1_700_000_100, 2, 1_700_000_100),
+    )
+    conn.executemany(
+        """
+        INSERT INTO wa_messages
+        (account_id, chat_id, message_id, sender, from_me, body, timestamp, source, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("acct-1", "chat-1@c.us", "m1", "Alice", 0, "first", 1_700_000_000, "cdp-indexeddb", 1),
+            ("acct-1", "chat-1@c.us", "m2", "me", 1, "second", 1_700_000_100, "cdp-indexeddb", 1),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_whatsapp_contacts_prefer_openhuman_store(monkeypatch, tmp_path):
+    db_path = tmp_path / "workspace" / "whatsapp_data" / "whatsapp_data.db"
+    _create_openhuman_whatsapp_db(db_path)
+    monkeypatch.setenv("INBOX_OPENHUMAN_WHATSAPP_DB", str(db_path))
+    monkeypatch.setattr(
+        services,
+        "_whatsapp_accessibility_tree",
+        lambda: pytest.fail("Accessibility fallback should not run"),
+    )
+
+    contacts = services.whatsapp_contacts()
+
+    assert [c.name for c in contacts] == ["Alice"]
+    assert contacts[0].id == "chat-1@c.us"
+    assert contacts[0].snippet == "second"
+    assert contacts[0].source == "whatsapp"
+
+
+def test_whatsapp_thread_prefers_openhuman_store(monkeypatch, tmp_path):
+    db_path = tmp_path / "workspace" / "whatsapp_data" / "whatsapp_data.db"
+    _create_openhuman_whatsapp_db(db_path)
+    monkeypatch.setenv("INBOX_OPENHUMAN_WHATSAPP_DB", str(db_path))
+    monkeypatch.setattr(
+        services,
+        "whatsapp_check_accessibility",
+        lambda prompt=False: pytest.fail("Accessibility fallback should not run"),
+    )
+
+    messages = services.whatsapp_thread("chat-1@c.us")
+
+    assert [m.body for m in messages] == ["first", "second"]
+    assert messages[0].sender == "Alice"
+    assert messages[1].is_me is True

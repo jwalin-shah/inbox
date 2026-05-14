@@ -494,6 +494,41 @@ class TestAccountsEndpoint:
         assert data["drive"] == ["test@gmail.com"]
         assert data["github"] is True
 
+    def test_accounts_auth_status_returns_google_auth_diagnostics(self, client):
+        c, _ = client
+        diagnostics = {
+            "counts": {"tokens_present": 1, "revoked_or_expired": 1},
+            "tokens": [{"email_hint": "a@example.com"}],
+        }
+        with patch("inbox_server.google_auth_diagnostics", return_value=diagnostics) as mock:
+            resp = c.get("/accounts/auth-status?check_refresh=true")
+        assert resp.status_code == 200
+        assert resp.json() == diagnostics
+        mock.assert_called_once_with(True)
+
+
+class TestGmailFilterAuditEndpoint:
+    def test_filter_audit_returns_read_only_filter_summary(self, client):
+        c, state = client
+        svc = MagicMock()
+        state.gmail_services = {"me@example.com": svc}
+        audit = {
+            "account": "me@example.com",
+            "filters_count": 2,
+            "trash_filters": [{"id": "trash"}],
+            "archive_filters": [{"id": "archive"}],
+            "triage_filters": [{"id": "triage"}],
+        }
+        with patch("inbox_server.gmail_filter_audit", return_value=audit) as mock:
+            resp = c.get("/gmail/filters/audit")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["accounts"] == [audit]
+        assert data["trash_filters_count"] == 1
+        assert data["archive_filters_count"] == 1
+        assert data["triage_filters_count"] == 1
+        mock.assert_called_once_with(svc, "me@example.com")
+
 
 class TestContactsEndpoints:
     def test_search_contacts_returns_list(self, client):

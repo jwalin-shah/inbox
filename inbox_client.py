@@ -202,6 +202,12 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def gmail_filter_audit(self, account: str = "") -> dict:
+        params = {"account": account} if account else {}
+        r = self._client.get("/gmail/filters/audit", params=params)
+        r.raise_for_status()
+        return r.json()
+
     def gmail_attachment(self, msg_id: str, att_id: str) -> dict:
         r = self._client.get(f"/messages/gmail/{msg_id}/attachments/{att_id}")
         r.raise_for_status()
@@ -951,6 +957,14 @@ class InboxClient:
 
     def accounts(self) -> dict:
         r = self._client.get("/accounts")
+        r.raise_for_status()
+        return r.json()
+
+    def accounts_auth_status(self, check_refresh: bool = False) -> dict:
+        r = self._client.get(
+            "/accounts/auth-status",
+            params={"check_refresh": check_refresh},
+        )
         r.raise_for_status()
         return r.json()
 

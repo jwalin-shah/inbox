@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 import contextlib
 
 import httpx
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -153,6 +154,23 @@ def _log_service_failure(function_name: str, **context: object) -> None:
     if context_str:
         message = f"{message} ({context_str})"
     logger.exception(message)
+
+
+def _auth_error_reason(error: BaseException) -> str:
+    message = str(error).lower()
+    if "invalid_grant" in message:
+        return "refresh_token_expired_or_revoked"
+    if "admin_policy_enforced" in message:
+        return "admin_policy_enforced"
+    if "invalid_rapt" in message:
+        return "session_control_reauth_required"
+    if "access_denied" in message:
+        return "access_denied"
+    return "auth_error"
+
+
+def _trim_error(error: BaseException) -> str:
+    return str(error).replace("\n", " ")[:300]
 
 
 def _escape_applescript(text: str) -> str:
@@ -322,9 +340,151 @@ def _load_creds(token_path: Path) -> Credentials | None:
             else:
                 return None
         return creds
+    except RefreshError as e:
+        _log_service_failure(
+            "_load_creds",
+            token_path=str(token_path),
+            reason=_auth_error_reason(e),
+            error=_trim_error(e),
+        )
+        return None
     except Exception:  # logged below
         _log_service_failure("_load_creds", token_path=str(token_path))
         return None
+
+
+def _token_age_days(path: Path) -> float:
+    try:
+        return round((time.time() - path.stat().st_mtime) / 86400, 2)
+    except OSError:
+        return 0.0
+
+
+def _credentials_file_status() -> dict[str, object]:
+    status: dict[str, object] = {
+        "exists": CREDS_FILE.exists(),
+        "path": str(CREDS_FILE),
+        "app_type": "",
+        "project_id": "",
+    }
+    if not CREDS_FILE.exists():
+        return status
+    try:
+        data = json.loads(CREDS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        status["error"] = "unreadable_credentials_json"
+        return status
+    if "installed" in data:
+        status["app_type"] = "installed"
+        status["project_id"] = data.get("installed", {}).get("project_id", "")
+    elif "web" in data:
+        status["app_type"] = "web"
+        status["project_id"] = data.get("web", {}).get("project_id", "")
+    else:
+        status["app_type"] = "unknown"
+    return status
+
+
+def google_auth_diagnostics(check_refresh: bool = False) -> dict[str, object]:
+    """Return redacted Google auth state without reading user data.
+
+    If check_refresh is true, refresh is attempted in memory only so the result can
+    distinguish "expired access token" from "revoked refresh token".
+    """
+    required_scopes = set(GOOGLE_SCOPES)
+    now = datetime.now(UTC)
+    token_entries: list[dict[str, object]] = []
+
+    for token_path in sorted(TOKENS_DIR.glob("*.json")):
+        entry: dict[str, object] = {
+            "email_hint": token_path.stem,
+            "token_path": str(token_path),
+            "token_age_days": _token_age_days(token_path),
+            "has_refresh_token": False,  # nosec B105 - diagnostic field name, not a secret
+            "expiry": "",
+            "expired": None,
+            "valid": False,
+            "scopes_count": 0,
+            "missing_scopes": [],
+            "refresh_status": "not_checked",
+            "reason": "",
+            "error": "",
+        }
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path))
+            scopes = set(creds.scopes or [])
+            missing_scopes = sorted(required_scopes - scopes)
+            expiry = creds.expiry
+            if expiry and expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=UTC)
+            entry.update(
+                {
+                    "has_refresh_token": bool(creds.refresh_token),
+                    "expiry": expiry.isoformat() if expiry else "",
+                    "expired": bool(expiry and expiry <= now),
+                    "valid": bool(creds.valid),
+                    "scopes_count": len(scopes),
+                    "missing_scopes": missing_scopes,
+                }
+            )
+            if missing_scopes:
+                entry["reason"] = "missing_required_scopes"
+            elif not creds.refresh_token:
+                entry["reason"] = "missing_refresh_token"
+
+            if check_refresh and not creds.valid:
+                if creds.expired and creds.refresh_token:
+                    try:
+                        creds.refresh(Request())
+                        entry["refresh_status"] = "ok"
+                        entry["valid"] = bool(creds.valid)
+                        entry["reason"] = ""
+                    except RefreshError as e:
+                        entry["refresh_status"] = "failed"
+                        entry["reason"] = _auth_error_reason(e)
+                        entry["error"] = _trim_error(e)
+                    except Exception as e:  # pragma: no cover - defensive external call guard
+                        entry["refresh_status"] = "failed"
+                        entry["reason"] = "auth_error"
+                        entry["error"] = _trim_error(e)
+                else:
+                    entry["refresh_status"] = "unavailable"
+            elif check_refresh:
+                entry["refresh_status"] = "already_valid"
+        except Exception as e:
+            entry["reason"] = "unreadable_token"
+            entry["error"] = _trim_error(e)
+        token_entries.append(entry)
+
+    counts = {
+        "tokens_present": len(token_entries),
+        "refresh_ok": sum(1 for item in token_entries if item["refresh_status"] == "ok"),
+        "refresh_failed": sum(1 for item in token_entries if item["refresh_status"] == "failed"),
+        "revoked_or_expired": sum(
+            1 for item in token_entries if item["reason"] == "refresh_token_expired_or_revoked"
+        ),
+        "missing_scopes": sum(
+            1 for item in token_entries if item["reason"] == "missing_required_scopes"
+        ),
+    }
+    likely_causes: list[str] = []
+    if counts["revoked_or_expired"]:
+        likely_causes.append("refresh_token_expired_or_revoked")
+        if _credentials_file_status().get("app_type") == "installed":
+            likely_causes.append("oauth_consent_screen_testing_mode_possible")
+    if counts["missing_scopes"]:
+        likely_causes.append("missing_required_scopes")
+    if not token_entries:
+        likely_causes.append("no_token_files")
+
+    return {
+        "credentials": _credentials_file_status(),
+        "tokens_dir": str(TOKENS_DIR),
+        "check_refresh": check_refresh,
+        "counts": counts,
+        "likely_causes": likely_causes,
+        "tokens": token_entries,
+    }
 
 
 def google_auth_all() -> tuple[
@@ -1402,6 +1562,59 @@ def gmail_create_filter(
         return None
 
 
+def gmail_filter_audit(service, account_email: str = "") -> dict[str, object]:
+    """Return read-only Gmail filter routing details with label names resolved."""
+    try:
+        label_rows = service.users().labels().list(userId="me").execute().get("labels", [])
+        label_names = {row.get("id", ""): row.get("name", "") for row in label_rows}
+        filter_rows = (
+            service.users().settings().filters().list(userId="me").execute().get("filter", [])
+        )
+    except Exception:
+        _log_service_failure("gmail_filter_audit", account_email=account_email)
+        return {
+            "account": account_email,
+            "filters_count": 0,
+            "trash_filters": [],
+            "archive_filters": [],
+            "triage_filters": [],
+            "error": "gmail_filter_audit_failed",
+        }
+
+    trash_filters: list[dict[str, object]] = []
+    archive_filters: list[dict[str, object]] = []
+    triage_filters: list[dict[str, object]] = []
+    for row in filter_rows:
+        action = row.get("action", {})
+        criteria = row.get("criteria", {})
+        add_ids = action.get("addLabelIds", []) or []
+        remove_ids = action.get("removeLabelIds", []) or []
+        add_names = [label_names.get(label_id, label_id) for label_id in add_ids]
+        remove_names = [label_names.get(label_id, label_id) for label_id in remove_ids]
+        entry = {
+            "id": row.get("id", ""),
+            "criteria": criteria,
+            "add_label_ids": add_ids,
+            "add_labels": add_names,
+            "remove_label_ids": remove_ids,
+            "remove_labels": remove_names,
+        }
+        if "TRASH" in add_ids:
+            trash_filters.append(entry)
+        if "INBOX" in remove_ids:
+            archive_filters.append(entry)
+        if any(str(name).startswith("Triage/") for name in add_names):
+            triage_filters.append(entry)
+
+    return {
+        "account": account_email,
+        "filters_count": len(filter_rows),
+        "trash_filters": trash_filters,
+        "archive_filters": archive_filters,
+        "triage_filters": triage_filters,
+    }
+
+
 def gmail_contacts_by_label(
     service, account_email: str, label_id: str = "INBOX", limit: int = 20
 ) -> list[Contact]:
@@ -1498,7 +1711,11 @@ def calendar_events(
     for email, svc in cal_services.items():
         try:
             cal_list = svc.calendarList().list().execute()  # type: ignore[attr-defined]
-            for cal_entry in cal_list.get("items", []):
+            cal_entries = cal_list.get("items", [])
+            has_selection_metadata = any("selected" in entry for entry in cal_entries)
+            for cal_entry in cal_entries:
+                if has_selection_metadata and not cal_entry.get("selected", False):
+                    continue
                 cal_id = cal_entry["id"]
                 result = (
                     svc.events()  # type: ignore[attr-defined]
@@ -1557,8 +1774,49 @@ def calendar_events(
             )
             continue
 
+    events = _dedupe_calendar_events(events)
     events.sort(key=lambda e: (not e.all_day, e.start))
     return events
+
+
+def _dedupe_calendar_events(events: list[CalendarEvent]) -> list[CalendarEvent]:
+    """Collapse the same calendar event when shared calendars are visible via multiple accounts."""
+    deduped: dict[tuple[str, str, str, str, str], CalendarEvent] = {}
+    for event in events:
+        key = _calendar_event_dedupe_key(event)
+        existing = deduped.get(key)
+        if existing is None or _calendar_event_preference(event) > _calendar_event_preference(
+            existing
+        ):
+            deduped[key] = event
+    return list(deduped.values())
+
+
+def _calendar_event_dedupe_key(event: CalendarEvent) -> tuple[str, str, str, str, str]:
+    identity = event.event_id or event.recurring_event_id
+    if event.calendar_id and identity:
+        return (
+            event.calendar_id,
+            identity,
+            event.start.isoformat(),
+            event.end.isoformat(),
+            event.summary,
+        )
+    return (
+        event.summary,
+        event.start.isoformat(),
+        event.end.isoformat(),
+        event.location,
+        event.description[:120],
+    )
+
+
+def _calendar_event_preference(event: CalendarEvent) -> int:
+    if event.account and event.calendar_id == event.account:
+        return 2
+    if event.calendar_id == "primary":
+        return 1
+    return 0
 
 
 def _build_event_body(
@@ -2021,6 +2279,133 @@ def parse_quick_event(text: str) -> dict:
 # ── WhatsApp (via macOS Accessibility API) ───────────────────────────────────
 
 
+def _openhuman_whatsapp_db_candidates() -> list[Path]:
+    configured = os.getenv("INBOX_OPENHUMAN_WHATSAPP_DB", "").strip()
+    if configured:
+        return [Path(configured).expanduser()]
+
+    workspaces: list[Path] = []
+    env_workspace = os.getenv("OPENHUMAN_WORKSPACE", "").strip()
+    if env_workspace:
+        workspaces.append(Path(env_workspace).expanduser())
+
+    for root in (Path.home() / ".openhuman", Path.home() / ".openhuman-staging"):
+        users_dir = root / "users"
+        if not users_dir.exists():
+            continue
+        workspaces.extend(path / "workspace" for path in users_dir.iterdir() if path.is_dir())
+
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for workspace in workspaces:
+        db_path = workspace / "whatsapp_data" / "whatsapp_data.db"
+        if db_path not in seen:
+            seen.add(db_path)
+            candidates.append(db_path)
+    candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    return candidates
+
+
+def _openhuman_whatsapp_db_path() -> Path | None:
+    for db_path in _openhuman_whatsapp_db_candidates():
+        if db_path.exists():
+            return db_path
+    return None
+
+
+def _openhuman_whatsapp_dt(ts: int | None) -> datetime:
+    return datetime.fromtimestamp(ts) if ts else datetime.now()
+
+
+def _openhuman_whatsapp_contacts(limit: int = 20) -> list[Contact]:
+    db_path = _openhuman_whatsapp_db_path()
+    if not db_path:
+        return []
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.account_id,
+                    c.chat_id,
+                    c.display_name,
+                    c.is_group,
+                    c.last_message_ts,
+                    COALESCE((
+                        SELECT m.body
+                        FROM wa_messages m
+                        WHERE m.account_id = c.account_id AND m.chat_id = c.chat_id
+                        ORDER BY m.timestamp DESC
+                        LIMIT 1
+                    ), '') AS snippet
+                FROM wa_chats c
+                ORDER BY c.last_message_ts DESC
+                LIMIT ?
+                """,
+                (max(0, limit),),
+            ).fetchall()
+    except Exception:
+        _log_service_failure("_openhuman_whatsapp_contacts", db_path=str(db_path))
+        return []
+
+    return [
+        Contact(
+            id=str(chat_id),
+            name=str(display_name or chat_id),
+            source="whatsapp",
+            snippet=str(snippet or ""),
+            last_ts=_openhuman_whatsapp_dt(int(last_message_ts or 0)),
+            guid=str(chat_id),
+            is_group=bool(is_group),
+            thread_id=str(chat_id),
+            reply_to=str(account_id or ""),
+        )
+        for account_id, chat_id, display_name, is_group, last_message_ts, snippet in rows
+    ]
+
+
+def _openhuman_whatsapp_thread(chat_name: str, limit: int = 50) -> list[Msg]:
+    db_path = _openhuman_whatsapp_db_path()
+    if not db_path:
+        return []
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    m.sender,
+                    m.body,
+                    m.timestamp,
+                    m.from_me,
+                    m.message_id
+                FROM wa_messages m
+                JOIN wa_chats c
+                  ON c.account_id = m.account_id AND c.chat_id = m.chat_id
+                WHERE m.chat_id = ? OR c.display_name = ?
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+                """,
+                (chat_name, chat_name, max(0, limit)),
+            ).fetchall()
+    except Exception:
+        _log_service_failure("_openhuman_whatsapp_thread", db_path=str(db_path))
+        return []
+
+    messages = [
+        Msg(
+            sender=str(sender or ""),
+            body=str(body or ""),
+            ts=_openhuman_whatsapp_dt(int(timestamp or 0)),
+            is_me=bool(from_me),
+            source="whatsapp",
+            message_id=str(message_id or ""),
+        )
+        for sender, body, timestamp, from_me, message_id in rows
+    ]
+    messages.sort(key=lambda m: m.ts)
+    return messages
+
+
 def _whatsapp_pid() -> int | None:
     """Find WhatsApp.app PID via NSRunningApplication.
     Returns None if WhatsApp is not running or Objective-C imports fail.
@@ -2248,9 +2633,14 @@ def _whatsapp_accessibility_tree() -> list[Contact]:
 
 
 def whatsapp_contacts(limit: int = 20) -> list[Contact]:
-    """List WhatsApp conversations via macOS Accessibility API (read-only).
-    WhatsApp app must be running and Accessibility permission must be granted.
+    """List WhatsApp conversations.
+
+    Prefer OpenHuman's local WhatsApp Web store when present; fall back to
+    macOS Accessibility against WhatsApp.app.
     """
+    contacts = _openhuman_whatsapp_contacts(limit)
+    if contacts:
+        return contacts
     contacts = _whatsapp_accessibility_tree()
     return contacts[:limit]
 
@@ -2555,11 +2945,14 @@ def _wa_parse_message(desc: str, chat_name: str) -> tuple[str, str, datetime, bo
 
 
 def whatsapp_thread(chat_name: str, limit: int = 50) -> list[Msg]:
-    """Fetch visible WhatsApp messages for a conversation.
-    Selects the chat in the sidebar, then scrapes AXStaticText rows whose
-    AXDescription matches the WhatsApp message-row format. Only returns
-    currently visible messages (no history scrollback).
+    """Fetch WhatsApp messages for a conversation.
+
+    Prefer OpenHuman's local WhatsApp Web store when present; fall back to
+    visible-message scraping through macOS Accessibility.
     """
+    openhuman_messages = _openhuman_whatsapp_thread(chat_name, limit)
+    if openhuman_messages:
+        return openhuman_messages
     try:
         if not whatsapp_check_accessibility(prompt=False):
             return []

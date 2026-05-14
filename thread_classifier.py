@@ -22,7 +22,7 @@ def classify_thread(*, latest: sqlite3.Row, sender_freq: float = 0.0) -> ThreadC
 
     human_score = _human_score(latest_sender=sender, latest_subject=subject, latest_body=body)
     noise_class = _noise_class(latest_sender=sender, subject=subject, body=body)
-    topic = _topic(subject=subject, body=body)
+    topic = "dev" if noise_class == "dev-notification" else _topic(subject=subject, body=body)
     urgency = _urgency(subject=subject, body=body)
     actionability = _actionability(
         human_score=human_score,
@@ -73,7 +73,16 @@ def _human_score(*, latest_sender: str, latest_subject: str, latest_body: str) -
 def _noise_class(*, latest_sender: str, subject: str, body: str) -> str:
     haystack = f"{subject}\n{body}".lower()
     sender = latest_sender.lower()
-    if "verification code" in haystack or "otp" in haystack:
+    if _is_dev_notification(sender=sender, subject=subject):
+        return "dev-notification"
+    if (
+        "verification code" in haystack
+        or "confirmation code" in haystack
+        or "security code" in haystack
+        or "login code" in haystack
+        or "one-time password" in haystack
+        or "otp" in haystack
+    ):
         return "otp"
     if "unsubscribe" in haystack or "job alert" in haystack:
         return "newsletter"
@@ -92,13 +101,25 @@ def _noise_class(*, latest_sender: str, subject: str, body: str) -> str:
 
 def _topic(*, subject: str, body: str) -> str:
     haystack = f"{subject}\n{body}".lower()
+    if _is_dev_notification(sender="", subject=subject):
+        return "dev"
     if any(token in haystack for token in ("interview", "recruit", "opportunity", "consulting")):
         return "opportunity"
     if any(token in haystack for token in ("appointment", "billing", "quest", "cvs", "health")):
         return "health-admin"
     if any(token in haystack for token in ("apartment", "tour", "lease", "housing")):
         return "housing"
-    if any(token in haystack for token in ("login", "security", "verification")):
+    if any(
+        token in haystack
+        for token in (
+            "login",
+            "security",
+            "verification",
+            "confirmation code",
+            "one-time password",
+            "otp",
+        )
+    ):
         return "security"
     return "general"
 
@@ -117,6 +138,8 @@ def _urgency(*, subject: str, body: str) -> str:
 def _actionability(
     *, human_score: float, noise_class: str, urgency: str, topic: str, sender_freq: float = 0.0
 ) -> str:
+    if noise_class == "dev-notification":
+        return "archive"
     if noise_class in {"otp", "receipt", "survey"}:
         return "ignore"
     if noise_class in {"newsletter", "automated"}:
@@ -148,6 +171,25 @@ def _summary(*, latest: sqlite3.Row, topic: str, actionability: str) -> str:
     if title:
         return f"{sender}: {title} [{topic}/{actionability}]"
     return f"{sender} [{topic}/{actionability}]"
+
+
+def _is_dev_notification(*, sender: str, subject: str) -> bool:
+    sender_lower = sender.lower()
+    subject_lower = subject.lower()
+    if any(
+        bot in sender_lower
+        for bot in (
+            "chatgpt-codex-connector",
+            "linear-code",
+            "google-labs-jules",
+            "coderabbitai",
+            "deepsource-io",
+        )
+    ):
+        return True
+    return "[jwalin-shah/" in subject_lower and (
+        "run failed:" in subject_lower or "pr run failed:" in subject_lower
+    )
 
 
 def _coalesce_str(value: object) -> str:
