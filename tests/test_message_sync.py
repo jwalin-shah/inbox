@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -84,6 +85,7 @@ def _gmail_message(
     *,
     thread_id: str | None = None,
     labels: list[str] | None = None,
+    to_header: str = "acct@example.com",
 ):
     return {
         "id": message_id,
@@ -94,7 +96,7 @@ def _gmail_message(
         "payload": {
             "headers": [
                 {"name": "From", "value": "Sender <sender@example.com>"},
-                {"name": "To", "value": "acct@example.com"},
+                {"name": "To", "value": to_header},
                 {"name": "Subject", "value": f"Subject {message_id}"},
             ],
             "parts": [],
@@ -230,6 +232,38 @@ def test_sync_gmail_bootstrap_records_history_cursor(tmp_path, monkeypatch):
     assert state["metadata"]["cursor_mode"] == "history"
     assert state["metadata"]["history_id"] == "9000"
     assert state["metadata"]["timestamp_checkpoint_ms"] == "300"
+
+
+def test_sync_gmail_bootstrap_parses_quoted_recipient_commas(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    service = _FakeGmailService(
+        list_payloads={
+            "__first__": {
+                "messages": [{"id": "m1"}],
+            },
+        },
+        full_messages={
+            "m1": _gmail_message(
+                "m1",
+                300,
+                to_header='"Doe, Jane" <jane@example.com>, Bob <bob@example.com>',
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    stats = message_sync.sync_gmail_bootstrap(store)
+    assert stats == {"acct@example.com": 1}
+
+    with sqlite3.connect(store.db_path) as conn:
+        recipients_json = conn.execute(
+            "SELECT recipients_json FROM items WHERE external_id = 'm1'"
+        ).fetchone()[0]
+    assert json.loads(recipients_json) == ["jane@example.com", "bob@example.com"]
 
 
 def test_sync_gmail_bootstrap_does_not_double_count_or_rewrite_items_on_resume(

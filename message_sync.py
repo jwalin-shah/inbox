@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import sqlite3
 from datetime import UTC, datetime
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +60,7 @@ def _gmail_recipients(headers: dict[str, str]) -> list[str]:
     to_raw = headers.get("To", "")
     if not to_raw:
         return []
-    return [part.strip() for part in to_raw.split(",") if part.strip()]
+    return [email or name for name, email in getaddresses([to_raw]) if email or name]
 
 
 def _gmail_item(account: str, message: dict[str, Any]) -> IndexedItem:
