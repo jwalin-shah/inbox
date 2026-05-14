@@ -74,7 +74,11 @@ def test_agent_safe_pytest_markers_are_registered(pytestconfig):
 def test_agent_testing_docs_define_safe_commands_and_opt_in_warnings():
     docs = Path("docs/TESTING_FOR_AGENTS.md").read_text()
 
-    assert "INBOX_TEST_MODE=1 uv run pytest -m safe" in docs
+    assert (
+        "INBOX_TEST_MODE=1 uv run pytest tests/test_connector_registry.py "
+        "tests/test_services.py tests/test_message_sync.py -q --no-cov"
+    ) in docs
     assert "uv run ruff check ." in docs
     assert "uv run pyright" in docs
+    assert "do not use it as the default agent-safe gate" in docs
     assert "Do not run live-write tests unless explicitly instructed" in docs
