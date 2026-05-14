@@ -12,6 +12,35 @@ from message_index_store import IndexedItem, MessageIndexStore
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_runtime_output_defaults_are_gitignored():
+    from message_index_store import DEFAULT_INDEX_DB
+
+    ignored_paths = [
+        DEFAULT_INDEX_DB.relative_to(REPO_ROOT),
+        Path(f"{DEFAULT_INDEX_DB.relative_to(REPO_ROOT)}-wal"),
+        Path(f"{DEFAULT_INDEX_DB.relative_to(REPO_ROOT)}-shm"),
+        Path(".inbox_memory.sqlite3-wal"),
+        Path(".inbox_scheduler.sqlite3-shm"),
+        Path(".inbox_runtime/message-sync/run.json"),
+        Path(".factory/runtime/validation/run.json"),
+        Path(".factory/outputs/validation/run.json"),
+        Path(".factory/runs/local-run.json"),
+        Path(".factory/missions/local-run.json"),
+    ]
+    result = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=REPO_ROOT,
+        input="\n".join(str(path) for path in ignored_paths),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.splitlines() == [str(path) for path in ignored_paths]
+
+
 class _FakeRequest:
     def __init__(self, payload):
         self._payload = payload
