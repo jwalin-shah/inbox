@@ -1,10 +1,15 @@
 import json
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 import message_sync
 from message_index_store import IndexedItem, MessageIndexStore
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _FakeRequest:
@@ -140,6 +145,37 @@ def _thread_rows(store: MessageIndexStore) -> dict[tuple[str, str, str], sqlite3
     with store._connect() as conn:
         rows = conn.execute("SELECT * FROM threads").fetchall()
     return {(str(row["source"]), str(row["account"]), str(row["thread_id"])): row for row in rows}
+
+
+def test_message_sync_cli_smoke_is_no_secret_success_path():
+    result = subprocess.run(
+        [sys.executable, "message_sync.py", "--smoke"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "entrypoint": "message_sync.py",
+        "modes": ["bootstrap", "incremental", "rebuild", "summary"],
+        "ok": True,
+    }
+
+
+def test_message_sync_cli_bad_input_fails_clearly():
+    result = subprocess.run(
+        [sys.executable, "message_sync.py", "bogus"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "invalid choice: 'bogus'" in result.stderr
 
 
 def test_sync_gmail_bootstrap_resumes_from_saved_page_token(tmp_path, monkeypatch):

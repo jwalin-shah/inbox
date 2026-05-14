@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sqlite3
+import sys
 from datetime import UTC, datetime
 from email.utils import getaddresses
 from pathlib import Path
@@ -25,6 +26,7 @@ GMAIL_TIMESTAMP_CURSOR = "internalDateMs"
 IMESSAGE_PROGRESS_EVERY = 250
 WHATSAPP_PROGRESS_EVERY = 250
 _ATTACHMENT_TEXT = "(attachment)"
+CLI_MODES = ("bootstrap", "incremental", "rebuild", "summary")
 SyncScope = tuple[str, str]
 
 
@@ -747,14 +749,39 @@ def print_summary(store: MessageIndexStore, limit: int) -> None:
         )
 
 
-def main() -> None:
+def smoke_contract() -> dict[str, object]:
+    return {
+        "ok": True,
+        "entrypoint": "message_sync.py",
+        "modes": list(CLI_MODES),
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Materialize raw inbox sources into a local index."
     )
-    parser.add_argument("mode", choices=["bootstrap", "incremental", "rebuild", "summary"])
+    parser.add_argument("mode", nargs="?", choices=CLI_MODES)
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Verify CLI imports and argument parsing without touching data stores or auth.",
+    )
     parser.add_argument("--db", default="", help="Override index database path.")
     parser.add_argument("--limit", type=int, default=20, help="Summary row limit.")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.smoke:
+        print(_json(smoke_contract()))
+        return 0
+
+    if not args.mode:
+        parser.error("mode is required unless --smoke is provided")
 
     store = MessageIndexStore(Path(args.db).expanduser() if args.db else None)
     if args.mode == "bootstrap":
@@ -765,7 +792,8 @@ def main() -> None:
         print({"threads": rebuild_all_threads(store)})
     else:
         print_summary(store, args.limit)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
