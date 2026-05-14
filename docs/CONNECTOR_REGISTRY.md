@@ -1,6 +1,6 @@
 # Connector Registry
 
-Inbox uses local connector CLIs as adapters, but Inbox remains the product layer.
+Inbox uses local connector CLIs as adapters, while Inbox remains the product layer.
 
 ## Sources
 
@@ -10,7 +10,7 @@ Inbox uses local connector CLIs as adapters, but Inbox remains the product layer
 | WhatsApp | `wacli` | WhatsApp chats/history | `~/.wacli` | Yes, confirm first |
 | iMessage/SMS | `imsg` | Messages.app history | `~/Library/Messages/chat.db` | Yes, confirm first |
 | Discord | `discrawl` | Discord archive/search | `~/Library/Application Support/discrawl/discrawl.db` | No |
-| X/Twitter | `birdclaw` | Local X/Twitter archive/search | `~/.birdclaw` | Yes, confirm first |
+| X/Twitter | `birdclaw` | Local X/Twitter archive | `~/.birdclaw` | Yes, confirm first |
 
 ## API
 
@@ -18,14 +18,14 @@ Inbox uses local connector CLIs as adapters, but Inbox remains the product layer
 - `POST /connectors/search` searches connector CLIs directly.
 - `POST /connectors/{connector_id}/sync` returns a dry-run sync plan by default.
 - `POST /search` can opt into connector sources explicitly:
-  - `["whatsapp"]`
-  - `["imessage"]`
-  - `["discord"]`
-  - `["twitter"]`
-  - `["google"]`
+  - `["connector:whatsapp"]`
+  - `["connector:imessage"]`
+  - `["connector:discord"]`
+  - `["connector:twitter"]`
+  - `["connector:google"]`
   - `["connectors"]`
 
-`/search` with `["all"]` keeps the existing built-in Inbox behavior and does not automatically call external connector CLIs.
+`/search` with `["all"]`, `["imessage"]`, or `["gmail"]` keeps the existing built-in Inbox behavior and does not automatically call external connector CLIs.
 
 ## Safety
 

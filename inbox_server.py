@@ -129,7 +129,6 @@ from services import (
     gmail_contacts_by_label,
     gmail_create_filter,
     gmail_delete,
-    gmail_filter_audit,
     gmail_label_create,
     gmail_labels,
     gmail_mark_read,
@@ -143,7 +142,6 @@ from services import (
     gmail_unstar,
     gmail_unsubscribe,
     google_auth_all,
-    google_auth_diagnostics,
     imsg_contacts,
     imsg_send,
     imsg_thread,
@@ -216,7 +214,9 @@ PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
 AUTH_BYPASS_ENV = "INBOX_SERVER_ALLOW_UNAUTHENTICATED"
 AUTH_BYPASS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-CONNECTOR_SOURCE_IDS = frozenset(connector.id for connector in CONNECTORS) | {"connectors"}
+CONNECTOR_SOURCE_PREFIX = "connector:"
+CONNECTOR_ALL_SOURCE = "connectors"
+CONNECTOR_SOURCE_IDS = frozenset(connector.id for connector in CONNECTORS)
 GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
     dict[str, object],
@@ -1408,16 +1408,13 @@ async def health():
 async def _fetch_conversations(source: str, limit: int, account: str = "") -> list[Contact]:
     """Fetch conversations from all requested sources in parallel.
 
-    iMessage, Gmail, and WhatsApp fetches run concurrently via asyncio.gather().
+    iMessage and Gmail fetches run concurrently via asyncio.gather().
     Multiple Gmail accounts are also fetched concurrently.
     """
     fetch_tasks: list[asyncio.Task[list[Contact]]] = []
 
     if source in ("all", "imessage"):
         fetch_tasks.append(asyncio.create_task(asyncio.to_thread(imsg_contacts, limit=limit)))
-
-    if source in ("all", "whatsapp"):
-        fetch_tasks.append(asyncio.create_task(asyncio.to_thread(whatsapp_contacts, limit=limit)))
 
     if source in ("all", "gmail"):
         targets = (
@@ -1473,8 +1470,6 @@ async def get_messages(source: str, conv_id: str, thread_id: str = "", limit: in
             raise HTTPException(404, "No Gmail service available")
         tid = thread_id or (contact.thread_id if contact else "")
         msgs = await asyncio.to_thread(gmail_thread, svc, conv_id, tid)
-    elif source == "whatsapp":
-        msgs = await asyncio.to_thread(whatsapp_thread, conv_id, limit=limit)
     else:
         raise HTTPException(400, f"Unknown source: {source}")
 
@@ -1822,24 +1817,6 @@ async def create_gmail_filter(req: GmailFilterCreateRequest):
             "Failed to create Gmail filter. Re-auth may be required for gmail.settings.basic scope.",
         )
     return {"ok": True, "account": acct, "filter": result}
-
-
-@app.get("/gmail/filters/audit")
-async def audit_gmail_filters(account: str = ""):
-    targets = (
-        {account: state.gmail_services[account]}
-        if account and account in state.gmail_services
-        else state.gmail_services
-    )
-    audits = [
-        await asyncio.to_thread(gmail_filter_audit, svc, email) for email, svc in targets.items()
-    ]
-    return {
-        "accounts": audits,
-        "trash_filters_count": sum(len(item.get("trash_filters", [])) for item in audits),
-        "archive_filters_count": sum(len(item.get("archive_filters", [])) for item in audits),
-        "triage_filters_count": sum(len(item.get("triage_filters", [])) for item in audits),
-    }
 
 
 # ── Calendar ─────────────────────────────────────────────────────────────────
@@ -3305,12 +3282,17 @@ async def connectors_sync_endpoint(connector_id: str, req: ConnectorSyncRequest)
 
 @app.post("/search")
 async def search_endpoint(req: SearchRequest):
-    built_in_sources = [source for source in req.sources if source not in CONNECTOR_SOURCE_IDS]
-    connector_sources = [source for source in req.sources if source in CONNECTOR_SOURCE_IDS]
-    if "connectors" in connector_sources:
-        connector_sources = ["all"]
-    if not built_in_sources and not connector_sources:
-        built_in_sources = req.sources
+    built_in_sources: list[str] = []
+    connector_sources: list[str] = []
+    for source in req.sources:
+        if source == CONNECTOR_ALL_SOURCE:
+            connector_sources = ["all"]
+        elif source.startswith(CONNECTOR_SOURCE_PREFIX):
+            connector_id = source.removeprefix(CONNECTOR_SOURCE_PREFIX)
+            if connector_id in CONNECTOR_SOURCE_IDS:
+                connector_sources.append(connector_id)
+        else:
+            built_in_sources.append(source)
 
     result = await asyncio.to_thread(
         search_all,
@@ -3622,11 +3604,6 @@ async def list_accounts():
         "sheets": list(state.sheets_services.keys()),
         "github": _github_token() is not None,
     }
-
-
-@app.get("/accounts/auth-status")
-async def account_auth_status(check_refresh: bool = False):
-    return await asyncio.to_thread(google_auth_diagnostics, check_refresh)
 
 
 @app.post("/accounts/add")

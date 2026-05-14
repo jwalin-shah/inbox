@@ -1,7 +1,8 @@
-"""Read-only connector registry for local personal-data CLIs.
+"""Read-only registry for local personal-data connector CLIs.
 
-This module keeps external connector tooling behind a narrow, inspectable
-contract: status, search, and sync planning. It does not perform writes.
+The registry keeps external connector tooling behind a narrow contract: status,
+search, and sync planning. Sync execution is opt-in; sends and writes stay out
+of this module.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,14 +40,9 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         binary="gog",
         category="workspace",
         storage_paths=("~/Library/Application Support/gogcli",),
-        auth_command=(),
         search_command=("gog", "gmail", "search", "{query}", "--max", "{limit}", "--json"),
-        sync_command=(),
         write_capable=True,
-        notes=(
-            "Gmail, Calendar, Drive, Docs, Sheets, Contacts through Google OAuth. "
-            "Status avoids Keychain reads; verify auth explicitly when needed."
-        ),
+        notes="Gmail, Calendar, Drive, Docs, Sheets, and Contacts through Google OAuth.",
     ),
     ConnectorDefinition(
         id="whatsapp",
@@ -67,7 +64,6 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         storage_paths=("~/Library/Messages/chat.db",),
         auth_command=("imsg", "chats", "--limit", "1", "--json"),
         search_command=("imsg", "search", "{query}", "--limit", "{limit}", "--json"),
-        sync_command=(),
         write_capable=True,
         notes="Reads Messages.app history; sending requires Automation permission and confirmation.",
     ),
@@ -80,7 +76,6 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         auth_command=("discrawl", "status", "--json"),
         search_command=("discrawl", "search", "{query}", "--limit", "{limit}", "--json"),
         sync_command=("discrawl", "sync"),
-        write_capable=False,
         notes="Bot-token Discord archive/search. No user-token scraping.",
     ),
     ConnectorDefinition(
@@ -93,13 +88,9 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         search_command=("birdclaw", "search", "{query}", "--limit", "{limit}", "--json"),
         sync_command=("birdclaw", "sync"),
         write_capable=True,
-        notes="Local archive/search; live reads/writes need xurl auth and explicit confirmation.",
+        notes="Local archive/search; live reads/writes need explicit confirmation.",
     ),
 )
-
-
-def _expand(path: str) -> Path:
-    return Path(path).expanduser()
 
 
 def _run(
@@ -125,10 +116,9 @@ def _run(
 def _parse_json(raw: str) -> Any:
     if not raw:
         return None
-    try:
+    with suppress(json.JSONDecodeError):
         return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
+    return None
 
 
 def _format_command(
@@ -140,27 +130,14 @@ def _format_command(
 def _storage_status(paths: tuple[str, ...]) -> list[dict[str, Any]]:
     statuses: list[dict[str, Any]] = []
     for raw_path in paths:
-        path = _expand(raw_path)
-        exists = path.exists()
-        item: dict[str, Any] = {
-            "path": str(path),
-            "exists": exists,
-            "kind": "missing",
-        }
-        if exists:
+        path = Path(raw_path).expanduser()
+        item: dict[str, Any] = {"path": str(path), "exists": path.exists(), "kind": "missing"}
+        if item["exists"]:
             item["kind"] = "dir" if path.is_dir() else "file"
-            with suppress_os_error():
+            with suppress(OSError):
                 item["bytes"] = path.stat().st_size
         statuses.append(item)
     return statuses
-
-
-class suppress_os_error:
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        return isinstance(exc, OSError)
 
 
 def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
