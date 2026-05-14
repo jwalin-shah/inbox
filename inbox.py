@@ -195,7 +195,7 @@ class ConversationItem(ListItem):
     def compose(self) -> ComposeResult:
         d = self.data
         source = d.get("source", "")
-        source_icon = "󰍦" if source == "imessage" else "󰊫"
+        source_icon = {"imessage": "󰍦", "gmail": "󰊫", "whatsapp": "☏"}.get(source, "•")
         t = Text()
 
         # Priority indicator (only when non-normal or explicitly set)
@@ -933,6 +933,7 @@ class CommandPaletteScreen(ModalScreen[CommandDict | None]):
 _SOURCE_ICONS: dict[str, str] = {
     "imessage": "󰍦",
     "gmail": "󰊫",
+    "whatsapp": "☏",
     "notes": "󰎞",
     "reminders": "☐",
     "calendar": "󰃮",

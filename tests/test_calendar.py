@@ -307,7 +307,9 @@ class TestCalendarEventsDateRange:
         from services import calendar_events
 
         mock_svc = MagicMock()
-        mock_svc.calendarList().list().execute.return_value = {"items": [{"id": "primary"}]}
+        mock_svc.calendarList().list().execute.return_value = {
+            "items": [{"id": "primary", "selected": True}]
+        }
         mock_svc.events().list().execute.return_value = {"items": []}
 
         result = calendar_events({"test@example.com": mock_svc}, date=datetime(2026, 4, 10))
@@ -318,7 +320,9 @@ class TestCalendarEventsDateRange:
         from services import calendar_events
 
         mock_svc = MagicMock()
-        mock_svc.calendarList().list().execute.return_value = {"items": [{"id": "primary"}]}
+        mock_svc.calendarList().list().execute.return_value = {
+            "items": [{"id": "primary", "selected": True}]
+        }
         mock_svc.events().list().execute.return_value = {
             "items": [
                 {
@@ -343,7 +347,9 @@ class TestCalendarEventsDateRange:
         from services import calendar_events
 
         mock_svc = MagicMock()
-        mock_svc.calendarList().list().execute.return_value = {"items": [{"id": "primary"}]}
+        mock_svc.calendarList().list().execute.return_value = {
+            "items": [{"id": "primary", "selected": True}]
+        }
         mock_svc.events().list().execute.return_value = {
             "items": [
                 {
@@ -384,7 +390,9 @@ class TestCalendarEventsDateRange:
         from services import calendar_events
 
         mock_svc = MagicMock()
-        mock_svc.calendarList().list().execute.return_value = {"items": [{"id": "primary"}]}
+        mock_svc.calendarList().list().execute.return_value = {
+            "items": [{"id": "primary", "selected": True}]
+        }
         mock_svc.events().list().execute.return_value = {
             "items": [
                 {
@@ -401,3 +409,71 @@ class TestCalendarEventsDateRange:
             date=datetime(2026, 4, 10),
         )
         assert result[0].attendees == []
+
+    def test_shared_calendar_duplicates_are_collapsed(self):
+        """The same shared calendar event should appear once across authenticated accounts."""
+        from services import calendar_events
+
+        def make_service():
+            svc = MagicMock()
+            svc.calendarList().list().execute.return_value = {
+                "items": [{"id": "owner@example.com", "selected": True}]
+            }
+            svc.events().list().execute.return_value = {
+                "items": [
+                    {
+                        "summary": "Shared event",
+                        "start": {"dateTime": "2026-04-10T14:00:00-07:00"},
+                        "end": {"dateTime": "2026-04-10T15:00:00-07:00"},
+                        "id": "event-1",
+                    }
+                ]
+            }
+            return svc
+
+        result = calendar_events(
+            {
+                "viewer@example.com": make_service(),
+                "owner@example.com": make_service(),
+            },
+            date=datetime(2026, 4, 10),
+        )
+
+        assert len(result) == 1
+        assert result[0].summary == "Shared event"
+        assert result[0].account == "owner@example.com"
+
+    def test_unselected_calendars_are_skipped_when_selection_metadata_exists(self):
+        """calendar_events follows visible Google Calendar selections when available."""
+        from services import calendar_events
+
+        mock_svc = MagicMock()
+        mock_svc.calendarList().list().execute.return_value = {
+            "items": [
+                {"id": "visible", "selected": True},
+                {"id": "hidden-noise"},
+            ]
+        }
+
+        def event_list(calendarId, **_kwargs):
+            response = MagicMock()
+            response.execute.return_value = {
+                "items": [
+                    {
+                        "summary": f"{calendarId} event",
+                        "start": {"dateTime": "2026-04-10T14:00:00-07:00"},
+                        "end": {"dateTime": "2026-04-10T15:00:00-07:00"},
+                        "id": calendarId,
+                    }
+                ]
+            }
+            return response
+
+        mock_svc.events().list.side_effect = event_list
+
+        result = calendar_events(
+            {"test@example.com": mock_svc},
+            date=datetime(2026, 4, 10),
+        )
+
+        assert [event.summary for event in result] == ["visible event"]

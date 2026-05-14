@@ -99,6 +99,94 @@ class TestHealth:
         assert data["github_configured"] is True
 
 
+class TestConnectorEndpoints:
+    def test_connectors_status_endpoint(self, client):
+        with patch(
+            "inbox_server.connectors_status",
+            return_value={"connectors": [{"id": "whatsapp"}], "summary": {"total": 1}},
+        ):
+            resp = client.get("/connectors/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["connectors"][0]["id"] == "whatsapp"
+
+    def test_connectors_search_endpoint(self, client):
+        with patch(
+            "inbox_server.search_connectors",
+            return_value={
+                "query": "hello",
+                "total": 1,
+                "results": [{"source": "whatsapp", "id": "1"}],
+                "errors": [],
+            },
+        ) as mock_search:
+            resp = client.post(
+                "/connectors/search",
+                json={"q": "hello", "sources": ["whatsapp"], "limit": 3},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 1
+        mock_search.assert_called_once_with("hello", sources=["whatsapp"], limit=3)
+
+    def test_search_endpoint_can_include_explicit_connector_source(self, client):
+        with (
+            patch(
+                "inbox_server.search_all",
+                return_value={
+                    "query": "hello",
+                    "total": 0,
+                    "results": [],
+                },
+            ) as mock_builtin,
+            patch(
+                "inbox_server.search_connectors",
+                return_value={
+                    "query": "hello",
+                    "total": 1,
+                    "results": [
+                        {
+                            "source": "whatsapp",
+                            "id": "1",
+                            "timestamp": "2026-05-12T01:00:00",
+                        }
+                    ],
+                    "errors": [],
+                },
+            ) as mock_connectors,
+        ):
+            resp = client.post(
+                "/search",
+                json={"q": "hello", "sources": ["whatsapp"], "limit": 5},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["source"] == "whatsapp"
+        mock_builtin.assert_called_once()
+        assert mock_builtin.call_args.kwargs["sources"] == []
+        mock_connectors.assert_called_once_with("hello", sources=["whatsapp"], limit=5)
+
+    def test_connector_sync_endpoint_is_dry_run_by_default(self, client):
+        with patch(
+            "inbox_server.connector_sync_plan",
+            return_value={"ok": True, "connector": "whatsapp", "dry_run": True},
+        ) as mock_sync:
+            resp = client.post("/connectors/whatsapp/sync", json={})
+
+        assert resp.status_code == 200
+        assert resp.json()["dry_run"] is True
+        mock_sync.assert_called_once_with("whatsapp", execute=False)
+
+    def test_connector_sync_unknown_returns_404(self, client):
+        with patch(
+            "inbox_server.connector_sync_plan",
+            return_value={"ok": False, "connector": "missing", "error": "unknown_connector"},
+        ):
+            resp = client.post("/connectors/missing/sync", json={})
+
+        assert resp.status_code == 404
+
+
 class TestIndexEndpoints:
     def _sync_state_row(
         self,
@@ -565,6 +653,24 @@ class TestConversations:
         assert len(data) == 1
         assert data[0]["name"] == "Bob"
 
+    @patch("inbox_server.whatsapp_contacts")
+    def test_list_whatsapp(self, mock_whatsapp, client):
+        mock_whatsapp.return_value = [
+            Contact(
+                id="chat-1@c.us",
+                name="Alice",
+                source="whatsapp",
+                snippet="latest",
+                last_ts=datetime(2025, 1, 3),
+            ),
+        ]
+        resp = client.get("/conversations", params={"source": "whatsapp"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice"
+        assert data[0]["source"] == "whatsapp"
+
     @patch("inbox_server.imsg_contacts")
     def test_list_all_sorts_by_ts(self, mock_imsg, client):
         mock_imsg.return_value = [
@@ -590,6 +696,17 @@ class TestMessages:
         data = resp.json()
         assert len(data) == 1
         assert data[0]["sender"] == "Alice"
+
+    @patch("inbox_server.whatsapp_thread")
+    def test_get_whatsapp_thread(self, mock_thread, populated_client):
+        mock_thread.return_value = [
+            Msg(sender="Alice", body="hi", ts=datetime(2025, 1, 1), is_me=False, source="whatsapp"),
+        ]
+        resp = populated_client.get("/messages/whatsapp/chat-1@c.us")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["source"] == "whatsapp"
 
     def test_unknown_source_400(self, client):
         resp = client.get("/messages/foobar/123")

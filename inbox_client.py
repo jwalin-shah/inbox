@@ -202,6 +202,12 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def gmail_filter_audit(self, account: str = "") -> dict:
+        params = {"account": account} if account else {}
+        r = self._client.get("/gmail/filters/audit", params=params)
+        r.raise_for_status()
+        return r.json()
+
     def gmail_attachment(self, msg_id: str, att_id: str) -> dict:
         r = self._client.get(f"/messages/gmail/{msg_id}/attachments/{att_id}")
         r.raise_for_status()
@@ -881,6 +887,31 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    # ── External connectors ─────────────────────────────────────────────
+
+    def connectors_status(self) -> dict:
+        r = self._client.get("/connectors/status")
+        r.raise_for_status()
+        return r.json()
+
+    def connectors_search(
+        self,
+        q: str,
+        sources: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict:
+        payload: dict = {"q": q, "limit": limit}
+        if sources is not None:
+            payload["sources"] = sources
+        r = self._client.post("/connectors/search", json=payload)
+        r.raise_for_status()
+        return r.json()
+
+    def connector_sync(self, connector_id: str, *, execute: bool = False) -> dict:
+        r = self._client.post(f"/connectors/{connector_id}/sync", json={"execute": execute})
+        r.raise_for_status()
+        return r.json()
+
     def autocomplete(self, draft: str, **kwargs) -> str | None:  # type: ignore[type-arg]
         r = self._client.post("/autocomplete", json={"draft": draft, **kwargs})
         r.raise_for_status()
@@ -926,6 +957,14 @@ class InboxClient:
 
     def accounts(self) -> dict:
         r = self._client.get("/accounts")
+        r.raise_for_status()
+        return r.json()
+
+    def accounts_auth_status(self, check_refresh: bool = False) -> dict:
+        r = self._client.get(
+            "/accounts/auth-status",
+            params={"check_refresh": check_refresh},
+        )
         r.raise_for_status()
         return r.json()
 

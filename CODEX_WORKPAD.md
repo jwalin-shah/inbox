@@ -78,3 +78,103 @@ Result: passed.
 ## Handoff
 
 Pending PR.
+
+## Portfolio Readiness Reconciliation - 2026-05-12
+
+Scope: part of the workspace-wide portfolio readiness goal. Do not reset this
+checkout; it contains active connector/account-routing work plus generated
+architecture artifacts.
+
+Live status at reconciliation:
+
+- Branch: `main`
+- Dirty surface: connector registry, WhatsApp/OpenHuman sync, Google auth
+  diagnostics, Gmail filter audit, account/auth endpoints, tests, scripts,
+  runbooks, `.gitignore`, and `docs/architecture/`
+- Architecture candidates: `docs/architecture/linear-issue-candidates.md`
+  names Personal Data Connector, account routing, and API contract follow-up
+  slices.
+
+Validation run:
+
+```bash
+INBOX_TEST_MODE=1 uv run pytest tests/test_connector_registry.py tests/test_services.py tests/test_message_sync.py -q --no-cov
+```
+
+Result: passed, `84 passed in 1.04s`.
+
+```bash
+uv run ruff check tests/test_services.py tests/test_connector_registry.py tests/test_message_sync.py
+```
+
+Result: passed.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+Reconciliation fix applied:
+
+- `tests/test_services.py` now clears `INBOX_TEST_MODE` only inside mocked
+  AppleScript/Gmail write-path tests. The explicit live-write guard tests still
+  set `INBOX_TEST_MODE=1` and prove the production guard blocks real write
+  surfaces.
+
+Next handoff:
+
+- Preserve current work as a branch/PR or Linear issue before further
+  architecture refactors.
+- First implementation issue should start from Personal Data Connector, but
+  only after deciding whether connector scripts and WhatsApp scanner belong in
+  this repo or a separate personal-data adapter package.
+
+## Gemini Secondary Review - 2026-05-13
+
+Branch created to preserve the dirty state without leaving the work only on
+`main`: `codex/inbox-preservation-split-review`.
+
+Gemini was run in read-only plan mode as a secondary reviewer for the Inbox
+preservation slice. It recommended against turning the whole dirty checkout into
+a single PR because the current diff mixes several separable slices:
+
+- Personal Data Connector registry and connector search/sync endpoints:
+  `connector_registry.py`, `docs/CONNECTOR_REGISTRY.md`, connector endpoint
+  additions in `inbox_server.py`, client helpers in `inbox_client.py`, and
+  `tests/test_connector_registry.py` / connector endpoint tests.
+- WhatsApp/OpenHuman local store integration: WhatsApp source support in
+  `services.py`, `message_sync.py`, `inbox.py`, and related tests/scripts.
+- Google auth and Gmail filter diagnostics: `google_auth_diagnostics`,
+  `/accounts/auth-status`, `/gmail/filters/audit`, and
+  `docs/GOOGLE_AUTH_RUNBOOK.md`.
+- Calendar and classifier quality fixes: calendar selection/dedupe behavior and
+  dev-notification classifier handling.
+- Generated/review artifacts: `.agent-stack-review/` and
+  `docs/architecture/`.
+
+Decision for the next handoff: do not create one broad "everything dirty" PR.
+Use this branch as the preservation checkpoint, then split into reviewable PRs
+with the connector registry first. Generated review artifacts should stay out of
+implementation PRs unless a repo maintainer explicitly wants to publish the
+architecture report.
+
+Validation rerun on `codex/inbox-preservation-split-review`:
+
+```bash
+INBOX_TEST_MODE=1 uv run pytest tests/test_connector_registry.py tests/test_services.py tests/test_message_sync.py -q --no-cov
+```
+
+Result: passed, `84 passed in 1.82s`.
+
+```bash
+uv run ruff check tests/test_services.py tests/test_connector_registry.py tests/test_message_sync.py
+```
+
+Result: passed.
+
+```bash
+git diff --check
+```
+
+Result: passed.

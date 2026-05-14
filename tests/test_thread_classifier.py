@@ -19,3 +19,22 @@ def test_classify_thread_preserves_otp_ignore_behavior():
     classification = classify_thread(latest=latest)
     assert classification.noise_class == "otp"
     assert classification.actionability == "ignore"
+
+
+def test_classify_thread_treats_confirmation_codes_as_otp():
+    latest = _row("Infisical", subject="Infisical confirmation code: 230016")
+    classification = classify_thread(latest=latest)
+    assert classification.noise_class == "otp"
+    assert classification.topic == "security"
+    assert classification.actionability == "ignore"
+
+
+def test_classify_thread_suppresses_dev_notifications():
+    latest = _row(
+        "chatgpt-codex-connector[bot]",
+        subject="Re: [jwalin-shah/physics] MAX-259: Validate rover physics parameters (PR #287)",
+    )
+    classification = classify_thread(latest=latest)
+    assert classification.noise_class == "dev-notification"
+    assert classification.topic == "dev"
+    assert classification.actionability == "archive"

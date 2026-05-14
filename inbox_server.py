@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 import ambient_notes
 import google_account_resolution as _gacct
+from connector_registry import CONNECTORS, connector_sync_plan, connectors_status, search_connectors
 from gmail_triage import (
     KIND_PREFIX as _KIND_PREFIX,
 )
@@ -128,6 +129,7 @@ from services import (
     gmail_contacts_by_label,
     gmail_create_filter,
     gmail_delete,
+    gmail_filter_audit,
     gmail_label_create,
     gmail_labels,
     gmail_mark_read,
@@ -141,6 +143,7 @@ from services import (
     gmail_unstar,
     gmail_unsubscribe,
     google_auth_all,
+    google_auth_diagnostics,
     imsg_contacts,
     imsg_send,
     imsg_thread,
@@ -213,6 +216,7 @@ PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
 AUTH_BYPASS_ENV = "INBOX_SERVER_ALLOW_UNAUTHENTICATED"
 AUTH_BYPASS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+CONNECTOR_SOURCE_IDS = frozenset(connector.id for connector in CONNECTORS) | {"connectors"}
 GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
     dict[str, object],
@@ -742,6 +746,16 @@ class SearchRequest(BaseModel):
     after: str = ""  # ISO date cutoff (inclusive lower bound)
     has_attachment: bool = False  # Gmail only
     is_unread: bool = False  # Gmail only
+
+
+class ConnectorSearchRequest(BaseModel):
+    q: str
+    sources: list[str] = ["all"]
+    limit: int = 20
+
+
+class ConnectorSyncRequest(BaseModel):
+    execute: bool = False
 
 
 class TriageRequest(BaseModel):
@@ -1394,13 +1408,16 @@ async def health():
 async def _fetch_conversations(source: str, limit: int, account: str = "") -> list[Contact]:
     """Fetch conversations from all requested sources in parallel.
 
-    iMessage and Gmail fetches run concurrently via asyncio.gather().
+    iMessage, Gmail, and WhatsApp fetches run concurrently via asyncio.gather().
     Multiple Gmail accounts are also fetched concurrently.
     """
     fetch_tasks: list[asyncio.Task[list[Contact]]] = []
 
     if source in ("all", "imessage"):
         fetch_tasks.append(asyncio.create_task(asyncio.to_thread(imsg_contacts, limit=limit)))
+
+    if source in ("all", "whatsapp"):
+        fetch_tasks.append(asyncio.create_task(asyncio.to_thread(whatsapp_contacts, limit=limit)))
 
     if source in ("all", "gmail"):
         targets = (
@@ -1456,6 +1473,8 @@ async def get_messages(source: str, conv_id: str, thread_id: str = "", limit: in
             raise HTTPException(404, "No Gmail service available")
         tid = thread_id or (contact.thread_id if contact else "")
         msgs = await asyncio.to_thread(gmail_thread, svc, conv_id, tid)
+    elif source == "whatsapp":
+        msgs = await asyncio.to_thread(whatsapp_thread, conv_id, limit=limit)
     else:
         raise HTTPException(400, f"Unknown source: {source}")
 
@@ -1803,6 +1822,24 @@ async def create_gmail_filter(req: GmailFilterCreateRequest):
             "Failed to create Gmail filter. Re-auth may be required for gmail.settings.basic scope.",
         )
     return {"ok": True, "account": acct, "filter": result}
+
+
+@app.get("/gmail/filters/audit")
+async def audit_gmail_filters(account: str = ""):
+    targets = (
+        {account: state.gmail_services[account]}
+        if account and account in state.gmail_services
+        else state.gmail_services
+    )
+    audits = [
+        await asyncio.to_thread(gmail_filter_audit, svc, email) for email, svc in targets.items()
+    ]
+    return {
+        "accounts": audits,
+        "trash_filters_count": sum(len(item.get("trash_filters", [])) for item in audits),
+        "archive_filters_count": sum(len(item.get("archive_filters", [])) for item in audits),
+        "triage_filters_count": sum(len(item.get("triage_filters", [])) for item in audits),
+    }
 
 
 # ── Calendar ─────────────────────────────────────────────────────────────────
@@ -3237,12 +3274,48 @@ async def preflight_google_write(
 # ── Search ───────────────────────────────────────────────────────────────────
 
 
+@app.get("/connectors/status")
+async def connectors_status_endpoint():
+    return await asyncio.to_thread(connectors_status)
+
+
+@app.post("/connectors/search")
+async def connectors_search_endpoint(req: ConnectorSearchRequest):
+    return await asyncio.to_thread(
+        search_connectors,
+        req.q,
+        sources=req.sources,
+        limit=req.limit,
+    )
+
+
+@app.post("/connectors/{connector_id}/sync")
+async def connectors_sync_endpoint(connector_id: str, req: ConnectorSyncRequest):
+    result = await asyncio.to_thread(connector_sync_plan, connector_id, execute=req.execute)
+    if not result.get("ok"):
+        error = result.get("error")
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if error == "unknown_connector"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=status_code, detail=result)
+    return result
+
+
 @app.post("/search")
 async def search_endpoint(req: SearchRequest):
+    built_in_sources = [source for source in req.sources if source not in CONNECTOR_SOURCE_IDS]
+    connector_sources = [source for source in req.sources if source in CONNECTOR_SOURCE_IDS]
+    if "connectors" in connector_sources:
+        connector_sources = ["all"]
+    if not built_in_sources and not connector_sources:
+        built_in_sources = req.sources
+
     result = await asyncio.to_thread(
         search_all,
         query=req.q,
-        sources=req.sources,
+        sources=built_in_sources,
         limit=req.limit,
         gmail_services=state.gmail_services,
         cal_services=state.cal_services,
@@ -3252,6 +3325,18 @@ async def search_endpoint(req: SearchRequest):
         has_attachment=req.has_attachment,
         is_unread=req.is_unread,
     )
+    if connector_sources:
+        connector_result = await asyncio.to_thread(
+            search_connectors,
+            req.q,
+            sources=connector_sources,
+            limit=req.limit,
+        )
+        merged_results = [*result.get("results", []), *connector_result.get("results", [])]
+        merged_results.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
+        result["results"] = merged_results[: req.limit]
+        result["total"] = len(result["results"])
+        result["connector_errors"] = connector_result.get("errors", [])
     return result
 
 
@@ -3537,6 +3622,11 @@ async def list_accounts():
         "sheets": list(state.sheets_services.keys()),
         "github": _github_token() is not None,
     }
+
+
+@app.get("/accounts/auth-status")
+async def account_auth_status(check_refresh: bool = False):
+    return await asyncio.to_thread(google_auth_diagnostics, check_refresh)
 
 
 @app.post("/accounts/add")
