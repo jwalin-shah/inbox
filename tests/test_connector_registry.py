@@ -54,6 +54,41 @@ def test_search_connectors_normalizes_json_results():
     assert result["errors"] == []
 
 
+def test_partition_search_sources_hides_connector_markers_from_callers():
+    from connector_registry import partition_search_sources
+
+    built_in, connector = partition_search_sources(
+        ["gmail", "connector:whatsapp", "connector:missing", "connectors"]
+    )
+
+    assert built_in == ["gmail"]
+    assert connector == ["all"]
+
+
+def test_merge_connector_search_results_sorts_and_caps_results():
+    from connector_registry import merge_connector_search_results
+
+    result = {
+        "query": "hello",
+        "total": 1,
+        "results": [{"source": "gmail", "timestamp": "2026-05-12T00:00:00"}],
+    }
+    connector_result = {
+        "results": [
+            {"source": "whatsapp", "timestamp": "2026-05-12T02:00:00"},
+            {"source": "discord", "timestamp": "2026-05-12T01:00:00"},
+        ],
+        "errors": [{"source": "twitter", "error": "not_installed"}],
+    }
+
+    merged = merge_connector_search_results(result, connector_result, limit=2)
+
+    assert [item["source"] for item in merged["results"]] == ["whatsapp", "discord"]
+    assert merged["total"] == 2
+    assert merged["connector_errors"] == [{"source": "twitter", "error": "not_installed"}]
+    assert result["results"] == [{"source": "gmail", "timestamp": "2026-05-12T00:00:00"}]
+
+
 def test_sync_plan_defaults_to_dry_run():
     from connector_registry import connector_sync_plan
 
