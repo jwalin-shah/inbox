@@ -339,6 +339,42 @@ class TestSearchAll:
         assert result["total"] == 10
         assert len(result["results"]) == 10
 
+    def test_all_source_limit_preserves_source_coverage(self):
+        from services import search_all
+
+        recent_notes = [
+            {
+                "source": "notes",
+                "id": f"note-{i}",
+                "title": f"Note {i}",
+                "snippet": "test",
+                "timestamp": datetime(2026, 4, i + 1).isoformat(),
+                "metadata": {},
+            }
+            for i in range(3)
+        ]
+        older_gmail = {
+            "source": "gmail",
+            "id": "gmail-1",
+            "title": "Gmail",
+            "snippet": "test",
+            "timestamp": "2026-01-01T00:00:00",
+            "metadata": {},
+        }
+
+        with (
+            patch("services._search_imessage", return_value=[]),
+            patch("services._search_gmail", return_value=[older_gmail]),
+            patch("services._search_notes", return_value=recent_notes),
+            patch("services._search_reminders", return_value=[]),
+            patch("services._search_calendar", return_value=[]),
+            patch("services._search_whatsapp", return_value=[]),
+            patch("services._search_linkedin", return_value=[]),
+        ):
+            result = search_all("test", ["all"], limit=2)
+
+        assert [item["source"] for item in result["results"]] == ["notes", "gmail"]
+
     def test_results_sorted_by_timestamp_desc(self):
         from services import search_all
 

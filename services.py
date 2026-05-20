@@ -5979,9 +5979,20 @@ def search_all(
 
     results = [r for r in results if _keep(r)]
 
-    # Rank by timestamp desc (most recent first)
+    # Rank by timestamp desc, while preserving source coverage for all-source searches.
     results.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
-    results = results[:limit]
+    if want_all and limit > 0:
+        selected: list[dict] = []
+        seen_ids: set[int] = set()
+        for source_name in dict.fromkeys(str(r.get("source", "")) for r in results):
+            first = next((r for r in results if r.get("source") == source_name), None)
+            if first is not None:
+                selected.append(first)
+                seen_ids.add(id(first))
+        selected.extend(r for r in results if id(r) not in seen_ids)
+        results = selected[:limit]
+    else:
+        results = results[:limit]
 
     return {"query": query, "total": len(results), "results": results}
 

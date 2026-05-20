@@ -142,6 +142,7 @@ from services import (
     gmail_contacts_by_label,
     gmail_create_filter,
     gmail_delete,
+    gmail_filter_audit,
     gmail_label_create,
     gmail_labels,
     gmail_mark_read,
@@ -1889,7 +1890,15 @@ async def _fetch_conversations(source: str, limit: int, account: str = "") -> li
 async def list_conversations(source: str = "all", limit: int = 50, account: str = ""):
     results = await _fetch_conversations(source, limit, account)
 
-    results.sort(key=lambda c: c.last_ts, reverse=True)
+    def _sort_ts(contact: Contact) -> float:
+        value = contact.last_ts
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(UTC).replace(tzinfo=None)
+            return value.timestamp()
+        return 0.0
+
+    results.sort(key=_sort_ts, reverse=True)
 
     # Update cache
     state.conv_cache.clear()
@@ -4329,6 +4338,26 @@ async def create_gmail_label(name: str, visibility: str = "labelShow", account: 
         return result
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/gmail/filters/audit")
+async def audit_gmail_filters(account: str = ""):
+    """Return read-only Gmail filter routing details for loaded accounts."""
+    if account:
+        acct, svc = _get_gmail_service_for_account(account)
+        audits = [await asyncio.to_thread(gmail_filter_audit, svc, acct)]
+    else:
+        audits = [
+            await asyncio.to_thread(gmail_filter_audit, svc, acct)
+            for acct, svc in state.gmail_services.items()
+        ]
+
+    return {
+        "accounts": audits,
+        "trash_filters_count": sum(len(audit.get("trash_filters", [])) for audit in audits),
+        "archive_filters_count": sum(len(audit.get("archive_filters", [])) for audit in audits),
+        "triage_filters_count": sum(len(audit.get("triage_filters", [])) for audit in audits),
+    }
 
 
 @app.post("/calendar/conflicts")

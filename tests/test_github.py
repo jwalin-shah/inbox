@@ -57,7 +57,7 @@ class TestGitHubNotifications:
         mock_resp.json.return_value = [SAMPLE_NOTIFICATION]
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("services.httpx.get", return_value=mock_resp):
+        with patch("services.egress_audit.get", return_value=mock_resp):
             notifs = github_notifications()
 
         assert len(notifs) == 1
@@ -76,25 +76,28 @@ class TestGitHubNotifications:
             assert github_notifications() == []
 
     def test_handles_api_error(self, mock_github_token):
-        with patch("services.httpx.get", side_effect=httpx.HTTPError("fail")):
+        with patch("services.egress_audit.get", side_effect=httpx.HTTPError("fail")):
             assert github_notifications() == []
 
 
 class TestGitHubMarkRead:
-    def test_marks_single_read(self, mock_github_token):
+    def test_marks_single_read(self, mock_github_token, monkeypatch):
+        monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
         mock_resp = MagicMock(status_code=205)
-        with patch("services.httpx.patch", return_value=mock_resp):
+        with patch("services.egress_audit.patch", return_value=mock_resp):
             assert github_mark_read("123") is True
 
-    def test_returns_false_without_token(self):
+    def test_returns_false_without_token(self, monkeypatch):
+        monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
         with patch("services._github_token", return_value=None):
             assert github_mark_read("123") is False
 
 
 class TestGitHubMarkAllRead:
-    def test_marks_all_read(self, mock_github_token):
+    def test_marks_all_read(self, mock_github_token, monkeypatch):
+        monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
         mock_resp = MagicMock(status_code=202)
-        with patch("services.httpx.put", return_value=mock_resp):
+        with patch("services.egress_audit.put", return_value=mock_resp):
             assert github_mark_all_read() is True
 
 
@@ -104,7 +107,7 @@ class TestGitHubPulls:
         mock_resp.json.return_value = {"items": [SAMPLE_SEARCH_ITEM]}
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("services.httpx.get", return_value=mock_resp):
+        with patch("services.egress_audit.get", return_value=mock_resp):
             pulls = github_pulls()
 
         assert len(pulls) == 1
@@ -118,7 +121,7 @@ class TestGitHubPulls:
         mock_resp.json.return_value = {"items": []}
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("services.httpx.get", return_value=mock_resp) as mock_get:
+        with patch("services.egress_audit.get", return_value=mock_resp) as mock_get:
             github_pulls(repo="owner/repo")
 
         call_params = mock_get.call_args[1]["params"]

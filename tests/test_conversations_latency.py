@@ -27,6 +27,8 @@ def client():
         patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
         patch("inbox_server.init_contacts", return_value=0),
         patch("inbox_server.google_auth_all", return_value=({}, {}, {}, {}, {}, {})),
+        patch("inbox_server.linkedin_contacts", return_value=[]),
+        patch("inbox_server.whatsapp_contacts", return_value=[]),
         TestClient(inbox_server.app, raise_server_exceptions=False) as c,
     ):
         inbox_server.state.gmail_services = {}
