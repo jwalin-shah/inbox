@@ -68,6 +68,26 @@ TUI_TABS: tuple[TabMeta, ...] = (
         "command_description": "Show Gmail conversations",
     },
     {
+        "id": "whatsapp",
+        "label": "WhatsApp",
+        "textual_tab_id": "tab-wa",
+        "mode": "message",
+        "action": "action_filter_whatsapp",
+        "command_id": "switch_whatsapp",
+        "command_name": "Switch to WhatsApp",
+        "command_description": "Show WhatsApp conversations",
+    },
+    {
+        "id": "linkedin",
+        "label": "LinkedIn",
+        "textual_tab_id": "tab-li",
+        "mode": "message",
+        "action": "action_filter_linkedin",
+        "command_id": "switch_linkedin",
+        "command_name": "Switch to LinkedIn",
+        "command_description": "Show LinkedIn messages",
+    },
+    {
         "id": "calendar",
         "label": "Calendar",
         "textual_tab_id": "tab-cal",
@@ -116,6 +136,16 @@ TUI_TABS: tuple[TabMeta, ...] = (
         "command_id": "switch_drive",
         "command_name": "Switch to Drive",
         "command_description": "Show Google Drive files",
+    },
+    {
+        "id": "health",
+        "label": "Health",
+        "textual_tab_id": "tab-health",
+        "mode": "detail",
+        "action": "action_filter_health",
+        "command_id": "switch_health",
+        "command_name": "Switch to Capture Health",
+        "command_description": "Show source capture and egress health",
     },
 )
 

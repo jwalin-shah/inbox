@@ -154,6 +154,8 @@ class AuxiliaryDataSnapshot:
     actionable_threads: list[dict]
     waiting_threads: list[dict]
     index_health: dict | None
+    capture_health: dict | None
+    egress_status: dict | None
     errors: list[str]
 
 
@@ -169,6 +171,8 @@ class RefreshDataSnapshot:
     actionable_threads: list[dict]
     waiting_threads: list[dict]
     index_health: dict | None
+    capture_health: dict | None
+    egress_status: dict | None
     status: str | None
 
 
@@ -195,7 +199,12 @@ class ConversationItem(ListItem):
     def compose(self) -> ComposeResult:
         d = self.data
         source = d.get("source", "")
-        source_icon = {"imessage": "󰍦", "gmail": "󰊫", "whatsapp": "☏"}.get(source, "•")
+        source_icon = {
+            "imessage": "󰍦",
+            "gmail": "󰊫",
+            "whatsapp": "☏",
+            "linkedin": "in",
+        }.get(source, "•")
         t = Text()
 
         # Priority indicator (only when non-normal or explicitly set)
@@ -453,6 +462,42 @@ class NotificationItem(ListItem):
         yield Static(t)
 
 
+class CaptureHealthItem(ListItem):
+    def __init__(self, data: dict) -> None:
+        super().__init__()
+        self.data = data
+
+    def compose(self) -> ComposeResult:
+        d = self.data
+        t = Text()
+        status = d.get("status", "unknown")
+        icon, style = {
+            "ok": ("OK", "green"),
+            "error": ("ERR", "red"),
+            "not_configured": ("OFF", "yellow"),
+        }.get(status, ("?", "dim"))
+        t.append(f"{icon} ", style=style)
+        t.append(d.get("display_name", d.get("source_id", "?")), style="bold white")
+        acct = d.get("account", "")
+        if acct:
+            t.append(f" · {acct}", style="dim")
+        count = d.get("item_count", 0)
+        newest = d.get("newest_seen_at", "")
+        line2_parts = [d.get("source_type", "source")]
+        if count:
+            line2_parts.append(f"{count} seen")
+        if newest:
+            try:
+                dt = datetime.fromisoformat(str(newest))
+                line2_parts.append(dt.strftime("%b %d %H:%M"))
+            except (ValueError, TypeError):
+                line2_parts.append(str(newest))
+        if d.get("last_error"):
+            line2_parts.append(str(d["last_error"])[:36])
+        t.append(f"\n  {' · '.join(line2_parts)}", style="dim")
+        yield Static(t)
+
+
 class IndexedThreadItem(ListItem):
     def __init__(self, data: dict) -> None:
         super().__init__()
@@ -617,6 +662,32 @@ class DetailView(Static):
                     t.append(f"  {icon} {label}\n", style="white")
             if d.get("account"):
                 t.append(f"\n[{d['account']}]", style="dim italic")
+
+        elif "source_id" in d and "coverage_notes" in d:
+            t.append(f"{d.get('display_name', d.get('source_id', 'Source'))}\n", style="bold white")
+            t.append("─" * 40 + "\n", style="dim")
+            status = d.get("status", "unknown")
+            style = {"ok": "green", "error": "red", "not_configured": "yellow"}.get(status, "dim")
+            t.append(f"Status: {status}\n", style=style)
+            t.append(f"Source: {d.get('source_id', '')}\n", style="dim")
+            if d.get("account"):
+                t.append(f"Account: {d['account']}\n", style="dim")
+            t.append(f"Type: {d.get('source_type', '')}\n", style="dim")
+            t.append(f"Configured: {d.get('configured')}\n", style="white")
+            t.append(f"Authenticated: {d.get('authenticated')}\n", style="white")
+            t.append(f"Readable: {d.get('readable')}\n", style="white")
+            t.append(f"Writable: {d.get('writable')}\n", style="white")
+            if d.get("last_success_at"):
+                t.append(f"Last success: {d['last_success_at']}\n", style="green")
+            if d.get("newest_seen_at"):
+                t.append(f"Newest seen: {d['newest_seen_at']}\n", style="cyan")
+            if d.get("newest_seen_id"):
+                t.append(f"Newest id: {d['newest_seen_id']}\n", style="dim")
+            t.append(f"Items sampled: {d.get('item_count', 0)}\n", style="dim")
+            if d.get("last_error"):
+                t.append(f"\n{d['last_error']}\n", style="red")
+            if d.get("coverage_notes"):
+                t.append(f"\n{d['coverage_notes']}\n", style="dim")
 
         elif d.get("completed") is not None and "list_name" in d:
             # Reminder — identified by completed field + list_name
@@ -934,6 +1005,7 @@ _SOURCE_ICONS: dict[str, str] = {
     "imessage": "󰍦",
     "gmail": "󰊫",
     "whatsapp": "☏",
+    "linkedin": "in",
     "notes": "󰎞",
     "reminders": "☐",
     "calendar": "󰃮",
@@ -1281,6 +1353,7 @@ class InboxApp(App):
         Binding("ctrl+8", "filter_drv", "Drive"),
         Binding("ctrl+9", "filter_actionable", "Actionable"),
         Binding("ctrl+0", "filter_waiting", "Waiting On"),
+        Binding("ctrl+shift+h", "filter_health", "Health"),
         Binding("ctrl+shift+6", "toggle_ambient", "Ambient"),
         Binding("ctrl+a", "add_account", "Add Account"),
         Binding("ctrl+shift+a", "reauth_account", "Re-auth"),
@@ -1323,6 +1396,8 @@ class InboxApp(App):
         self.actionable_threads: list[dict] = []
         self.waiting_threads: list[dict] = []
         self.index_health: dict | None = None
+        self.capture_health: dict | None = None
+        self.egress_status: dict | None = None
         self.events: list[dict] = []
         self.notes_data: list[dict] = []
         self.reminders_data: list[dict] = []
@@ -1335,6 +1410,7 @@ class InboxApp(App):
         self.active_reminder: dict | None = None
         self.active_notification: dict | None = None
         self.active_drive_file: dict | None = None
+        self.active_capture_source: dict | None = None
         self._active_filter: str = "all"
         self._rem_list_filter: str = ""  # "" = all lists
         self._editing_reminder: dict | None = None
@@ -1525,7 +1601,7 @@ class InboxApp(App):
     def _save_tab_state(self, tab_name: str) -> None:
         """Save the current tab's state so it can be restored later."""
         state: dict = {}
-        if tab_name in ("all", "imessage", "gmail"):
+        if tab_name in ("all", "imessage", "gmail", "whatsapp", "linkedin"):
             state["active_conv"] = self.active_conv
             state["active_index_thread"] = self.active_index_thread
             msg_view = self.query_one("#messages", MessageView)
@@ -1554,6 +1630,9 @@ class InboxApp(App):
             state["drive_folder_id"] = self._drive_folder_id
             state["drive_folder_stack"] = list(self._drive_folder_stack)
             state["active_conv"] = None
+        elif tab_name == "health":
+            state["active_capture_source"] = self.active_capture_source
+            state["active_conv"] = None
         self._tab_state[tab_name] = state
 
     def _restore_tab_state(self, tab_name: str) -> None:
@@ -1563,7 +1642,7 @@ class InboxApp(App):
             # No previously saved state for this tab — don't clear anything
             return
 
-        if tab_name in ("all", "imessage", "gmail"):
+        if tab_name in ("all", "imessage", "gmail", "whatsapp", "linkedin"):
             # Restore conversation selection and messages
             saved_conv = state.get("active_conv")
             saved_index_thread = state.get("active_index_thread")
@@ -1629,6 +1708,15 @@ class InboxApp(App):
             self.active_notification = None
             if self.active_drive_file:
                 self.query_one("#detail-view", DetailView).detail = self.active_drive_file
+        elif tab_name == "health":
+            self.active_capture_source = state.get("active_capture_source")
+            self.active_conv = None
+            self.active_event = None
+            self.active_reminder = None
+            self.active_notification = None
+            self.active_drive_file = None
+            if self.active_capture_source:
+                self.query_one("#detail-view", DetailView).detail = self.active_capture_source
         else:
             # For tabs without saved state, just clear active selections
             self.active_conv = None
@@ -1673,6 +1761,8 @@ class InboxApp(App):
                 compose_input.placeholder = "New reminder (Enter to create)"
             elif self._active_filter == "drive":
                 compose_input.placeholder = "Search Drive files… (Enter)"
+            elif self._active_filter == "health":
+                compose_input.placeholder = "Capture health is read-only"
             else:
                 compose_input.placeholder = ""
         else:
@@ -1825,6 +1915,31 @@ class InboxApp(App):
             self._update_sidebar_status(status)
             return
 
+        if self._active_filter == "health":
+            capture = self.capture_health or {}
+            sources = capture.get("sources", []) if isinstance(capture, dict) else []
+            if not sources:
+                lv.append(ListItem(Static(Text("  No capture health yet", style="dim yellow"))))
+            else:
+                for source in sources:
+                    lv.append(CaptureHealthItem(source))
+            summary = capture.get("summary", {}) if isinstance(capture, dict) else {}
+            ok = summary.get("ok", 0)
+            errors = summary.get("error", 0)
+            missing = summary.get("not_configured", 0)
+            total = summary.get("total", len(sources))
+            status_style = "green" if capture.get("healthy") else "yellow"
+            status = f"[{status_style}]{ok}/{total} sources ok[/]"
+            if errors:
+                status += f"  [red]{errors} error[/]"
+            if missing:
+                status += f"  [yellow]{missing} not configured[/]"
+            egress = self.egress_status or {}
+            local_only = "on" if egress.get("local_only") else "off"
+            status += f"  [dim]local-only:{local_only}[/]"
+            self._update_sidebar_status(status)
+            return
+
         if self._active_filter == "all":
             self._render_index_health_notice(lv)
             for thread in self.now_threads:
@@ -1882,6 +1997,8 @@ class InboxApp(App):
         tab_label = {
             "imessage": "iMessage",
             "gmail": "Gmail",
+            "whatsapp": "WhatsApp",
+            "linkedin": "LinkedIn",
         }.get(self._active_filter, "")
         status = f"[green]{len(shown)} conversations[/]"
         if unread:
@@ -1949,6 +2066,12 @@ class InboxApp(App):
                 if isinstance(child, DriveItem) and child.data.get("id") == file_id:
                     target_index = i
                     break
+        elif self._active_filter == "health" and self.active_capture_source:
+            source_key = self.active_capture_source.get("key")
+            for i, child in enumerate(lv.children):
+                if isinstance(child, CaptureHealthItem) and child.data.get("key") == source_key:
+                    target_index = i
+                    break
 
         if target_index >= 0:
             lv.index = target_index
@@ -1968,6 +2091,12 @@ class InboxApp(App):
     def action_filter_gmail(self) -> None:
         self._activate_tab("gmail")
 
+    def action_filter_whatsapp(self) -> None:
+        self._activate_tab("whatsapp")
+
+    def action_filter_linkedin(self) -> None:
+        self._activate_tab("linkedin")
+
     def action_filter_cal(self) -> None:
         self._activate_tab("calendar")
 
@@ -1982,6 +2111,9 @@ class InboxApp(App):
 
     def action_filter_drv(self) -> None:
         self._activate_tab("drive")
+
+    def action_filter_health(self) -> None:
+        self._activate_tab("health")
 
     def action_filter_actionable(self) -> None:
         self._activate_tab("actionable")
@@ -2121,6 +2253,8 @@ class InboxApp(App):
         tab_map = {
             "imessage": "tab-imsg",
             "gmail": "tab-gmail",
+            "whatsapp": "tab-wa",
+            "linkedin": "tab-li",
             "notes": "tab-notes",
             "reminders": "tab-rem",
             "calendar": "tab-cal",
@@ -2156,6 +2290,15 @@ class InboxApp(App):
                     self._load_thread(child.data)
                     return
             self.notify("Email not found — it may have changed", severity="warning")
+
+        elif source in ("whatsapp", "linkedin"):
+            for i, child in enumerate(lv.children):
+                if isinstance(child, ConversationItem) and child.data.get("id") == item_id:
+                    lv.index = i
+                    self.active_conv = child.data
+                    self._load_thread(child.data)
+                    return
+            self.notify("Conversation not found — it may have changed", severity="warning")
 
         elif source == "notes":
             for i, child in enumerate(lv.children):
@@ -2306,6 +2449,8 @@ class InboxApp(App):
                     snapshot.actionable_threads,
                     snapshot.waiting_threads,
                     snapshot.index_health,
+                    snapshot.capture_health,
+                    snapshot.egress_status,
                     status_override,
                 )
                 return
@@ -2314,6 +2459,8 @@ class InboxApp(App):
             self.actionable_threads = snapshot.actionable_threads
             self.waiting_threads = snapshot.waiting_threads
             self.index_health = snapshot.index_health
+            self.capture_health = snapshot.capture_health
+            self.egress_status = snapshot.egress_status
             self.call_from_thread(self.query_one("#status", Static).update, status_override)
             return
 
@@ -2334,6 +2481,8 @@ class InboxApp(App):
                 snapshot.actionable_threads,
                 snapshot.waiting_threads,
                 snapshot.index_health,
+                snapshot.capture_health,
+                snapshot.egress_status,
                 status_override,
             )
             return
@@ -2343,6 +2492,8 @@ class InboxApp(App):
         self.actionable_threads = snapshot.actionable_threads
         self.waiting_threads = snapshot.waiting_threads
         self.index_health = snapshot.index_health
+        self.capture_health = snapshot.capture_health
+        self.egress_status = snapshot.egress_status
         if self._poll_had_error:
             self._poll_had_error = False
             self.call_from_thread(self._render_sidebar)
@@ -2362,6 +2513,8 @@ class InboxApp(App):
             snapshot.actionable_threads,
             snapshot.waiting_threads,
             snapshot.index_health,
+            snapshot.capture_health,
+            snapshot.egress_status,
             snapshot.status,
         )
 
@@ -2377,6 +2530,8 @@ class InboxApp(App):
         actionable_threads: list[dict] | None = None,
         waiting_threads: list[dict] | None = None,
         index_health: dict | None = None,
+        capture_health: dict | None = None,
+        egress_status: dict | None = None,
         status_override: str | None = None,
     ) -> None:
         self._sidebar_status_override = status_override
@@ -2412,6 +2567,10 @@ class InboxApp(App):
             self.waiting_threads = waiting_threads
         if index_health is not None:
             self.index_health = index_health
+        if capture_health is not None:
+            self.capture_health = capture_health
+        if egress_status is not None:
+            self.egress_status = egress_status
         self._update_bell_indicator()
         self._render_sidebar()
         if status_override:
@@ -2444,6 +2603,8 @@ class InboxApp(App):
         actionable_threads = self.actionable_threads
         waiting_threads = self.waiting_threads
         index_health = self.index_health
+        capture_health = self.capture_health
+        egress_status = self.egress_status
         errors: list[str] = []
 
         try:
@@ -2470,6 +2631,20 @@ class InboxApp(App):
             github_data = self.client.github_notifications()
         except Exception as exc:
             errors.append(_format_request_error("GitHub refresh", exc))
+
+        try:
+            result = self.client.capture_health()
+            if isinstance(result, dict):
+                capture_health = result
+        except Exception as exc:
+            errors.append(_format_request_error("Capture health refresh", exc))
+
+        try:
+            result = self.client.egress_status()
+            if isinstance(result, dict):
+                egress_status = result
+        except Exception as exc:
+            errors.append(_format_request_error("Egress status refresh", exc))
 
         used_now_brief = False
         try:
@@ -2525,6 +2700,8 @@ class InboxApp(App):
             actionable_threads=actionable_threads,
             waiting_threads=waiting_threads,
             index_health=index_health,
+            capture_health=capture_health,
+            egress_status=egress_status,
             errors=errors,
         )
 
@@ -2552,6 +2729,8 @@ class InboxApp(App):
             actionable_threads=auxiliary.actionable_threads,
             waiting_threads=auxiliary.waiting_threads,
             index_health=auxiliary.index_health,
+            capture_health=auxiliary.capture_health,
+            egress_status=auxiliary.egress_status,
             status=self._merge_status_errors(errors),
         )
 
@@ -2572,6 +2751,8 @@ class InboxApp(App):
                 actionable_threads=self.actionable_threads,
                 waiting_threads=self.waiting_threads,
                 index_health=self.index_health,
+                capture_health=self.capture_health,
+                egress_status=self.egress_status,
                 status=self._merge_status_errors([_format_request_error("Auto-refresh", exc)]),
                 changed=False,
             )
@@ -2595,11 +2776,25 @@ class InboxApp(App):
             new_wait_ids = [t.get("thread_id") for t in auxiliary.waiting_threads]
             old_health = _index_health_signature(self.index_health)
             new_health = _index_health_signature(auxiliary.index_health)
+            old_capture = _index_health_signature(self.capture_health)
+            new_capture = _index_health_signature(auxiliary.capture_health)
+            old_egress = (
+                self.egress_status.get("local_only")
+                if isinstance(self.egress_status, dict)
+                else None
+            )
+            new_egress = (
+                auxiliary.egress_status.get("local_only")
+                if isinstance(auxiliary.egress_status, dict)
+                else None
+            )
             changed = (
                 old_now_ids != new_now_ids
                 or old_action_ids != new_action_ids
                 or old_wait_ids != new_wait_ids
                 or old_health != new_health
+                or old_capture != new_capture
+                or old_egress != new_egress
             )
         if not changed:
             return PollDataSnapshot(
@@ -2613,6 +2808,8 @@ class InboxApp(App):
                 actionable_threads=auxiliary.actionable_threads,
                 waiting_threads=auxiliary.waiting_threads,
                 index_health=auxiliary.index_health,
+                capture_health=auxiliary.capture_health,
+                egress_status=auxiliary.egress_status,
                 status=self._merge_status_errors(auxiliary.errors),
                 changed=False,
             )
@@ -2628,6 +2825,8 @@ class InboxApp(App):
             actionable_threads=auxiliary.actionable_threads,
             waiting_threads=auxiliary.waiting_threads,
             index_health=auxiliary.index_health,
+            capture_health=auxiliary.capture_health,
+            egress_status=auxiliary.egress_status,
             status=self._merge_status_errors(auxiliary.errors),
             changed=True,
         )
@@ -2653,6 +2852,8 @@ class InboxApp(App):
             in (
                 "imessage",
                 "gmail",
+                "whatsapp",
+                "linkedin",
             )
         ):
             event.prevent_default()
@@ -2667,6 +2868,8 @@ class InboxApp(App):
             in (
                 "imessage",
                 "gmail",
+                "whatsapp",
+                "linkedin",
             )
         ):
             event.prevent_default()
@@ -2772,6 +2975,21 @@ class InboxApp(App):
     @on(ListView.Selected, "#contact-list")
     def on_item_selected(self, event: ListView.Selected) -> None:
         item = event.item
+
+        if isinstance(item, CaptureHealthItem):
+            self.active_capture_source = item.data
+            self.active_event = None
+            self.active_reminder = None
+            self.active_notification = None
+            self.active_drive_file = None
+            self.active_conv = None
+            self.query_one("#detail-view", DetailView).detail = item.data
+            name = item.data.get("display_name", "?")
+            status = item.data.get("status", "unknown")
+            self.query_one("#status", Static).update(
+                f"[bold]{name}[/]  [dim]capture health · {status}[/]"
+            )
+            return
 
         if isinstance(item, DriveItem):
             d = item.data

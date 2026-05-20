@@ -14,6 +14,7 @@ from services import (
     IMSG_DB,
     _clean_body,
     _decode_body,
+    _openhuman_linkedin_db_path,
     _openhuman_whatsapp_db_path,
     _parse_email_address,
     google_auth_all,
@@ -25,6 +26,7 @@ GMAIL_HISTORY_CURSOR = "gmailHistoryId"
 GMAIL_TIMESTAMP_CURSOR = "internalDateMs"
 IMESSAGE_PROGRESS_EVERY = 250
 WHATSAPP_PROGRESS_EVERY = 250
+LINKEDIN_PROGRESS_EVERY = 250
 _ATTACHMENT_TEXT = "(attachment)"
 CLI_MODES = ("bootstrap", "incremental", "rebuild", "summary")
 SyncScope = tuple[str, str]
@@ -595,6 +597,37 @@ def _openhuman_whatsapp_rows() -> list[sqlite3.Row]:
         conn.close()
 
 
+def _openhuman_linkedin_rows() -> list[sqlite3.Row]:
+    db_path = _openhuman_linkedin_db_path()
+    if not db_path:
+        return []
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            """
+            SELECT
+                m.account_id,
+                m.thread_id,
+                m.message_id,
+                m.sender,
+                m.sender_profile_url,
+                m.from_me,
+                m.body,
+                m.timestamp,
+                m.source_url,
+                t.display_name,
+                t.profile_url
+            FROM li_messages m
+            LEFT JOIN li_threads t
+              ON t.account_id = m.account_id AND t.thread_id = m.thread_id
+            ORDER BY m.account_id, m.timestamp ASC, m.message_id ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+
 def _whatsapp_item(row: sqlite3.Row) -> IndexedItem:
     body = _clean_body(row["body"] or "")
     created_at = _iso_from_unix_seconds(row["timestamp"])
@@ -622,6 +655,38 @@ def _whatsapp_item(row: sqlite3.Row) -> IndexedItem:
         body_hash=_hash_body(body),
         labels_json=_json([row["message_type"] or "chat"]),
         raw_pointer=f"whatsapp:{account}:{chat_id}:{message_id}",
+        is_deleted=0,
+        is_read=1,
+    )
+
+
+def _linkedin_item(row: sqlite3.Row) -> IndexedItem:
+    body = _clean_body(row["body"] or "")
+    created_at = _iso_from_unix_seconds(row["timestamp"])
+    sender = "Me" if row["from_me"] else (row["sender"] or "?")
+    account = str(row["account_id"] or "local")
+    thread_id = str(row["thread_id"])
+    message_id = str(
+        row["message_id"] or f"{thread_id}:{row['timestamp']}:{sender}:{_hash_body(body)}"
+    )
+    display_name = str(row["display_name"] or thread_id)
+    return IndexedItem(
+        source="linkedin",
+        account=account,
+        external_id=message_id,
+        thread_id=thread_id,
+        kind="linkedin",
+        created_at=created_at,
+        updated_at=created_at,
+        ingested_at=datetime.now(UTC).isoformat(),
+        sender=sender,
+        recipients_json=_json([]),
+        subject=display_name,
+        snippet=body[:240],
+        body_text=body,
+        body_hash=_hash_body(body),
+        labels_json=_json(["linkedin"]),
+        raw_pointer=f"linkedin:{account}:{thread_id}:{message_id}",
         is_deleted=0,
         is_read=1,
     )
@@ -688,6 +753,67 @@ def sync_whatsapp_incremental(store: MessageIndexStore) -> dict[str, int]:
     return _sync_whatsapp_from_openhuman(store, full_sync=False)
 
 
+def _sync_linkedin_from_openhuman(store: MessageIndexStore, *, full_sync: bool) -> dict[str, int]:
+    rows = _openhuman_linkedin_rows()
+    checkpoints: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    highest_ts: dict[str, int] = {}
+    started: set[str] = set()
+
+    for row in rows:
+        account = str(row["account_id"] or "local")
+        if account not in checkpoints:
+            state = store.get_sync_state("linkedin", account) or {}
+            checkpoints[account] = 0 if full_sync else int(state.get("checkpoint_value", "0") or 0)
+            highest_ts[account] = checkpoints[account]
+        ts = int(row["timestamp"] or 0)
+        highest_ts[account] = max(highest_ts[account], ts)
+        if ts <= checkpoints[account]:
+            continue
+        body = _clean_body(row["body"] or "")
+        if not body:
+            continue
+        if account not in started:
+            store.mark_sync_started(
+                source="linkedin",
+                account=account,
+                checkpoint_type="unixTimestamp",
+                checkpoint_value=str(checkpoints[account]),
+                metadata={"messages_processed": 0},
+            )
+            started.add(account)
+        store.upsert_item(_linkedin_item(row))
+        counts[account] = counts.get(account, 0) + 1
+        if counts[account] % LINKEDIN_PROGRESS_EVERY == 0:
+            store.update_sync_progress(
+                source="linkedin",
+                account=account,
+                checkpoint_type="unixTimestamp",
+                checkpoint_value=str(highest_ts[account]),
+                metadata={"messages_processed": counts[account]},
+            )
+
+    for account in sorted(set(checkpoints) | set(counts)):
+        store.set_sync_state(
+            source="linkedin",
+            account=account,
+            checkpoint_type="unixTimestamp",
+            checkpoint_value=str(highest_ts.get(account, checkpoints.get(account, 0))),
+            full_sync=full_sync,
+            status="idle",
+            metadata={"messages_processed": counts.get(account, 0)},
+        )
+    return counts
+
+
+def sync_linkedin_bootstrap(store: MessageIndexStore) -> dict[str, int]:
+    return _sync_linkedin_from_openhuman(store, full_sync=True)
+
+
+def sync_linkedin_incremental(store: MessageIndexStore) -> dict[str, int]:
+    return _sync_linkedin_from_openhuman(store, full_sync=False)
+
+
 def _changed_scopes(source: str, stats: dict[str, int]) -> set[SyncScope]:
     return {(source, account) for account, count in stats.items() if count > 0}
 
@@ -709,16 +835,19 @@ def bootstrap(store: MessageIndexStore) -> dict[str, dict[str, int]]:
     gmail_stats = sync_gmail_bootstrap(store)
     imessage_stats = sync_imessage_bootstrap(store)
     whatsapp_stats = sync_whatsapp_bootstrap(store)
+    linkedin_stats = sync_linkedin_bootstrap(store)
     result = {
         "gmail": gmail_stats,
         "imessage": imessage_stats,
         "whatsapp": whatsapp_stats,
+        "linkedin": linkedin_stats,
     }
     rebuild_changed_threads(
         store,
         _changed_scopes("gmail", gmail_stats)
         | _changed_scopes("imessage", imessage_stats)
-        | _changed_scopes("whatsapp", whatsapp_stats),
+        | _changed_scopes("whatsapp", whatsapp_stats)
+        | _changed_scopes("linkedin", linkedin_stats),
     )
     return result
 
@@ -727,16 +856,19 @@ def incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
     gmail_stats = sync_gmail_incremental(store)
     imessage_stats = sync_imessage_incremental(store)
     whatsapp_stats = sync_whatsapp_incremental(store)
+    linkedin_stats = sync_linkedin_incremental(store)
     result = {
         "gmail": gmail_stats,
         "imessage": imessage_stats,
         "whatsapp": whatsapp_stats,
+        "linkedin": linkedin_stats,
     }
     rebuild_changed_threads(
         store,
         _changed_scopes("gmail", gmail_stats)
         | _changed_scopes("imessage", imessage_stats)
-        | _changed_scopes("whatsapp", whatsapp_stats),
+        | _changed_scopes("whatsapp", whatsapp_stats)
+        | _changed_scopes("linkedin", linkedin_stats),
     )
     return result
 

@@ -671,6 +671,89 @@ def _create_openhuman_whatsapp_db(db_path):
     conn.close()
 
 
+def _create_openhuman_linkedin_db(db_path):
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE li_threads (
+            account_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            profile_url TEXT NOT NULL DEFAULT '',
+            last_message_ts INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, thread_id)
+        );
+        CREATE TABLE li_messages (
+            account_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
+            sender_profile_url TEXT,
+            from_me INTEGER NOT NULL DEFAULT 0,
+            body TEXT NOT NULL DEFAULT '',
+            timestamp INTEGER NOT NULL DEFAULT 0,
+            source_url TEXT,
+            ingested_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, thread_id, message_id)
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO li_threads
+        (account_id, thread_id, display_name, profile_url, last_message_ts, message_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "acct-li",
+            "thread-1",
+            "Alice Recruiter",
+            "https://www.linkedin.com/in/alice/",
+            1_700_000_100,
+            2,
+            1_700_000_100,
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT INTO li_messages
+        (account_id, thread_id, message_id, sender, sender_profile_url, from_me, body, timestamp, source_url, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "acct-li",
+                "thread-1",
+                "m1",
+                "Alice Recruiter",
+                "https://www.linkedin.com/in/alice/",
+                0,
+                "Can you chat tomorrow?",
+                1_700_000_000,
+                "https://www.linkedin.com/messaging/thread/thread-1/",
+                1,
+            ),
+            (
+                "acct-li",
+                "thread-1",
+                "m2",
+                "",
+                None,
+                1,
+                "Yes, afternoon works.",
+                1_700_000_100,
+                "https://www.linkedin.com/messaging/thread/thread-1/",
+                1,
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_sync_whatsapp_bootstrap_indexes_openhuman_store(tmp_path, monkeypatch):
     store = MessageIndexStore(tmp_path / "index.sqlite3")
     db_path = tmp_path / "openhuman" / "workspace" / "whatsapp_data" / "whatsapp_data.db"
@@ -690,6 +773,40 @@ def test_sync_whatsapp_bootstrap_indexes_openhuman_store(tmp_path, monkeypatch):
     thread = rows[("whatsapp", "acct-1", "chat-1@c.us")]
     assert thread["latest_external_id"] == "m2"
     assert thread["latest_subject"] == "Alice"
+
+
+def test_sync_linkedin_bootstrap_indexes_openhuman_store(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    db_path = tmp_path / "openhuman" / "workspace" / "linkedin_data" / "linkedin_data.db"
+    _create_openhuman_linkedin_db(db_path)
+    monkeypatch.setattr(message_sync, "_openhuman_linkedin_db_path", lambda: db_path)
+
+    stats = message_sync.sync_linkedin_bootstrap(store)
+    rebuilt = store.rebuild_threads(source="linkedin", account="acct-li")
+
+    assert stats == {"acct-li": 2}
+    assert rebuilt == 1
+    state = store.get_sync_state("linkedin", "acct-li")
+    assert state is not None
+    assert state["checkpoint_type"] == "unixTimestamp"
+    assert state["checkpoint_value"] == "1700000100"
+    rows = _thread_rows(store)
+    thread = rows[("linkedin", "acct-li", "thread-1")]
+    assert thread["latest_external_id"] == "m2"
+    assert thread["latest_subject"] == "Alice Recruiter"
+
+
+def test_sync_linkedin_incremental_returns_empty_when_no_new_messages(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    db_path = tmp_path / "openhuman" / "workspace" / "linkedin_data" / "linkedin_data.db"
+    _create_openhuman_linkedin_db(db_path)
+    monkeypatch.setattr(message_sync, "_openhuman_linkedin_db_path", lambda: db_path)
+
+    first = message_sync.sync_linkedin_incremental(store)
+    assert first == {"acct-li": 2}
+
+    second = message_sync.sync_linkedin_incremental(store)
+    assert second == {}
 
 
 def test_incremental_rebuilds_only_changed_gmail_account(tmp_path, monkeypatch):
@@ -744,6 +861,7 @@ def test_incremental_rebuilds_only_changed_gmail_account(tmp_path, monkeypatch):
     monkeypatch.setattr(message_sync, "sync_gmail_incremental", fake_gmail_incremental)
     monkeypatch.setattr(message_sync, "sync_imessage_incremental", lambda _store: {"local": 0})
     monkeypatch.setattr(message_sync, "sync_whatsapp_incremental", lambda _store: {})
+    monkeypatch.setattr(message_sync, "sync_linkedin_incremental", lambda _store: {})
 
     result = message_sync.incremental(store)
 
@@ -751,6 +869,7 @@ def test_incremental_rebuilds_only_changed_gmail_account(tmp_path, monkeypatch):
         "gmail": {"acct@example.com": 1, "other@example.com": 0},
         "imessage": {"local": 0},
         "whatsapp": {},
+        "linkedin": {},
     }
     rows = _thread_rows(store)
     assert len(rows) == 3
@@ -810,6 +929,7 @@ def test_incremental_rebuilds_only_changed_imessage_scope(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(message_sync, "sync_imessage_incremental", fake_imessage_incremental)
     monkeypatch.setattr(message_sync, "sync_whatsapp_incremental", lambda _store: {})
+    monkeypatch.setattr(message_sync, "sync_linkedin_incremental", lambda _store: {})
 
     result = message_sync.incremental(store)
 
@@ -817,6 +937,7 @@ def test_incremental_rebuilds_only_changed_imessage_scope(tmp_path, monkeypatch)
         "gmail": {"acct@example.com": 0},
         "imessage": {"local": 1},
         "whatsapp": {},
+        "linkedin": {},
     }
     rows = _thread_rows(store)
     assert len(rows) == 2

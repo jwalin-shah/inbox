@@ -563,6 +563,18 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    # ── LinkedIn ─────────────────────────────────────────────────────────
+
+    def linkedin_contacts(self, limit: int = 20) -> list[dict]:
+        r = self._client.get("/linkedin/contacts", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
+    def linkedin_messages(self, thread_id: str, limit: int = 50) -> list[dict]:
+        r = self._client.get(f"/linkedin/messages/{thread_id}", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
     # ── Scheduled Messages ───────────────────────────────────────────────
 
     def list_scheduled(self, status: str = "pending") -> list[dict]:

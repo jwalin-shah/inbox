@@ -161,6 +161,7 @@ from services import (
     imsg_thread,
     init_contacts,
     linkedin_contacts,
+    linkedin_thread,
     llm_large_is_loaded,
     llm_large_is_loading,
     load_favorites,
@@ -1867,6 +1868,12 @@ async def _fetch_conversations(source: str, limit: int, account: str = "") -> li
                 asyncio.create_task(asyncio.to_thread(gmail_contacts, svc, email, limit=limit))
             )
 
+    if source in ("all", "linkedin"):
+        fetch_tasks.append(asyncio.create_task(asyncio.to_thread(linkedin_contacts, limit=limit)))
+
+    if source in ("all", "whatsapp"):
+        fetch_tasks.append(asyncio.create_task(asyncio.to_thread(whatsapp_contacts, limit=limit)))
+
     if not fetch_tasks:
         return []
 
@@ -1910,6 +1917,10 @@ async def get_messages(source: str, conv_id: str, thread_id: str = "", limit: in
             raise HTTPException(404, "No Gmail service available")
         tid = thread_id or (contact.thread_id if contact else "")
         msgs = await asyncio.to_thread(gmail_thread, svc, conv_id, tid)
+    elif source == "linkedin":
+        msgs = await asyncio.to_thread(linkedin_thread, conv_id, limit=limit)
+    elif source == "whatsapp":
+        msgs = await asyncio.to_thread(whatsapp_thread, conv_id, limit=limit)
     else:
         raise HTTPException(400, f"Unknown source: {source}")
 
@@ -2946,6 +2957,21 @@ async def get_whatsapp_messages(chat_name: str, limit: int = 50):
         )
         for m in messages
     ]
+
+
+# ── LinkedIn ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/linkedin/contacts", response_model=list[ConversationOut])
+async def list_linkedin_contacts(limit: int = 20):
+    contacts = await asyncio.to_thread(linkedin_contacts, limit)
+    return [_contact_to_out(c) for c in contacts]
+
+
+@app.get("/linkedin/messages/{thread_id}", response_model=list[MessageOut])
+async def get_linkedin_messages(thread_id: str, limit: int = 50):
+    messages = await asyncio.to_thread(linkedin_thread, thread_id, limit)
+    return [_msg_to_out(m) for m in messages]
 
 
 # ── GitHub ───────────────────────────────────────────────────────────────────
@@ -4029,6 +4055,11 @@ async def list_accounts():
         "sheets": list(state.sheets_services.keys()),
         "github": _github_token() is not None,
     }
+
+
+@app.get("/accounts/auth-status")
+async def accounts_auth_status(check_refresh: bool = False):
+    return await asyncio.to_thread(google_auth_diagnostics, check_refresh)
 
 
 @app.post("/accounts/add")

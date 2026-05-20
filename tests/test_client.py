@@ -94,6 +94,20 @@ class TestClientConversations:
             "/conversations", params={"source": "imessage", "limit": 10}
         )
 
+    def test_linkedin_contacts(self, client):
+        client._client.get.return_value = _mock_response([{"name": "Recruiter"}])
+        result = client.linkedin_contacts(limit=10)
+        assert result == [{"name": "Recruiter"}]
+        client._client.get.assert_called_once_with("/linkedin/contacts", params={"limit": 10})
+
+    def test_linkedin_messages(self, client):
+        client._client.get.return_value = _mock_response([{"body": "screen?"}])
+        result = client.linkedin_messages("thread-1", limit=5)
+        assert result == [{"body": "screen?"}]
+        client._client.get.assert_called_once_with(
+            "/linkedin/messages/thread-1", params={"limit": 5}
+        )
+
 
 class TestClientIndexedInbox:
     def test_capture_health(self, client):

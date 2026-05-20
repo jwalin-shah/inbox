@@ -756,6 +756,42 @@ class TestConversations:
         data = resp.json()
         assert data[0]["name"] == "New"
 
+    @patch("inbox_server.linkedin_contacts")
+    def test_list_linkedin(self, mock_linkedin, client):
+        mock_linkedin.return_value = [
+            Contact(
+                id="thread-1",
+                name="Recruiter",
+                source="linkedin",
+                snippet="screen?",
+                last_ts=datetime(2025, 1, 3),
+            ),
+        ]
+        resp = client.get("/conversations", params={"source": "linkedin"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "Recruiter"
+        assert data[0]["source"] == "linkedin"
+
+    @patch("inbox_server.whatsapp_contacts")
+    def test_list_whatsapp(self, mock_whatsapp, client):
+        mock_whatsapp.return_value = [
+            Contact(
+                id="chat-1",
+                name="Alice",
+                source="whatsapp",
+                snippet="hello",
+                last_ts=datetime(2025, 1, 3),
+            ),
+        ]
+        resp = client.get("/conversations", params={"source": "whatsapp"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice"
+        assert data[0]["source"] == "whatsapp"
+
 
 # ── Messages ────────────────────────────────────────────────────────────────
 
@@ -775,6 +811,42 @@ class TestMessages:
     def test_unknown_source_400(self, client):
         resp = client.get("/messages/foobar/123")
         assert resp.status_code == 400
+
+    @patch("inbox_server.linkedin_thread")
+    def test_get_linkedin_thread(self, mock_thread, client):
+        mock_thread.return_value = [
+            Msg(
+                sender="Recruiter",
+                body="screen?",
+                ts=datetime(2025, 1, 3),
+                is_me=False,
+                source="linkedin",
+                message_id="li-1",
+            ),
+        ]
+        resp = client.get("/messages/linkedin/thread-1")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["sender"] == "Recruiter"
+        assert data[0]["source"] == "linkedin"
+
+    @patch("inbox_server.whatsapp_thread")
+    def test_get_whatsapp_thread_via_messages_endpoint(self, mock_thread, client):
+        mock_thread.return_value = [
+            Msg(
+                sender="Alice",
+                body="hello",
+                ts=datetime(2025, 1, 3),
+                is_me=False,
+                source="whatsapp",
+                message_id="wa-1",
+            ),
+        ]
+        resp = client.get("/messages/whatsapp/chat-1")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["sender"] == "Alice"
+        assert data[0]["source"] == "whatsapp"
 
     @patch("inbox_server.imsg_send")
     def test_send_imessage(self, mock_send, populated_client):

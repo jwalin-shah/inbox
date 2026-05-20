@@ -1047,6 +1047,71 @@ def _create_openhuman_whatsapp_db(db_path: Path) -> None:
     conn.close()
 
 
+def _create_openhuman_linkedin_db(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE li_threads (
+            account_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            profile_url TEXT NOT NULL DEFAULT '',
+            last_message_ts INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, thread_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE li_messages (
+            account_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
+            sender_profile_url TEXT NOT NULL DEFAULT '',
+            from_me INTEGER NOT NULL DEFAULT 0,
+            body TEXT NOT NULL DEFAULT '',
+            timestamp INTEGER NOT NULL DEFAULT 0,
+            source_url TEXT NOT NULL DEFAULT '',
+            ingested_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, thread_id, message_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO li_threads
+        (account_id, thread_id, display_name, profile_url, last_message_ts, message_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "acct-1",
+            "thread-1",
+            "Recruiter",
+            "https://linkedin.com/in/recruiter",
+            1_700_000_100,
+            2,
+            1,
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT INTO li_messages
+        (account_id, thread_id, message_id, sender, sender_profile_url, from_me, body, timestamp, source_url, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("acct-1", "thread-1", "li-1", "Recruiter", "", 0, "screen?", 1_700_000_000, "", 1),
+            ("acct-1", "thread-1", "li-2", "me", "", 1, "yes", 1_700_000_100, "", 1),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_whatsapp_contacts_prefer_openhuman_store(monkeypatch, tmp_path):
     db_path = tmp_path / "workspace" / "whatsapp_data" / "whatsapp_data.db"
     _create_openhuman_whatsapp_db(db_path)
@@ -1080,3 +1145,45 @@ def test_whatsapp_thread_prefers_openhuman_store(monkeypatch, tmp_path):
     assert [m.body for m in messages] == ["first", "second"]
     assert messages[0].sender == "Alice"
     assert messages[1].is_me is True
+
+
+def test_linkedin_contacts_reads_openhuman_store(monkeypatch, tmp_path):
+    db_path = tmp_path / "workspace" / "linkedin_data" / "linkedin_data.db"
+    _create_openhuman_linkedin_db(db_path)
+    monkeypatch.setenv("INBOX_OPENHUMAN_LINKEDIN_DB", str(db_path))
+
+    contacts = services.linkedin_contacts()
+
+    assert [c.name for c in contacts] == ["Recruiter"]
+    assert contacts[0].id == "thread-1"
+    assert contacts[0].snippet == "yes"
+    assert contacts[0].source == "linkedin"
+
+
+def test_linkedin_thread_reads_openhuman_store(monkeypatch, tmp_path):
+    db_path = tmp_path / "workspace" / "linkedin_data" / "linkedin_data.db"
+    _create_openhuman_linkedin_db(db_path)
+    monkeypatch.setenv("INBOX_OPENHUMAN_LINKEDIN_DB", str(db_path))
+
+    messages = services.linkedin_thread("thread-1")
+
+    assert [m.body for m in messages] == ["screen?", "yes"]
+    assert messages[0].sender == "Recruiter"
+    assert messages[1].is_me is True
+
+
+def test_search_all_includes_whatsapp_and_linkedin_openhuman_stores(monkeypatch, tmp_path):
+    whatsapp_db = tmp_path / "workspace" / "whatsapp_data" / "whatsapp_data.db"
+    linkedin_db = tmp_path / "workspace" / "linkedin_data" / "linkedin_data.db"
+    _create_openhuman_whatsapp_db(whatsapp_db)
+    _create_openhuman_linkedin_db(linkedin_db)
+    monkeypatch.setenv("INBOX_OPENHUMAN_WHATSAPP_DB", str(whatsapp_db))
+    monkeypatch.setenv("INBOX_OPENHUMAN_LINKEDIN_DB", str(linkedin_db))
+
+    result = services.search_all("screen", sources=["all"], limit=10)
+
+    assert any(item["source"] == "linkedin" for item in result["results"])
+
+    result = services.search_all("first", sources=["whatsapp"], limit=10)
+
+    assert result["results"][0]["source"] == "whatsapp"

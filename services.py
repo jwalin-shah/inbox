@@ -2406,6 +2406,132 @@ def _openhuman_whatsapp_thread(chat_name: str, limit: int = 50) -> list[Msg]:
     return messages
 
 
+def _openhuman_linkedin_db_candidates() -> list[Path]:
+    configured = os.getenv("INBOX_OPENHUMAN_LINKEDIN_DB", "").strip()
+    if configured:
+        return [Path(configured).expanduser()]
+
+    workspaces: list[Path] = []
+    env_workspace = os.getenv("OPENHUMAN_WORKSPACE", "").strip()
+    if env_workspace:
+        workspaces.append(Path(env_workspace).expanduser())
+
+    for root in (Path.home() / ".openhuman", Path.home() / ".openhuman-staging"):
+        users_dir = root / "users"
+        if not users_dir.exists():
+            continue
+        workspaces.extend(path / "workspace" for path in users_dir.iterdir() if path.is_dir())
+
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for workspace in workspaces:
+        db_path = workspace / "linkedin_data" / "linkedin_data.db"
+        if db_path not in seen:
+            seen.add(db_path)
+            candidates.append(db_path)
+    candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    return candidates
+
+
+def _openhuman_linkedin_db_path() -> Path | None:
+    for db_path in _openhuman_linkedin_db_candidates():
+        if db_path.exists():
+            return db_path
+    return None
+
+
+def _openhuman_linkedin_dt(ts: int | None) -> datetime:
+    return datetime.fromtimestamp(ts, UTC) if ts else datetime.now(UTC)
+
+
+def linkedin_contacts(limit: int = 20) -> list[Contact]:
+    db_path = _openhuman_linkedin_db_path()
+    if not db_path:
+        return []
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    t.account_id,
+                    t.thread_id,
+                    t.display_name,
+                    t.profile_url,
+                    t.last_message_ts,
+                    COALESCE((
+                        SELECT m.body
+                        FROM li_messages m
+                        WHERE m.account_id = t.account_id AND m.thread_id = t.thread_id
+                        ORDER BY m.timestamp DESC
+                        LIMIT 1
+                    ), '') AS snippet
+                FROM li_threads t
+                ORDER BY t.last_message_ts DESC
+                LIMIT ?
+                """,
+                (max(0, limit),),
+            ).fetchall()
+    except Exception:
+        _log_service_failure("linkedin_contacts", db_path=str(db_path))
+        return []
+
+    return [
+        Contact(
+            id=str(thread_id),
+            name=str(display_name or thread_id),
+            source="linkedin",
+            snippet=str(snippet or ""),
+            last_ts=_openhuman_linkedin_dt(int(last_message_ts or 0)),
+            guid=str(profile_url or thread_id),
+            thread_id=str(thread_id),
+            reply_to=str(account_id or ""),
+        )
+        for account_id, thread_id, display_name, profile_url, last_message_ts, snippet in rows
+    ]
+
+
+def linkedin_thread(thread_id_or_name: str, limit: int = 50) -> list[Msg]:
+    db_path = _openhuman_linkedin_db_path()
+    if not db_path:
+        return []
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    m.sender,
+                    m.body,
+                    m.timestamp,
+                    m.from_me,
+                    m.message_id
+                FROM li_messages m
+                JOIN li_threads t
+                  ON t.account_id = m.account_id AND t.thread_id = m.thread_id
+                WHERE m.thread_id = ? OR t.display_name = ?
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+                """,
+                (thread_id_or_name, thread_id_or_name, max(0, limit)),
+            ).fetchall()
+    except Exception:
+        _log_service_failure("linkedin_thread", db_path=str(db_path))
+        return []
+
+    messages = [
+        Msg(
+            sender=str(sender or ""),
+            body=str(body or ""),
+            ts=_openhuman_linkedin_dt(int(timestamp or 0)),
+            is_me=bool(from_me),
+            source="linkedin",
+            message_id=str(message_id or ""),
+        )
+        for sender, body, timestamp, from_me, message_id in rows
+    ]
+    messages.sort(key=lambda m: m.ts)
+    return messages
+
+
 def _whatsapp_pid() -> int | None:
     """Find WhatsApp.app PID via NSRunningApplication.
     Returns None if WhatsApp is not running or Objective-C imports fail.
@@ -5662,6 +5788,88 @@ def _search_calendar(cal_services: dict, query: str, limit: int) -> list[dict]:
     return results
 
 
+def _search_whatsapp(query: str, limit: int) -> list[dict]:
+    db_path = _openhuman_whatsapp_db_path()
+    if not db_path:
+        return []
+    like = f"%{query}%"
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    m.chat_id,
+                    COALESCE(c.display_name, m.chat_id) AS display_name,
+                    m.sender,
+                    m.body,
+                    m.timestamp
+                FROM wa_messages m
+                LEFT JOIN wa_chats c
+                  ON c.account_id = m.account_id AND c.chat_id = m.chat_id
+                WHERE m.body LIKE ? OR m.sender LIKE ? OR c.display_name LIKE ?
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+                """,
+                (like, like, like, max(0, limit)),
+            ).fetchall()
+    except Exception:
+        _log_service_failure("_search_whatsapp", db_path=str(db_path), query=query)
+        return []
+    return [
+        {
+            "source": "whatsapp",
+            "id": str(chat_id),
+            "title": str(display_name or chat_id),
+            "snippet": _make_snippet(str(body or ""), query),
+            "timestamp": _openhuman_whatsapp_dt(int(timestamp or 0)).isoformat(),
+            "sender": str(sender or ""),
+            "metadata": {"chat_id": str(chat_id)},
+        }
+        for chat_id, display_name, sender, body, timestamp in rows
+    ]
+
+
+def _search_linkedin(query: str, limit: int) -> list[dict]:
+    db_path = _openhuman_linkedin_db_path()
+    if not db_path:
+        return []
+    like = f"%{query}%"
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    m.thread_id,
+                    COALESCE(t.display_name, m.thread_id) AS display_name,
+                    m.sender,
+                    m.body,
+                    m.timestamp
+                FROM li_messages m
+                LEFT JOIN li_threads t
+                  ON t.account_id = m.account_id AND t.thread_id = m.thread_id
+                WHERE m.body LIKE ? OR m.sender LIKE ? OR t.display_name LIKE ?
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+                """,
+                (like, like, like, max(0, limit)),
+            ).fetchall()
+    except Exception:
+        _log_service_failure("_search_linkedin", db_path=str(db_path), query=query)
+        return []
+    return [
+        {
+            "source": "linkedin",
+            "id": str(thread_id),
+            "title": str(display_name or thread_id),
+            "snippet": _make_snippet(str(body or ""), query),
+            "timestamp": _openhuman_linkedin_dt(int(timestamp or 0)).isoformat(),
+            "sender": str(sender or ""),
+            "metadata": {"thread_id": str(thread_id)},
+        }
+        for thread_id, display_name, sender, body, timestamp in rows
+    ]
+
+
 def search_all(
     query: str,
     sources: list[str],
@@ -5732,6 +5940,12 @@ def search_all(
     if want_all or "calendar" in sources:
         results.extend(_search_calendar(cal_services, query, limit))
 
+    if want_all or "whatsapp" in sources:
+        results.extend(_search_whatsapp(query, limit))
+
+    if want_all or "linkedin" in sources:
+        results.extend(_search_linkedin(query, limit))
+
     # Post-hoc filters for non-Gmail sources (datetime range + from_addr for imessage)
     before_dt = None
     after_dt = None
@@ -5757,7 +5971,7 @@ def search_all(
             except Exception:
                 pass
         # from_addr filter for non-gmail sources
-        if from_addr and r.get("source") in ("imessage", "calendar"):
+        if from_addr and r.get("source") in ("imessage", "calendar", "whatsapp", "linkedin"):
             sender = (r.get("sender") or "").lower()
             if from_addr.lower() not in sender:
                 return False
