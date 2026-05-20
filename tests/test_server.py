@@ -162,6 +162,85 @@ class TestConnectorEndpoints:
         assert mock_builtin.call_args.kwargs["sources"] == []
         mock_connectors.assert_called_once_with("hello", sources=["whatsapp"], limit=5)
 
+
+class TestCaptureEndpoints:
+    def test_capture_status_persists_probe_results(self, client, tmp_path):
+        import inbox_server
+        from capture_health import CaptureHealthRecord, CaptureHealthStore
+
+        inbox_server.state.capture_health_store = CaptureHealthStore(tmp_path / "capture.sqlite3")
+        with patch(
+            "inbox_server._build_capture_records",
+            return_value=[
+                CaptureHealthRecord(
+                    source_id="imessage",
+                    display_name="iMessage",
+                    source_type="local_db",
+                    configured=True,
+                    readable=True,
+                    last_success_at="2026-05-19T10:00:00+00:00",
+                    checked_at="2026-05-19T10:00:00+00:00",
+                    item_count=1,
+                )
+            ],
+        ):
+            resp = client.get("/capture/status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["summary"] == {"total": 1, "ok": 1, "error": 0, "not_configured": 0}
+        assert data["sources"][0]["key"] == "imessage:"
+        assert data["sources"][0]["status"] == "ok"
+
+    def test_capture_health_reports_unconfigured_sources(self, client, tmp_path):
+        import inbox_server
+        from capture_health import CaptureHealthRecord, CaptureHealthStore
+
+        inbox_server.state.capture_health_store = CaptureHealthStore(tmp_path / "capture.sqlite3")
+        with patch(
+            "inbox_server._build_capture_records",
+            return_value=[
+                CaptureHealthRecord(
+                    source_id="github_notifications",
+                    display_name="GitHub Notifications",
+                    source_type="external_api",
+                    configured=False,
+                    checked_at="2026-05-19T10:00:00+00:00",
+                )
+            ],
+        ):
+            resp = client.get("/capture/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["healthy"] is False
+        assert data["reasons"] == ["github_notifications::not_configured"]
+
+
+class TestEgressEndpoints:
+    def test_egress_status_endpoint(self, client):
+        with patch(
+            "inbox_server.egress_audit.status",
+            return_value={"local_only": True, "allowlist": ["api.github.com"]},
+        ):
+            resp = client.get("/egress/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["local_only"] is True
+
+    def test_egress_audit_endpoint(self, client):
+        mock_store = MagicMock()
+        mock_store.list_recent.return_value = [{"host": "api.github.com"}]
+        with (
+            patch("inbox_server.egress_audit.status", return_value={"local_only": False}),
+            patch("inbox_server.egress_audit.audit_store", return_value=mock_store),
+        ):
+            resp = client.get("/egress/audit?limit=1")
+
+        assert resp.status_code == 200
+        assert resp.json()["events"] == [{"host": "api.github.com"}]
+        mock_store.list_recent.assert_called_once_with(1)
+
     def test_search_endpoint_preserves_builtin_imessage_source(self, client):
         with (
             patch(

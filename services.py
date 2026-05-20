@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 import contextlib
 
-import httpx
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -35,6 +34,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from loguru import logger
 
+import egress_audit
 from contacts import ContactBook
 from service_models import (
     ATTACHMENT_PLACEHOLDER,
@@ -3968,7 +3968,7 @@ def maps_travel_time(
             else:
                 # For driving: request departure_time=now to get traffic-aware estimate
                 params["departure_time"] = "now"
-        resp = httpx.get(
+        resp = egress_audit.get(
             "https://maps.googleapis.com/maps/api/distancematrix/json",
             params=params,
             timeout=15,
@@ -4085,7 +4085,9 @@ def github_notifications(all_notifs: bool = False) -> list[GitHubNotification]:
         return []
     try:
         params = {"all": "true"} if all_notifs else {}
-        resp = httpx.get(f"{_GITHUB_API}/notifications", headers=headers, params=params, timeout=15)
+        resp = egress_audit.get(
+            f"{_GITHUB_API}/notifications", headers=headers, params=params, timeout=15
+        )
         resp.raise_for_status()
         notifs = []
         for n in resp.json():
@@ -4129,7 +4131,7 @@ def github_mark_read(notification_id: str) -> bool:
     if not headers:
         return False
     try:
-        resp = httpx.patch(
+        resp = egress_audit.patch(
             f"{_GITHUB_API}/notifications/threads/{notification_id}",
             headers=headers,
             timeout=10,
@@ -4147,7 +4149,7 @@ def github_mark_all_read() -> bool:
     if not headers:
         return False
     try:
-        resp = httpx.put(
+        resp = egress_audit.put(
             f"{_GITHUB_API}/notifications",
             headers=headers,
             json={"last_read_at": datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%SZ")},
@@ -4169,7 +4171,7 @@ def github_pulls(repo: str | None = None) -> list[dict]:
         query = "is:pr is:open review-requested:@me"
         if repo:
             query += f" repo:{repo}"
-        resp = httpx.get(
+        resp = egress_audit.get(
             f"{_GITHUB_API}/search/issues",
             headers=headers,
             params={"q": query, "sort": "updated", "per_page": "30"},

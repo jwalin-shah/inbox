@@ -96,6 +96,24 @@ class TestClientConversations:
 
 
 class TestClientIndexedInbox:
+    def test_capture_health(self, client):
+        client._client.get.return_value = _mock_response({"healthy": True})
+        result = client.capture_health()
+        assert result == {"healthy": True}
+        client._client.get.assert_called_once_with("/capture/health")
+
+    def test_egress_status(self, client):
+        client._client.get.return_value = _mock_response({"local_only": True})
+        result = client.egress_status()
+        assert result == {"local_only": True}
+        client._client.get.assert_called_once_with("/egress/status")
+
+    def test_egress_audit(self, client):
+        client._client.get.return_value = _mock_response({"events": []})
+        result = client.egress_audit(limit=3)
+        assert result == {"events": []}
+        client._client.get.assert_called_once_with("/egress/audit", params={"limit": 3})
+
     def test_index_health(self, client):
         client._client.get.return_value = _mock_response({"healthy": True})
         result = client.index_health()

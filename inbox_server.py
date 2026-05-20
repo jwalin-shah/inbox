@@ -21,7 +21,9 @@ from loguru import logger
 from pydantic import BaseModel
 
 import ambient_notes
+import egress_audit
 import google_account_resolution as _gacct
+from capture_health import CaptureHealthRecord, CaptureHealthStore, capture_summary, utc_now_iso
 from connector_registry import (
     connector_sync_plan,
     connectors_status,
@@ -66,7 +68,10 @@ from message_sync import bootstrap as index_bootstrap_sync
 from message_sync import incremental as index_incremental_sync
 from scheduler import SchedulerStore
 from services import (
+    IMSG_DB,
     MLX_LARGE_MODEL,
+    NOTES_DB,
+    REMINDERS_DIR,
     AmbientService,
     CalendarEvent,
     Contact,
@@ -79,6 +84,8 @@ from services import (
     Reminder,
     SheetTab,
     Spreadsheet,
+    _openhuman_linkedin_db_path,
+    _openhuman_whatsapp_db_path,
     add_google_account,
     ai_briefing,
     ai_extract_actions,
@@ -148,10 +155,12 @@ from services import (
     gmail_unstar,
     gmail_unsubscribe,
     google_auth_all,
+    google_auth_diagnostics,
     imsg_contacts,
     imsg_send,
     imsg_thread,
     init_contacts,
+    linkedin_contacts,
     llm_large_is_loaded,
     llm_large_is_loading,
     load_favorites,
@@ -633,6 +642,38 @@ class IndexHealthOut(BaseModel):
     sync_states: list[IndexSyncHealthStateOut]
 
 
+class CaptureSourceOut(BaseModel):
+    key: str
+    source_id: str
+    display_name: str
+    source_type: str
+    account: str = ""
+    configured: bool
+    authenticated: bool
+    readable: bool
+    writable: bool
+    last_success_at: str
+    newest_seen_at: str
+    newest_seen_id: str
+    item_count: int
+    checked_at: str
+    last_error: str
+    coverage_notes: str
+    status: str
+
+
+class CaptureStatusOut(BaseModel):
+    db_path: str
+    checked_at: str
+    summary: dict[str, int]
+    sources: list[CaptureSourceOut]
+
+
+class CaptureHealthOut(CaptureStatusOut):
+    healthy: bool
+    reasons: list[str]
+
+
 class IndexedThreadListOut(BaseModel):
     view: str
     db_path: str
@@ -849,6 +890,7 @@ class ServerState:
         self.dictation: DictationService = DictationService()
         self.scheduler: SchedulerStore = SchedulerStore()
         self.index_store: MessageIndexStore = MessageIndexStore()
+        self.capture_health_store: CaptureHealthStore = CaptureHealthStore()
         self.source_adapters: SourceAdapters = SourceAdapters()
 
 
@@ -1402,6 +1444,401 @@ async def health():
         "api_auth_required": _non_health_auth_required(),
         "api_auth_configured": bool(_auth_token()),
         "api_auth_dev_bypass": _auth_bypass_enabled(),
+    }
+
+
+# ── Capture Health ───────────────────────────────────────────────────────────
+
+
+def _capture_iso(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _capture_record(
+    *,
+    source_id: str,
+    display_name: str,
+    source_type: str,
+    configured: bool,
+    authenticated: bool = False,
+    readable: bool = False,
+    writable: bool = False,
+    account: str = "",
+    newest_seen_at: str = "",
+    newest_seen_id: str = "",
+    item_count: int = 0,
+    last_error: str = "",
+    coverage_notes: str = "",
+) -> CaptureHealthRecord:
+    checked_at = utc_now_iso()
+    return CaptureHealthRecord(
+        source_id=source_id,
+        display_name=display_name,
+        source_type=source_type,
+        account=account,
+        configured=configured,
+        authenticated=authenticated,
+        readable=readable,
+        writable=writable,
+        last_success_at=checked_at if readable else "",
+        newest_seen_at=newest_seen_at,
+        newest_seen_id=newest_seen_id,
+        item_count=item_count,
+        checked_at=checked_at,
+        last_error=last_error,
+        coverage_notes=coverage_notes,
+    )
+
+
+def _probe_collection(
+    *,
+    source_id: str,
+    display_name: str,
+    source_type: str,
+    configured: bool,
+    loader: Callable[[], list[Any]],
+    account: str = "",
+    authenticated: bool = False,
+    writable: bool = False,
+    newest_attr: str = "",
+    id_attr: str = "id",
+    coverage_notes: str = "",
+) -> CaptureHealthRecord:
+    if not configured:
+        return _capture_record(
+            source_id=source_id,
+            display_name=display_name,
+            source_type=source_type,
+            account=account,
+            configured=False,
+            authenticated=authenticated,
+            writable=writable,
+            coverage_notes=coverage_notes,
+        )
+
+    try:
+        items = list(loader() or [])
+    except Exception as exc:
+        return _capture_record(
+            source_id=source_id,
+            display_name=display_name,
+            source_type=source_type,
+            account=account,
+            configured=True,
+            authenticated=authenticated,
+            writable=writable,
+            last_error=str(exc),
+            coverage_notes=coverage_notes,
+        )
+
+    newest_item = items[0] if items else None
+    newest_seen_at = ""
+    newest_seen_id = ""
+    if newest_item is not None:
+        if newest_attr:
+            newest_seen_at = _capture_iso(getattr(newest_item, newest_attr, ""))
+        newest_seen_id = str(getattr(newest_item, id_attr, "") or "")
+
+    return _capture_record(
+        source_id=source_id,
+        display_name=display_name,
+        source_type=source_type,
+        account=account,
+        configured=True,
+        authenticated=authenticated,
+        readable=True,
+        writable=writable,
+        newest_seen_at=newest_seen_at,
+        newest_seen_id=newest_seen_id,
+        item_count=len(items),
+        coverage_notes=coverage_notes,
+    )
+
+
+def _build_capture_records() -> list[CaptureHealthRecord]:
+    from services import _github_token
+
+    google_diag = google_auth_diagnostics(check_refresh=False)
+    google_causes = google_diag.get("likely_causes", [])
+    google_note = ", ".join(str(cause) for cause in google_causes) or "no loaded service"
+
+    records: list[CaptureHealthRecord] = [
+        _probe_collection(
+            source_id="imessage",
+            display_name="iMessage",
+            source_type="local_db",
+            configured=IMSG_DB.exists(),
+            loader=lambda: imsg_contacts(limit=1),
+            newest_attr="last_ts",
+            coverage_notes=f"Reads local Messages SQLite database: {IMSG_DB}",
+        ),
+        _probe_collection(
+            source_id="apple_notes",
+            display_name="Apple Notes",
+            source_type="local_db",
+            configured=NOTES_DB.exists(),
+            loader=lambda: notes_list(limit=1),
+            newest_attr="modified",
+            coverage_notes=f"Reads local Notes SQLite database: {NOTES_DB}",
+        ),
+        _probe_collection(
+            source_id="apple_reminders",
+            display_name="Apple Reminders",
+            source_type="local_db",
+            configured=REMINDERS_DIR.exists(),
+            loader=lambda: reminders_list(limit=1),
+            newest_attr="creation_date",
+            writable=True,
+            coverage_notes=f"Reads local Reminders stores under: {REMINDERS_DIR}",
+        ),
+        _probe_collection(
+            source_id="whatsapp",
+            display_name="WhatsApp",
+            source_type="openhuman_or_accessibility",
+            configured=bool(_openhuman_whatsapp_db_path())
+            or whatsapp_check_accessibility(prompt=False),
+            loader=lambda: whatsapp_contacts(limit=1),
+            newest_attr="last_ts",
+            coverage_notes="Reads OpenHuman WhatsApp export first, then macOS Accessibility fallback.",
+        ),
+        _probe_collection(
+            source_id="linkedin",
+            display_name="LinkedIn",
+            source_type="openhuman",
+            configured=bool(_openhuman_linkedin_db_path()),
+            loader=lambda: linkedin_contacts(limit=1),
+            newest_attr="last_ts",
+            coverage_notes="Reads local OpenHuman LinkedIn messaging export.",
+        ),
+    ]
+
+    if not state.gmail_services:
+        records.append(
+            _capture_record(
+                source_id="gmail",
+                display_name="Gmail",
+                source_type="google_api",
+                configured=False,
+                writable=True,
+                coverage_notes=f"No Gmail service loaded; Google auth: {google_note}.",
+            )
+        )
+    for account, svc in state.gmail_services.items():
+        records.append(
+            _probe_collection(
+                source_id="gmail",
+                display_name="Gmail",
+                source_type="google_api",
+                account=account,
+                configured=True,
+                authenticated=True,
+                loader=lambda svc=svc, account=account: gmail_contacts(svc, account, limit=1),
+                newest_attr="last_ts",
+                writable=True,
+                coverage_notes="Provider probe lists the newest Gmail conversation for this account.",
+            )
+        )
+
+    if not state.cal_services:
+        records.append(
+            _capture_record(
+                source_id="google_calendar",
+                display_name="Google Calendar",
+                source_type="google_api",
+                configured=False,
+                writable=True,
+                coverage_notes=f"No Calendar service loaded; Google auth: {google_note}.",
+            )
+        )
+    for account, svc in state.cal_services.items():
+        records.append(
+            _probe_collection(
+                source_id="google_calendar",
+                display_name="Google Calendar",
+                source_type="google_api",
+                account=account,
+                configured=True,
+                authenticated=True,
+                loader=lambda svc=svc: calendar_events({"_capture": svc})[:1],
+                newest_attr="start",
+                writable=True,
+                coverage_notes="Provider probe lists one upcoming calendar event.",
+            )
+        )
+
+    if not state.tasks_services:
+        records.append(
+            _capture_record(
+                source_id="google_tasks",
+                display_name="Google Tasks",
+                source_type="google_api",
+                configured=False,
+                writable=True,
+                coverage_notes=f"No Tasks service loaded; Google auth: {google_note}.",
+            )
+        )
+    for account, svc in state.tasks_services.items():
+        records.append(
+            _probe_collection(
+                source_id="google_tasks",
+                display_name="Google Tasks",
+                source_type="google_api",
+                account=account,
+                configured=True,
+                authenticated=True,
+                loader=lambda svc=svc: tasks_list(svc, limit=1),
+                newest_attr="due",
+                writable=True,
+                coverage_notes="Provider probe lists one task from @default.",
+            )
+        )
+
+    if not state.drive_services:
+        records.extend(
+            [
+                _capture_record(
+                    source_id="google_drive",
+                    display_name="Google Drive",
+                    source_type="google_api",
+                    configured=False,
+                    writable=True,
+                    coverage_notes=f"No Drive service loaded; Google auth: {google_note}.",
+                ),
+                _capture_record(
+                    source_id="google_sheets",
+                    display_name="Google Sheets",
+                    source_type="google_api",
+                    configured=False,
+                    writable=True,
+                    coverage_notes=f"No Drive service loaded; Sheets discovery uses Drive. Google auth: {google_note}.",
+                ),
+                _capture_record(
+                    source_id="google_docs",
+                    display_name="Google Docs",
+                    source_type="google_api",
+                    configured=False,
+                    writable=True,
+                    coverage_notes=f"No Drive service loaded; Docs discovery uses Drive. Google auth: {google_note}.",
+                ),
+            ]
+        )
+    for account, svc in state.drive_services.items():
+        records.extend(
+            [
+                _probe_collection(
+                    source_id="google_drive",
+                    display_name="Google Drive",
+                    source_type="google_api",
+                    account=account,
+                    configured=True,
+                    authenticated=True,
+                    loader=lambda svc=svc: drive_files(svc, limit=1),
+                    newest_attr="modified",
+                    writable=True,
+                    coverage_notes="Provider probe lists newest non-trashed Drive file.",
+                ),
+                _probe_collection(
+                    source_id="google_sheets",
+                    display_name="Google Sheets",
+                    source_type="google_api",
+                    account=account,
+                    configured=True,
+                    authenticated=True,
+                    loader=lambda svc=svc, account=account: sheets_list(
+                        svc, limit=1, account=account
+                    ),
+                    writable=account in state.sheets_services,
+                    coverage_notes="Provider probe lists spreadsheets through Drive.",
+                ),
+                _probe_collection(
+                    source_id="google_docs",
+                    display_name="Google Docs",
+                    source_type="google_api",
+                    account=account,
+                    configured=True,
+                    authenticated=True,
+                    loader=lambda svc=svc, account=account: docs_list(
+                        svc, limit=1, account=account
+                    ),
+                    writable=account in state.docs_services,
+                    coverage_notes="Provider probe lists Docs through Drive.",
+                ),
+            ]
+        )
+
+    records.append(
+        _probe_collection(
+            source_id="github_notifications",
+            display_name="GitHub Notifications",
+            source_type="external_api",
+            configured=_github_token() is not None,
+            authenticated=_github_token() is not None,
+            loader=lambda: github_notifications(all_notifs=False)[:1],
+            newest_attr="updated_at",
+            coverage_notes="Provider probe lists unread GitHub notifications.",
+        )
+    )
+
+    return records
+
+
+def _refresh_capture_status() -> CaptureStatusOut:
+    for record in _build_capture_records():
+        state.capture_health_store.upsert(record)
+    rows = state.capture_health_store.list_records()
+    return CaptureStatusOut(
+        db_path=str(state.capture_health_store.db_path),
+        checked_at=utc_now_iso(),
+        summary=capture_summary(rows),
+        sources=[CaptureSourceOut(**row) for row in rows],
+    )
+
+
+def _capture_health_reasons(sources: list[CaptureSourceOut]) -> list[str]:
+    reasons: list[str] = []
+    if not sources:
+        reasons.append("no_capture_state")
+    for source in sources:
+        if source.status == "error":
+            reasons.append(f"{source.key}:capture_error")
+        elif source.status == "not_configured":
+            reasons.append(f"{source.key}:not_configured")
+    return reasons
+
+
+@app.get("/capture/status", response_model=CaptureStatusOut)
+async def get_capture_status():
+    return await asyncio.to_thread(_refresh_capture_status)
+
+
+@app.get("/capture/health", response_model=CaptureHealthOut)
+async def get_capture_health():
+    capture_status = await asyncio.to_thread(_refresh_capture_status)
+    reasons = _capture_health_reasons(capture_status.sources)
+    return CaptureHealthOut(
+        **capture_status.model_dump(),
+        healthy=not reasons,
+        reasons=reasons,
+    )
+
+
+# ── Egress Audit ─────────────────────────────────────────────────────────────
+
+
+@app.get("/egress/status")
+async def get_egress_status():
+    return egress_audit.status()
+
+
+@app.get("/egress/audit")
+async def get_egress_audit(limit: int = 100):
+    return {
+        **egress_audit.status(),
+        "events": await asyncio.to_thread(egress_audit.audit_store().list_recent, limit),
     }
 
 

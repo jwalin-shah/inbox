@@ -494,6 +494,36 @@ TOOLS: list[Tool] = [
             Param("account", str, "", "query"),
         ],
     ),
+    # ---------- Capture Health ----------
+    Tool(
+        name="capture_status",
+        method="GET",
+        path="/capture/status",
+        description="List read-only capture health records for every configured source.",
+        readonly=True,
+    ),
+    Tool(
+        name="capture_health",
+        method="GET",
+        path="/capture/health",
+        description="Summarize whether Inbox can currently read every configured source.",
+        readonly=True,
+    ),
+    Tool(
+        name="egress_status",
+        method="GET",
+        path="/egress/status",
+        description="Show local-only egress mode, allowlist, and audit coverage.",
+        readonly=True,
+    ),
+    Tool(
+        name="egress_audit",
+        method="GET",
+        path="/egress/audit",
+        description="List recent audited direct outbound HTTP requests.",
+        readonly=True,
+        params=[Param("limit", int, 100, "query")],
+    ),
     Tool(
         name="update_task",
         method="PUT",
@@ -585,7 +615,7 @@ TOOLS: list[Tool] = [
         name="whatsapp_contacts",
         method="GET",
         path="/whatsapp/contacts",
-        description="List WhatsApp conversations via macOS Accessibility (read-only).",
+        description="List WhatsApp conversations via local OpenHuman export or macOS Accessibility.",
         readonly=True,
         params=[Param("limit", int, 20, "query")],
     ),
@@ -597,6 +627,26 @@ TOOLS: list[Tool] = [
         readonly=True,
         params=[
             Param("chat_name", str, _EMPTY, "path"),
+            Param("limit", int, 50, "query"),
+        ],
+    ),
+    # ---------- LinkedIn ----------
+    Tool(
+        name="linkedin_contacts",
+        method="GET",
+        path="/linkedin/contacts",
+        description="List LinkedIn conversations from the local OpenHuman export.",
+        readonly=True,
+        params=[Param("limit", int, 20, "query")],
+    ),
+    Tool(
+        name="linkedin_messages",
+        method="GET",
+        path="/linkedin/messages/{thread_id}",
+        description="Fetch LinkedIn messages for a conversation from the local OpenHuman export.",
+        readonly=True,
+        params=[
+            Param("thread_id", str, _EMPTY, "path"),
             Param("limit", int, 50, "query"),
         ],
     ),

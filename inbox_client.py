@@ -500,6 +500,28 @@ class InboxClient:
         r.raise_for_status()
         return r.json().get("ok", False)
 
+    # ── Capture Health ─────────────────────────────────────────────────
+
+    def capture_status(self) -> dict:
+        r = self._client.get("/capture/status")
+        r.raise_for_status()
+        return r.json()
+
+    def capture_health(self) -> dict:
+        r = self._client.get("/capture/health")
+        r.raise_for_status()
+        return r.json()
+
+    def egress_status(self) -> dict:
+        r = self._client.get("/egress/status")
+        r.raise_for_status()
+        return r.json()
+
+    def egress_audit(self, limit: int = 100) -> dict:
+        r = self._client.get("/egress/audit", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
     # ── WhatsApp ─────────────────────────────────────────────────────────
 
     # ── Departure Times ────────────────────────────────────────────────
