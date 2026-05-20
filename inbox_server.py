@@ -699,6 +699,24 @@ class InboxNowOut(BaseModel):
     workflow_counts: dict[str, int]
 
 
+class DailyBriefSectionOut(BaseModel):
+    key: str
+    title: str
+    threads: list[GmailThreadSummaryOut]
+
+
+class DailyBriefOut(BaseModel):
+    read_model: str = "daily_brief"
+    read_only: bool = True
+    raw_provider_fetch: bool = False
+    write_actions: list[str] = []
+    index_health: IndexHealthOut
+    reasons: list[str]
+    sections: list[DailyBriefSectionOut]
+    source_refs: list[dict[str, str]]
+    workflow_counts: dict[str, int]
+
+
 class WorkflowFolderRequest(BaseModel):
     workflow: str
     name: str = ""
@@ -3598,6 +3616,23 @@ def _thread_matches_inbox_now_filters(
     return not (account and thread.owning_account != account)
 
 
+def _brief_threads(
+    view: str, limit: int, workflow: str, account: str
+) -> list[GmailThreadSummaryOut]:
+    threads = [_indexed_thread_to_summary(row) for row in _index_view_rows(view, limit)]
+    return [
+        thread for thread in threads if _thread_matches_inbox_now_filters(thread, workflow, account)
+    ][:limit]
+
+
+def _brief_section(
+    key: str,
+    title: str,
+    threads: list[GmailThreadSummaryOut],
+) -> DailyBriefSectionOut:
+    return DailyBriefSectionOut(key=key, title=title, threads=threads)
+
+
 def _inbox_now_health_reasons(index_health: IndexHealthOut) -> list[str]:
     if index_health.healthy and not index_health.stale:
         return []
@@ -4641,6 +4676,41 @@ async def get_inbox_now(workflow: str = "", account: str = "", limit: int = 20):
         commitments=commitments[:limit],
         source_refs=source_refs,
         workflow_counts=needs_action.workflow_counts,
+    )
+
+
+@app.get("/inbox/daily-brief", response_model=DailyBriefOut)
+async def get_daily_brief(workflow: str = "", account: str = "", limit: int = 10):
+    """Index-only daily brief for agent-safe read paths."""
+    index_health = _build_index_health(state.index_store.list_sync_states())
+    section_specs = [
+        ("actionable", "Needs reply or review"),
+        ("waiting-on", "Waiting loops"),
+        ("recent", "Recent changes"),
+    ]
+
+    source_refs: list[dict[str, str]] = []
+    workflow_counts: dict[str, int] = {}
+    sections: list[DailyBriefSectionOut] = []
+
+    for key, title in section_specs:
+        threads = _brief_threads(key, limit, workflow, account)
+        sections.append(_brief_section(key, title, threads))
+        for thread in threads:
+            if thread.workflow:
+                workflow_counts[thread.workflow] = workflow_counts.get(thread.workflow, 0) + 1
+            _append_source_ref(source_refs, _thread_ref(thread, _thread_reason(thread)))
+
+    reasons = _inbox_now_health_reasons(index_health)
+    if all(not section.threads for section in sections):
+        reasons.append("daily_brief_empty")
+
+    return DailyBriefOut(
+        index_health=index_health,
+        reasons=reasons,
+        sections=sections,
+        source_refs=source_refs,
+        workflow_counts=workflow_counts,
     )
 
 

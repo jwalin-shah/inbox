@@ -2463,6 +2463,106 @@ class TestPhase4:
         assert any(ref["reason"] == "Track offer response" for ref in data["source_refs"])
         mock_gmail.assert_not_called()
 
+    @pytest.mark.safe
+    @patch("inbox_server.gmail_search")
+    @patch("inbox_server.tasks_list")
+    @patch("inbox_server.calendar_events")
+    def test_daily_brief_is_index_only_and_read_only(
+        self, mock_events, mock_tasks, mock_gmail, client
+    ):
+        import inbox_server
+
+        action_row = {
+            "thread_id": "t-action",
+            "account": "me@gmail.com",
+            "participants_json": ["Recruiter"],
+            "latest_subject": "Interview follow up",
+            "latest_snippet": "Can you reply today?",
+            "latest_item_at": "2026-04-18T01:00:00+00:00",
+            "summary": "Recruiter needs a reply",
+            "open_loop": "Reply to recruiter",
+            "topic": "opportunity",
+            "needs_reply": 1,
+            "message_count": 2,
+            "latest_sender": "Recruiter",
+        }
+        waiting_row = {
+            "thread_id": "t-wait",
+            "account": "me@gmail.com",
+            "participants_json": ["Hiring Manager"],
+            "latest_subject": "Offer timing",
+            "latest_snippet": "We will get back to you",
+            "latest_item_at": "2026-04-17T01:00:00+00:00",
+            "summary": "Waiting for offer update",
+            "open_loop": "Track offer response",
+            "topic": "opportunity",
+            "needs_reply": 0,
+            "message_count": 4,
+            "latest_sender": "Me",
+        }
+        recent_row = {
+            "thread_id": "t-recent",
+            "account": "me@gmail.com",
+            "participants_json": ["Ops"],
+            "latest_subject": "Digest",
+            "latest_snippet": "Recent update",
+            "latest_item_at": "2026-04-19T01:00:00+00:00",
+            "summary": "Recent operational update",
+            "open_loop": "",
+            "topic": "ops",
+            "needs_reply": 0,
+            "message_count": 1,
+            "latest_sender": "Ops",
+        }
+
+        def list_threads(**kwargs):
+            if kwargs.get("actions") == ("track",):
+                return [waiting_row]
+            if kwargs.get("sort_mode") == "recent":
+                return [recent_row]
+            return [action_row]
+
+        inbox_server.state.index_store.list_threads = MagicMock(side_effect=list_threads)
+        inbox_server.state.index_store.list_sync_states = MagicMock(
+            return_value=[
+                {
+                    "source": "gmail",
+                    "account": "me@gmail.com",
+                    "checkpoint_type": "internalDateMs",
+                    "checkpoint_value": "123",
+                    "last_success_at": datetime.now(UTC).isoformat(),
+                    "last_full_sync_at": "2026-04-18T00:00:00+00:00",
+                    "status": "idle",
+                    "last_run_started_at": "2026-04-18T00:55:00+00:00",
+                    "last_error": "",
+                    "metadata": {},
+                }
+            ]
+        )
+
+        resp = client.get("/inbox/daily-brief", params={"limit": 5, "account": "me@gmail.com"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["read_model"] == "daily_brief"
+        assert data["read_only"] is True
+        assert data["raw_provider_fetch"] is False
+        assert data["write_actions"] == []
+        assert data["reasons"] == []
+        assert [section["key"] for section in data["sections"]] == [
+            "actionable",
+            "waiting-on",
+            "recent",
+        ]
+        assert data["sections"][0]["threads"][0]["thread_id"] == "t-action"
+        assert data["sections"][1]["threads"][0]["thread_id"] == "t-wait"
+        assert data["sections"][2]["threads"][0]["thread_id"] == "t-recent"
+        assert data["workflow_counts"] == {"job_hunt": 1}
+        assert any(ref["thread_id"] == "t-action" for ref in data["source_refs"])
+        mock_gmail.assert_not_called()
+        mock_tasks.assert_not_called()
+        mock_events.assert_not_called()
+
     @patch("inbox_server.gmail_search")
     @patch("inbox_server.tasks_list")
     @patch("inbox_server.calendar_events")
