@@ -83,6 +83,90 @@ def test_scanned_db_can_sync_into_inbox_index(tmp_path, monkeypatch):
     assert rows[0]["latest_snippet"] == "hello"
 
 
+def test_write_scan_preserves_existing_body_when_later_scan_is_empty(tmp_path):
+    db_path = tmp_path / "whatsapp_data.db"
+    first_scan = {
+        "messages": [
+            {
+                "chatId": "chat-1@c.us",
+                "messageId": "m1",
+                "sender": "Alice",
+                "fromMe": False,
+                "body": "captured body",
+                "timestamp": 1760000000,
+                "activeChatName": "Alice",
+            }
+        ]
+    }
+    empty_rescan = {
+        "messages": [
+            {
+                "chatId": "chat-1@c.us",
+                "messageId": "m1",
+                "sender": "Alice",
+                "fromMe": False,
+                "body": "",
+                "timestamp": 1760000100,
+                "activeChatName": "Alice",
+            }
+        ]
+    }
+
+    whatsapp_web_scanner.write_scan(db_path, first_scan, "acct")
+    whatsapp_web_scanner.write_scan(db_path, empty_rescan, "acct")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        message = conn.execute("SELECT * FROM wa_messages").fetchone()
+    finally:
+        conn.close()
+    assert message["body"] == "captured body"
+    assert message["timestamp"] == 1760000100
+
+
+def test_write_scan_uses_alternate_message_text_fields(tmp_path):
+    db_path = tmp_path / "whatsapp_data.db"
+    scan = {
+        "messages": [
+            {
+                "chatId": "chat-1@c.us",
+                "messageId": "text-field",
+                "sender": "Alice",
+                "text": "from text",
+            },
+            {
+                "chatId": "chat-1@c.us",
+                "messageId": "caption-field",
+                "sender": "Alice",
+                "caption": "from caption",
+            },
+            {
+                "chatId": "chat-1@c.us",
+                "messageId": "display-field",
+                "sender": "Alice",
+                "displayText": "from display",
+            },
+        ]
+    }
+
+    whatsapp_web_scanner.write_scan(db_path, scan, "acct")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        messages = conn.execute(
+            "SELECT message_id, body FROM wa_messages ORDER BY message_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [(row["message_id"], row["body"]) for row in messages] == [
+        ("caption-field", "from caption"),
+        ("display-field", "from display"),
+        ("text-field", "from text"),
+    ]
+
+
 def test_write_scan_accepts_indexeddb_chat_metadata(tmp_path):
     db_path = tmp_path / "whatsapp_data.db"
     scan = {

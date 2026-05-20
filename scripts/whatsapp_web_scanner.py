@@ -164,6 +164,13 @@ def idb_scan_expression(limit: int) -> str:
       cursor.continue();
     }};
   }});
+  const textField = (value) => {{
+    for (const field of ["body", "text", "caption", "displayText", "display", "messageText", "formattedText", "formattedBody"]) {{
+      const text = String(value && value[field] ? value[field] : "").trim();
+      if (text) return text;
+    }}
+    return "";
+  }};
 
   const db = await openDb();
   try {{
@@ -210,7 +217,7 @@ def idb_scan_expression(limit: int) -> str:
       const chatId = to || parsed.chatId || from;
       if (!chatId) continue;
       const timestamp = Number(value.t || value.timestamp || 0);
-      const body = String(value.body || value.caption || value.text || "");
+      const body = textField(value);
       const fromMe = Boolean(value.fromMe || parsed.fromMe);
       rememberChat(chatId, chatNames.get(chatId) || chatId, timestamp);
       messageCounts.set(chatId, Number(messageCounts.get(chatId) || 0) + 1);
@@ -389,6 +396,29 @@ def parse_timestamp(value: str) -> int:
     return utc_now_seconds()
 
 
+MESSAGE_BODY_FIELDS = (
+    "body",
+    "text",
+    "caption",
+    "displayText",
+    "display",
+    "messageText",
+    "formattedText",
+    "formattedBody",
+)
+
+
+def message_body(message: dict[str, Any]) -> str:
+    for field in MESSAGE_BODY_FIELDS:
+        value = message.get(field)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 def stable_message_id(message: dict[str, Any]) -> str:
     raw = str(message.get("messageId") or "")
     if raw:
@@ -398,7 +428,7 @@ def stable_message_id(message: dict[str, Any]) -> str:
             message.get("chatId", ""),
             message.get("sender", ""),
             message.get("timestampText", ""),
-            message.get("body", ""),
+            message_body(message),
         ],
         sort_keys=True,
     )
@@ -429,7 +459,7 @@ def write_scan(db_path: Path, scan: dict[str, Any], account_id: str) -> dict[str
             timestamp = int(message.get("timestamp") or 0) or parse_timestamp(
                 str(message.get("timestampText") or "")
             )
-            body = str(message.get("body") or "")
+            body = message_body(message)
             message_id = stable_message_id(message)
             chats_seen[chat_id] = (
                 display_name,
@@ -446,7 +476,10 @@ def write_scan(db_path: Path, scan: dict[str, Any], account_id: str) -> dict[str
                 ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
                     sender=excluded.sender,
                     from_me=excluded.from_me,
-                    body=excluded.body,
+                    body=CASE
+                        WHEN excluded.body != '' THEN excluded.body
+                        ELSE wa_messages.body
+                    END,
                     timestamp=excluded.timestamp,
                     message_type=excluded.message_type,
                     source=excluded.source,
