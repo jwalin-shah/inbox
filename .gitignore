@@ -38,6 +38,8 @@ htmlcov/
 .inbox_index.sqlite3*
 .inbox_scheduler.sqlite3*
 .inbox_memory.sqlite3*
+.inbox_capture_health.sqlite3*
+.inbox_egress_audit.sqlite3*
 .inbox_runtime/
 .factory/runtime/
 .factory/outputs/

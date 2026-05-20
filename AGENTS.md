@@ -1,4 +1,4 @@
-<claude-mem-context>
+<memjuice-context>
 # Memory Context
 
 # [inbox] recent context, 2026-04-18 8:40am PDT
@@ -64,7 +64,7 @@ Stats: 50 obs (16,813t read) | 407,521t work | 96% savings
 761 8:37a 🔵 Inbox Project Architecture Mapped for LinkedIn Integration Planning
 
 Access 408k tokens of past work via get_observations([IDs]) or mem-search skill.
-</claude-mem-context>
+</memjuice-context>
 
 # Inbox Agent Notes
 
