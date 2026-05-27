@@ -2658,8 +2658,8 @@ class TestPhase4:
             ]
         )
         inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
-        inbox_server.state.tasks_services = {}
-        inbox_server.state.cal_services = {}
+        inbox_server.state.tasks_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.cal_services = {"me@gmail.com": MagicMock()}
         mock_tasks.return_value = []
         mock_events.return_value = []
 
@@ -2687,6 +2687,8 @@ class TestPhase4:
         jobs = next(queue for queue in data["queues"] if queue["key"] == "jobs")
         assert jobs["items"][0]["thread_id"] == "t-action"
         mock_gmail.assert_not_called()
+        mock_tasks.assert_not_called()
+        mock_events.assert_not_called()
 
     @patch("inbox_server.gmail_search")
     @patch("inbox_server.tasks_list")

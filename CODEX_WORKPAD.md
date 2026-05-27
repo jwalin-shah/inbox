@@ -288,3 +288,107 @@ agent lanes, approval candidates, now items, and waiting threads.
 
 - Commit this branch as a preservation point.
 - Add a follow-up slice to make command-center refresh latency bounded.
+
+---
+
+# Command Center Latency Slice - 2026-05-27
+
+## Diagnosis
+
+`GET /inbox/command-center` delegated to `get_inbox_now(...)`, which can call
+live Google Tasks and Calendar services when accounts are configured. That made
+the command-center refresh path depend on broader provider reads instead of the
+bounded local index path.
+
+## Change
+
+- Kept command center read-only and `raw_provider_fetch: false`.
+- Built command-center `now`, queue, approval, source-ref, and workflow-count
+  data from indexed thread views instead of calling `get_inbox_now(...)`.
+- Added regression coverage so configured Tasks and Calendar services are not
+  called by the command-center endpoint.
+
+## Timing Evidence
+
+Temporary patched server:
+
+```bash
+INBOX_SERVER_PORT=9858 INBOX_SERVER_ALLOW_UNAUTHENTICATED=1 \
+  INBOX_START_SCHEDULER=0 INBOX_DISABLE_AMBIENT=1 \
+  INBOX_DISABLE_IMESSAGE_SYNC=1 uv run python inbox_server.py
+```
+
+Command-center timings:
+
+```bash
+curl http://127.0.0.1:9858/inbox/command-center?limit=3
+```
+
+Result: 1.343s, 1.272s, 1.303s across three runs. Payload returned
+`read_model: command_center`, six queues, source coverage, `now_items`,
+`waiting_threads`, and `raw_provider_fetch: false`.
+
+Live restarted server on port 9849:
+
+```bash
+curl -H "Authorization: Bearer $INBOX_SERVER_TOKEN" \
+  http://127.0.0.1:9849/inbox/command-center?limit=3
+```
+
+Result after `launchctl kickstart -k gui/$(id -u)/com.jwalin.inbox.backend`:
+2.886s cold, then 0.700s and 0.315s warm. Payload returned
+`read_model: command_center`, six queues, source coverage, `now_items`,
+`waiting_threads`, and `raw_provider_fetch: false`.
+
+Control timing:
+
+```bash
+curl http://127.0.0.1:9858/inbox/now?limit=3
+```
+
+Result: 4.898s on the same temporary process, confirming command center was
+paying for the broader now-rollup path before this slice.
+
+Previous reported live timing for the old command-center path:
+`/inbox/command-center?limit=3` took about 41 seconds on port 9849.
+
+## Validation
+
+```bash
+uv run pytest tests/test_server.py -k command_center -q --no-cov
+```
+
+Result: passed, 1 passed.
+
+```bash
+uv run pytest tests/test_client.py -k command_center -q --no-cov
+```
+
+Result: passed, 1 passed.
+
+```bash
+uv run pytest tests/test_tools_registry.py -q --no-cov
+```
+
+Result: passed, 12 passed.
+
+```bash
+uv run pytest tests/test_server.py tests/test_client.py \
+  -k 'command_center or daily_brief or inbox_now' -q --no-cov
+```
+
+Result: passed, 6 passed.
+
+```bash
+uv run ruff check inbox_server.py tests/test_server.py
+```
+
+Result: passed.
+
+```bash
+scripts/validate_agent_safe.sh
+```
+
+Result: passed. Ruff passed, Bandit completed with existing warnings only,
+message sync CLI smoke passed, and safe pytest passed with 20 passed and 945
+deselected.

@@ -3755,6 +3755,18 @@ def _queue(
     return CommandCenterQueueOut(key=key, title=title, items=items[:limit])
 
 
+def _dedupe_threads(threads: list[GmailThreadSummaryOut]) -> list[GmailThreadSummaryOut]:
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[GmailThreadSummaryOut] = []
+    for thread in threads:
+        key = (_thread_source(thread), thread.owning_account, thread.thread_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(thread)
+    return deduped
+
+
 def _dedupe_queue_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[str, str, str]] = set()
     deduped: list[dict[str, Any]] = []
@@ -4905,20 +4917,23 @@ async def get_daily_brief(workflow: str = "", account: str = "", limit: int = 10
 async def get_command_center(workflow: str = "", account: str = "", limit: int = 10):
     """One read-only control-plane payload for agents and the TUI."""
     index_health = _build_index_health(state.index_store.list_sync_states())
-    inbox_now = await get_inbox_now(workflow=workflow, account=account, limit=limit)
 
-    source_refs = list(inbox_now.source_refs)
-    actionable_threads = [
-        thread
-        for thread in inbox_now.actionable_threads
-        if _thread_matches_inbox_now_filters(thread, workflow, account)
-    ][:limit]
-    waiting_threads = [
-        thread
-        for thread in inbox_now.waiting_threads
-        if _thread_matches_inbox_now_filters(thread, workflow, account)
-    ][:limit]
+    source_refs: list[dict[str, str]] = []
+    actionable_threads = _brief_threads("actionable", limit, workflow, account)
+    waiting_threads = _brief_threads("waiting-on", limit, workflow, account)
     recent_threads = _brief_threads("recent", limit * 2, workflow, account)
+    now_items = [_thread_now_item(thread, _thread_reason(thread)) for thread in actionable_threads][
+        :limit
+    ]
+    commitments = [_thread_now_item(thread, _thread_reason(thread)) for thread in waiting_threads][
+        :limit
+    ]
+
+    workflow_counts: dict[str, int] = {}
+    for thread in _dedupe_threads(actionable_threads + waiting_threads + recent_threads):
+        if thread.workflow:
+            workflow_counts[thread.workflow] = workflow_counts.get(thread.workflow, 0) + 1
+        _append_source_ref(source_refs, _thread_ref(thread, _thread_reason(thread)))
 
     people_items = _dedupe_queue_items(
         [
@@ -4943,14 +4958,13 @@ async def get_command_center(workflow: str = "", account: str = "", limit: int =
         ]
         + [
             item
-            for item in inbox_now.now_items
+            for item in now_items
             if item.get("workflow") in {"legal", "medical", "finance", "personal_admin"}
-            or item.get("now_kind") in {"task", "event"}
         ]
     )
     waiting_items = _dedupe_queue_items(
         [_thread_queue_item(thread, _thread_reason(thread)) for thread in waiting_threads]
-        + list(inbox_now.commitments)
+        + commitments
     )
 
     approval_queue: list[dict[str, Any]] = []
@@ -4966,9 +4980,7 @@ async def get_command_center(workflow: str = "", account: str = "", limit: int =
                 ref=_thread_ref(thread, reason),
             )
         )
-    for item in inbox_now.now_items:
-        if item.get("now_kind") in {"task", "event"}:
-            continue
+    for item in now_items:
         actionability = str(item.get("actionability") or "")
         if actionability in {"reply", "review"}:
             approval_queue.append(
@@ -4982,7 +4994,7 @@ async def get_command_center(workflow: str = "", account: str = "", limit: int =
             )
 
     queues = [
-        _queue("now", "Now", list(inbox_now.now_items), limit),
+        _queue("now", "Now", now_items, limit),
         _queue("people", "People To Reply / Track", people_items, limit),
         _queue("jobs", "Jobs / Outreach", job_items, limit),
         _queue("admin", "Admin / Legal / Medical / Finance", admin_items, limit),
@@ -4997,14 +5009,14 @@ async def get_command_center(workflow: str = "", account: str = "", limit: int =
     return CommandCenterOut(
         index_health=index_health,
         source_coverage=_source_coverage(index_health),
-        now_items=list(inbox_now.now_items)[:limit],
+        now_items=now_items,
         actionable_threads=actionable_threads,
         waiting_threads=waiting_threads,
         queues=queues,
         approval_queue=approval_queue[:limit],
         agent_work=_agent_work_items(),
         source_refs=source_refs,
-        workflow_counts=inbox_now.workflow_counts,
+        workflow_counts=workflow_counts,
         reasons=reasons,
     )
 
