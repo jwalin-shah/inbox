@@ -2648,7 +2648,7 @@ class InboxApp(App):
 
         used_now_brief = False
         try:
-            result = self.client.inbox_now(limit=20)
+            result = self.client.command_center(limit=20)
             if isinstance(result, dict):
                 now_threads = result.get("now_items", []) or []
                 actionable_threads = result.get("actionable_threads", []) or []
@@ -2659,6 +2659,24 @@ class InboxApp(App):
                 if warning:
                     errors.append(warning)
                 used_now_brief = True
+        except AttributeError:
+            pass
+        except Exception as exc:
+            errors.append(_format_request_error("Command center refresh", exc))
+
+        try:
+            if not used_now_brief:
+                result = self.client.inbox_now(limit=20)
+                if isinstance(result, dict):
+                    now_threads = result.get("now_items", []) or []
+                    actionable_threads = result.get("actionable_threads", []) or []
+                    waiting_threads = result.get("waiting_threads", []) or []
+                    if isinstance(result.get("index_health"), dict):
+                        index_health = result["index_health"]
+                    warning = _format_index_health_warning(index_health)
+                    if warning:
+                        errors.append(warning)
+                    used_now_brief = True
         except AttributeError:
             pass
         except Exception as exc:

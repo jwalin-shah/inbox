@@ -361,6 +361,33 @@ class MessageIndexStore:
             threads = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
         return {"items": int(items), "threads": int(threads)}
 
+    def source_counts(self) -> list[dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    source,
+                    account,
+                    COUNT(*) AS item_count,
+                    COUNT(DISTINCT thread_id) AS thread_count,
+                    MAX(created_at) AS latest_item_at
+                FROM items
+                WHERE is_deleted = 0
+                GROUP BY source, account
+                ORDER BY source, account
+                """
+            ).fetchall()
+        return [
+            {
+                "source": str(row["source"]),
+                "account": str(row["account"]),
+                "item_count": int(row["item_count"] or 0),
+                "thread_count": int(row["thread_count"] or 0),
+                "latest_item_at": str(row["latest_item_at"] or ""),
+            }
+            for row in rows
+        ]
+
     def _sync_row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["metadata"] = _json_loads(str(data.get("metadata_json") or "{}"))

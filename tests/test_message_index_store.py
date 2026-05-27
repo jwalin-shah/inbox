@@ -471,3 +471,57 @@ def test_set_sync_state_is_idempotent(tmp_path):
     assert len(states) == 1
     assert states[0]["checkpoint_value"] == "12345"
     assert states[0]["metadata"] == metadata
+
+
+def test_source_counts_groups_index_items_by_source_and_account(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="m1",
+            thread_id="t1",
+            sender="Recruiter",
+            subject="Interview",
+            created_at="2026-04-18T00:00:00+00:00",
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="m2",
+            thread_id="t1",
+            sender="Me",
+            subject="Re: Interview",
+            created_at="2026-04-19T00:00:00+00:00",
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="linkedin",
+            account="brave-cdp",
+            external_id="li1",
+            thread_id="lt1",
+            sender="Founder",
+            subject="Robotics role",
+            created_at="2026-04-20T00:00:00+00:00",
+        )
+    )
+
+    assert store.source_counts() == [
+        {
+            "source": "gmail",
+            "account": "a@example.com",
+            "item_count": 2,
+            "thread_count": 1,
+            "latest_item_at": "2026-04-19T00:00:00+00:00",
+        },
+        {
+            "source": "linkedin",
+            "account": "brave-cdp",
+            "item_count": 1,
+            "thread_count": 1,
+            "latest_item_at": "2026-04-20T00:00:00+00:00",
+        },
+    ]

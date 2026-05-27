@@ -230,6 +230,7 @@ _gmail_triage_reexports = (
 PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
 AUTH_BYPASS_ENV = "INBOX_SERVER_ALLOW_UNAUTHENTICATED"
+SCHEDULER_AUTOSTART_ENV = "INBOX_START_SCHEDULER"
 AUTH_BYPASS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
@@ -715,6 +716,44 @@ class DailyBriefOut(BaseModel):
     sections: list[DailyBriefSectionOut]
     source_refs: list[dict[str, str]]
     workflow_counts: dict[str, int]
+
+
+class SourceCoverageOut(BaseModel):
+    source: str
+    account: str = ""
+    item_count: int = 0
+    thread_count: int = 0
+    latest_item_at: str = ""
+    last_success_at: str = ""
+    last_success_age_seconds: int | None = None
+    status: str = "unknown"
+    healthy: bool = False
+    stale: bool = True
+    reasons: list[str] = []
+
+
+class CommandCenterQueueOut(BaseModel):
+    key: str
+    title: str
+    items: list[dict[str, Any]]
+
+
+class CommandCenterOut(BaseModel):
+    read_model: str = "command_center"
+    read_only: bool = True
+    raw_provider_fetch: bool = False
+    write_actions: list[str] = []
+    index_health: IndexHealthOut
+    source_coverage: list[SourceCoverageOut]
+    now_items: list[dict[str, Any]]
+    actionable_threads: list[GmailThreadSummaryOut]
+    waiting_threads: list[GmailThreadSummaryOut]
+    queues: list[CommandCenterQueueOut]
+    approval_queue: list[dict[str, Any]]
+    agent_work: list[dict[str, Any]]
+    source_refs: list[dict[str, str]]
+    workflow_counts: dict[str, int]
+    reasons: list[str]
 
 
 class WorkflowFolderRequest(BaseModel):
@@ -1363,8 +1402,13 @@ def make_lifespan(runtime: InboxServerRuntime | None = None):
                 logger.warning("Ambient autostart failed (non-fatal)")
 
         scheduler_task = None
-        if runtime.start_scheduler:
+        start_scheduler = runtime.start_scheduler and os.environ.get(
+            SCHEDULER_AUTOSTART_ENV, "1"
+        ).strip().lower() not in ("0", "false", "no")
+        if start_scheduler:
             scheduler_task = asyncio.create_task(_scheduler_loop())
+        else:
+            print(f"[scheduler] Autostart disabled by {SCHEDULER_AUTOSTART_ENV}=0")
 
         try:
             yield
@@ -3641,6 +3685,149 @@ def _inbox_now_health_reasons(index_health: IndexHealthOut) -> list[str]:
     return ["index:unhealthy"]
 
 
+def _source_coverage(index_health: IndexHealthOut) -> list[SourceCoverageOut]:
+    source_rows = state.index_store.source_counts()
+    sync_by_key = {(sync.source, sync.account): sync for sync in index_health.sync_states}
+    keys = set(sync_by_key) | {
+        (str(row.get("source") or ""), str(row.get("account") or "")) for row in source_rows
+    }
+    indexed_by_key = {
+        (str(row.get("source") or ""), str(row.get("account") or "")): row for row in source_rows
+    }
+    for source in ("gmail", "imessage", "whatsapp", "linkedin"):
+        if not any(key[0] == source for key in keys):
+            keys.add((source, ""))
+
+    coverage: list[SourceCoverageOut] = []
+    for source, account in sorted(keys):
+        row = indexed_by_key.get((source, account), {})
+        sync = sync_by_key.get((source, account))
+        reasons = list(sync.reasons) if sync is not None else []
+        if sync is None:
+            reasons.append("no_sync_state")
+        coverage.append(
+            SourceCoverageOut(
+                source=source,
+                account=account,
+                item_count=int(row.get("item_count") or 0),
+                thread_count=int(row.get("thread_count") or 0),
+                latest_item_at=str(row.get("latest_item_at") or ""),
+                last_success_at=sync.last_success_at if sync is not None else "",
+                last_success_age_seconds=(
+                    sync.last_success_age_seconds if sync is not None else None
+                ),
+                status=sync.status if sync is not None else "missing",
+                healthy=bool(sync and sync.healthy),
+                stale=True if sync is None else sync.stale,
+                reasons=reasons,
+            )
+        )
+    return coverage
+
+
+def _thread_queue_item(thread: GmailThreadSummaryOut, reason: str) -> dict[str, Any]:
+    return {
+        "kind": "thread",
+        "title": thread.subject or thread.summary or "Untitled thread",
+        "source": _thread_source(thread),
+        "reason": reason,
+        "ref": _thread_ref(thread, reason),
+        "thread_id": thread.thread_id,
+        "owning_account": thread.owning_account,
+        "participants": thread.participants,
+        "last_message_at": thread.last_message_at,
+        "summary": thread.summary,
+        "brief": thread.brief,
+        "needs_reply": thread.needs_reply,
+        "workflow": thread.workflow,
+        "rank": thread.rank,
+        "action_items": thread.action_items,
+        "rich_data": thread.rich_data,
+    }
+
+
+def _queue(
+    key: str,
+    title: str,
+    items: list[dict[str, Any]],
+    limit: int,
+) -> CommandCenterQueueOut:
+    return CommandCenterQueueOut(key=key, title=title, items=items[:limit])
+
+
+def _dedupe_queue_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in items:
+        ref = item.get("ref") if isinstance(item.get("ref"), dict) else {}
+        key = (
+            str(item.get("kind") or ""),
+            str(ref.get("source") or item.get("source") or ""),
+            str(
+                ref.get("thread_id")
+                or ref.get("id")
+                or item.get("thread_id")
+                or item.get("id")
+                or ""
+            ),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _approval_candidate(
+    *,
+    source: str,
+    action: str,
+    title: str,
+    reason: str,
+    ref: dict[str, str],
+    sensitivity: str = "external_communication",
+) -> dict[str, Any]:
+    return {
+        "kind": "approval_candidate",
+        "source": source,
+        "action": action,
+        "title": title,
+        "reason": reason,
+        "sensitivity": sensitivity,
+        "status": "needs_human_approval",
+        "ref": ref,
+    }
+
+
+def _agent_work_items() -> list[dict[str, Any]]:
+    return [
+        {
+            "lane": "capture",
+            "title": "Refresh source coverage and index freshness",
+            "permission": "read_only",
+            "next_action": "Run incremental sync or scanner only when explicitly requested.",
+        },
+        {
+            "lane": "triage",
+            "title": "Classify today, jobs, admin, people, and waiting queues",
+            "permission": "read_only",
+            "next_action": "Draft queue changes; do not archive, label, send, or submit.",
+        },
+        {
+            "lane": "draft",
+            "title": "Prepare replies, job packets, and admin scripts",
+            "permission": "draft_only",
+            "next_action": "Place exact outbound actions in approval_queue.",
+        },
+        {
+            "lane": "browser_exec",
+            "title": "Operate portals and messaging UIs after approval",
+            "permission": "approval_required",
+            "next_action": "Stop before submit/send unless the exact action is approved.",
+        },
+    ]
+
+
 def _preflight_google_write(
     kind: str,
     account: str = "",
@@ -4711,6 +4898,114 @@ async def get_daily_brief(workflow: str = "", account: str = "", limit: int = 10
         sections=sections,
         source_refs=source_refs,
         workflow_counts=workflow_counts,
+    )
+
+
+@app.get("/inbox/command-center", response_model=CommandCenterOut)
+async def get_command_center(workflow: str = "", account: str = "", limit: int = 10):
+    """One read-only control-plane payload for agents and the TUI."""
+    index_health = _build_index_health(state.index_store.list_sync_states())
+    inbox_now = await get_inbox_now(workflow=workflow, account=account, limit=limit)
+
+    source_refs = list(inbox_now.source_refs)
+    actionable_threads = [
+        thread
+        for thread in inbox_now.actionable_threads
+        if _thread_matches_inbox_now_filters(thread, workflow, account)
+    ][:limit]
+    waiting_threads = [
+        thread
+        for thread in inbox_now.waiting_threads
+        if _thread_matches_inbox_now_filters(thread, workflow, account)
+    ][:limit]
+    recent_threads = _brief_threads("recent", limit * 2, workflow, account)
+
+    people_items = _dedupe_queue_items(
+        [
+            _thread_queue_item(thread, _thread_reason(thread))
+            for thread in actionable_threads + waiting_threads + recent_threads
+            if thread.participants
+        ]
+    )
+    job_items = _dedupe_queue_items(
+        [
+            _thread_queue_item(thread, _thread_reason(thread))
+            for thread in actionable_threads + waiting_threads + recent_threads
+            if thread.workflow == "job_hunt"
+            or "opportunity" in " ".join([thread.subject, thread.summary, thread.brief]).lower()
+        ]
+    )
+    admin_items = _dedupe_queue_items(
+        [
+            _thread_queue_item(thread, _thread_reason(thread))
+            for thread in actionable_threads + waiting_threads + recent_threads
+            if thread.workflow in {"legal", "medical", "finance", "personal_admin"}
+        ]
+        + [
+            item
+            for item in inbox_now.now_items
+            if item.get("workflow") in {"legal", "medical", "finance", "personal_admin"}
+            or item.get("now_kind") in {"task", "event"}
+        ]
+    )
+    waiting_items = _dedupe_queue_items(
+        [_thread_queue_item(thread, _thread_reason(thread)) for thread in waiting_threads]
+        + list(inbox_now.commitments)
+    )
+
+    approval_queue: list[dict[str, Any]] = []
+    for thread in actionable_threads:
+        reason = _thread_reason(thread)
+        action = "send_reply" if thread.needs_reply else "review_external_action"
+        approval_queue.append(
+            _approval_candidate(
+                source=_thread_source(thread),
+                action=action,
+                title=thread.subject or thread.summary or "Thread action",
+                reason=reason,
+                ref=_thread_ref(thread, reason),
+            )
+        )
+    for item in inbox_now.now_items:
+        if item.get("now_kind") in {"task", "event"}:
+            continue
+        actionability = str(item.get("actionability") or "")
+        if actionability in {"reply", "review"}:
+            approval_queue.append(
+                _approval_candidate(
+                    source=str(item.get("source") or ""),
+                    action="approve_prepared_action",
+                    title=str(item.get("title") or "Action item"),
+                    reason=str(item.get("reason") or actionability),
+                    ref=item.get("ref") if isinstance(item.get("ref"), dict) else {},
+                )
+            )
+
+    queues = [
+        _queue("now", "Now", list(inbox_now.now_items), limit),
+        _queue("people", "People To Reply / Track", people_items, limit),
+        _queue("jobs", "Jobs / Outreach", job_items, limit),
+        _queue("admin", "Admin / Legal / Medical / Finance", admin_items, limit),
+        _queue("waiting", "Waiting On", waiting_items, limit),
+        _queue("approval", "Approval Queue", approval_queue, limit),
+    ]
+
+    reasons = _inbox_now_health_reasons(index_health)
+    if not any(queue.items for queue in queues):
+        reasons.append("command_center_empty")
+
+    return CommandCenterOut(
+        index_health=index_health,
+        source_coverage=_source_coverage(index_health),
+        now_items=list(inbox_now.now_items)[:limit],
+        actionable_threads=actionable_threads,
+        waiting_threads=waiting_threads,
+        queues=queues,
+        approval_queue=approval_queue[:limit],
+        agent_work=_agent_work_items(),
+        source_refs=source_refs,
+        workflow_counts=inbox_now.workflow_counts,
+        reasons=reasons,
     )
 
 

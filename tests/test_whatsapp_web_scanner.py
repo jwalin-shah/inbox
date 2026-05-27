@@ -167,6 +167,44 @@ def test_write_scan_uses_alternate_message_text_fields(tmp_path):
     ]
 
 
+def test_write_scan_extracts_nested_indexeddb_message_text(tmp_path):
+    db_path = tmp_path / "whatsapp_data.db"
+    scan = {
+        "source": "brave-cdp-idb",
+        "messages": [
+            {
+                "chatId": "chat-1@c.us",
+                "messageId": "nested-conversation",
+                "sender": "Alice",
+                "message": {"conversation": "from nested conversation"},
+            },
+            {
+                "chatId": "chat-1@c.us",
+                "messageId": "nested-extended",
+                "sender": "Alice",
+                "content": {
+                    "extendedTextMessage": {"text": "from nested extended text"},
+                },
+            },
+        ],
+    }
+
+    whatsapp_web_scanner.write_scan(db_path, scan, "acct")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        messages = conn.execute(
+            "SELECT message_id, body FROM wa_messages ORDER BY message_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [(row["message_id"], row["body"]) for row in messages] == [
+        ("nested-conversation", "from nested conversation"),
+        ("nested-extended", "from nested extended text"),
+    ]
+
+
 def test_write_scan_accepts_indexeddb_chat_metadata(tmp_path):
     db_path = tmp_path / "whatsapp_data.db"
     scan = {

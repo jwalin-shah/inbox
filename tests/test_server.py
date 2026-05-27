@@ -56,6 +56,28 @@ def client():
         yield c
 
 
+def test_lifespan_honors_scheduler_autostart_env(monkeypatch):
+    import inbox_server
+
+    fake_state = inbox_server.ServerState()
+    runtime = inbox_server.InboxServerRuntime(
+        server_state=fake_state,
+        init_contacts_func=lambda: 0,
+        google_auth_func=inbox_server._empty_google_services,
+        start_scheduler=True,
+        ambient_autostart=False,
+    )
+    monkeypatch.setenv("INBOX_START_SCHEDULER", "0")
+
+    with (
+        patch("inbox_server._scheduler_loop") as mock_loop,
+        TestClient(inbox_server.create_app(runtime), raise_server_exceptions=False),
+    ):
+        pass
+
+    mock_loop.assert_not_called()
+
+
 @pytest.fixture
 def populated_client(client):
     """Client with some fake data in the conv_cache."""
@@ -2562,6 +2584,109 @@ class TestPhase4:
         mock_gmail.assert_not_called()
         mock_tasks.assert_not_called()
         mock_events.assert_not_called()
+
+    @patch("inbox_server.gmail_search")
+    @patch("inbox_server.tasks_list")
+    @patch("inbox_server.calendar_events")
+    def test_command_center_rolls_up_queues_coverage_and_approval_candidates(
+        self, mock_events, mock_tasks, mock_gmail, client
+    ):
+        import inbox_server
+
+        action_row = {
+            "thread_id": "t-action",
+            "account": "me@gmail.com",
+            "participants_json": ["Recruiter"],
+            "latest_subject": "Interview follow up",
+            "latest_snippet": "Can you reply today?",
+            "latest_item_at": "2026-04-18T01:00:00+00:00",
+            "summary": "Recruiter needs a reply",
+            "open_loop": "Reply to recruiter",
+            "topic": "opportunity",
+            "needs_reply": 1,
+            "message_count": 2,
+            "latest_sender": "Recruiter",
+        }
+        waiting_row = {
+            "thread_id": "t-wait",
+            "account": "me@gmail.com",
+            "participants_json": ["Hiring Manager"],
+            "latest_subject": "Offer timing",
+            "latest_snippet": "We will get back to you",
+            "latest_item_at": "2026-04-17T01:00:00+00:00",
+            "summary": "Waiting for offer update",
+            "open_loop": "Track offer response",
+            "topic": "opportunity",
+            "needs_reply": 0,
+            "message_count": 4,
+            "latest_sender": "Me",
+        }
+
+        def list_threads(**kwargs):
+            if kwargs.get("has_open_loop"):
+                return [waiting_row]
+            if kwargs.get("sort_mode") == "recent" and not kwargs.get("needs_reply"):
+                return [action_row, waiting_row]
+            return [action_row]
+
+        inbox_server.state.index_store.list_threads = MagicMock(side_effect=list_threads)
+        inbox_server.state.index_store.source_counts = MagicMock(
+            return_value=[
+                {
+                    "source": "gmail",
+                    "account": "me@gmail.com",
+                    "item_count": 12,
+                    "thread_count": 3,
+                    "latest_item_at": "2026-04-18T01:00:00+00:00",
+                }
+            ]
+        )
+        inbox_server.state.index_store.list_sync_states = MagicMock(
+            return_value=[
+                {
+                    "source": "gmail",
+                    "account": "me@gmail.com",
+                    "checkpoint_type": "internalDateMs",
+                    "checkpoint_value": "123",
+                    "last_success_at": datetime.now(UTC).isoformat(),
+                    "last_full_sync_at": "2026-04-18T00:00:00+00:00",
+                    "status": "idle",
+                    "last_run_started_at": "2026-04-18T00:55:00+00:00",
+                    "last_error": "",
+                    "metadata": {},
+                }
+            ]
+        )
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        inbox_server.state.tasks_services = {}
+        inbox_server.state.cal_services = {}
+        mock_tasks.return_value = []
+        mock_events.return_value = []
+
+        resp = client.get("/inbox/command-center", params={"limit": 5, "account": "me@gmail.com"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["read_model"] == "command_center"
+        assert data["read_only"] is True
+        assert data["raw_provider_fetch"] is False
+        assert data["write_actions"] == []
+        assert {queue["key"] for queue in data["queues"]} == {
+            "now",
+            "people",
+            "jobs",
+            "admin",
+            "waiting",
+            "approval",
+        }
+        assert data["source_coverage"][0]["source"] == "gmail"
+        assert data["source_coverage"][0]["item_count"] == 12
+        assert data["approval_queue"][0]["action"] == "send_reply"
+        assert data["approval_queue"][0]["status"] == "needs_human_approval"
+        assert data["agent_work"][0]["permission"] == "read_only"
+        jobs = next(queue for queue in data["queues"] if queue["key"] == "jobs")
+        assert jobs["items"][0]["thread_id"] == "t-action"
+        mock_gmail.assert_not_called()
 
     @patch("inbox_server.gmail_search")
     @patch("inbox_server.tasks_list")

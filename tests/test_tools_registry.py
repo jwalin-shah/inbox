@@ -124,6 +124,13 @@ def test_index_health_status_and_needs_action_dispatch_to_compact_routes():
             account="me@example.com",
         )
     )
+    command_center = asyncio.run(
+        handlers["get_command_center"](
+            workflow="job_hunt",
+            account="me@example.com",
+            limit=6,
+        )
+    )
 
     assert health == {
         "method": "GET",
@@ -141,6 +148,12 @@ def test_index_health_status_and_needs_action_dispatch_to_compact_routes():
         "method": "GET",
         "path": "/inbox/needs-action",
         "params": {"workflow": "job_hunt", "account": "me@example.com"},
+        "json": None,
+    }
+    assert command_center == {
+        "method": "GET",
+        "path": "/inbox/command-center",
+        "params": {"workflow": "job_hunt", "account": "me@example.com", "limit": 6},
         "json": None,
     }
 

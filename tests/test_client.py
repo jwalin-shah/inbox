@@ -163,6 +163,15 @@ class TestClientIndexedInbox:
             params={"limit": 8, "workflow": "job_hunt", "account": "me@gmail.com"},
         )
 
+    def test_command_center(self, client):
+        client._client.get.return_value = _mock_response({"queues": [], "source_coverage": []})
+        result = client.command_center(workflow="job_hunt", account="me@gmail.com", limit=6)
+        assert result == {"queues": [], "source_coverage": []}
+        client._client.get.assert_called_once_with(
+            "/inbox/command-center",
+            params={"limit": 6, "workflow": "job_hunt", "account": "me@gmail.com"},
+        )
+
 
 # ── Messages ────────────────────────────────────────────────────────────────
 

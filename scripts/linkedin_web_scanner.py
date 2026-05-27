@@ -57,9 +57,11 @@ SCAN_JS = r"""
     return match ? decodeURIComponent(match[1]) : "";
   };
   const activeHeader =
-    document.querySelector("main h2") ||
-    document.querySelector("main header h2") ||
+    document.querySelector(".msg-entity-lockup__entity-title") ||
+    document.querySelector(".msg-thread__link-to-profile") ||
     document.querySelector('[data-test-conversation-header]') ||
+    document.querySelector("main header h2:not(.visually-hidden)") ||
+    document.querySelector("main h2:not(.visually-hidden)") ||
     document.querySelector("main header");
   const activeName = (textOf(activeHeader).split("\n")[0] || "").trim();
   const activeProfileUrl = normalizeUrl(
@@ -202,20 +204,91 @@ def evaluate_scan(conn: CdpConnection) -> dict[str, Any]:
     return value
 
 
-def click_visible_thread(conn: CdpConnection, index: int) -> None:
+def click_visible_thread(conn: CdpConnection, index: int) -> bool:
     expression = f"""
     (() => {{
       const rows = Array.from(document.querySelectorAll(
         'a[href*="/messaging/thread/"], li.msg-conversation-listitem, [data-control-name="conversation_card"]'
-      )).filter((row) => (row.innerText || '').trim());
+      )).filter((row) => {{
+        const rect = row.getBoundingClientRect();
+        return (row.innerText || '').trim() &&
+          rect.width > 20 &&
+          rect.height > 20 &&
+          rect.bottom > 120 &&
+          rect.top < window.innerHeight - 20;
+      }});
       const row = rows[{index}];
       if (!row) return false;
-      row.scrollIntoView({{block: 'center'}});
-      row.click();
-      return true;
+      const rect = row.getBoundingClientRect();
+      return {{
+        x: Math.round(rect.left + Math.min(rect.width * 0.5, 180)),
+        y: Math.round(rect.top + rect.height * 0.5),
+      }};
     }})()
     """
-    conn.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    result = conn.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    point = result.get("result", {}).get("value")
+    if not isinstance(point, dict):
+        return False
+    x = int(point.get("x") or 0)
+    y = int(point.get("y") or 0)
+    if not x or not y:
+        return False
+    conn.command("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+    conn.command(
+        "Input.dispatchMouseEvent",
+        {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+    )
+    conn.command(
+        "Input.dispatchMouseEvent",
+        {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+    )
+    return True
+
+
+def scroll_thread_list(conn: CdpConnection) -> bool:
+    expression = """
+    (() => {
+      const candidates = [
+        document.querySelector('.msg-conversations-container__conversations-list'),
+        document.querySelector('.msg-conversations-container__conversations-list-container'),
+        document.querySelector('ul.msg-conversations-container__conversations-list'),
+        document.querySelector('[aria-label*="conversation" i]'),
+      ].filter(Boolean);
+      const scrollers = candidates.concat(Array.from(document.querySelectorAll('aside, section, div')))
+        .filter((el) => el && el.scrollHeight > el.clientHeight + 100)
+        .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+      const el = scrollers[0];
+      if (!el) return false;
+      const before = el.scrollTop;
+      el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + Math.max(el.clientHeight * 0.85, 500));
+      return el.scrollTop !== before;
+    })()
+    """
+    result = conn.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    return bool(result.get("result", {}).get("value"))
+
+
+def scroll_active_thread(conn: CdpConnection) -> bool:
+    expression = """
+    (() => {
+      const candidates = [
+        document.querySelector('.msg-s-message-list--scroll-buffer'),
+        document.querySelector('.msg-s-message-list'),
+        document.querySelector('main .scrollable'),
+      ].filter(Boolean);
+      const scrollers = candidates.concat(Array.from(document.querySelectorAll('main div')))
+        .filter((el) => el && el.scrollHeight > el.clientHeight + 80)
+        .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+      const el = scrollers[0];
+      if (!el) return false;
+      const before = el.scrollTop;
+      el.scrollTop = Math.max(0, el.scrollTop - Math.max(el.clientHeight * 0.9, 500));
+      return el.scrollTop !== before;
+    })()
+    """
+    result = conn.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    return bool(result.get("result", {}).get("value"))
 
 
 def init_db(db_path: Path) -> None:
@@ -443,6 +516,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--click-visible", type=int, default=0, help="Click and scan the first N visible threads."
     )
+    parser.add_argument(
+        "--scroll-pages",
+        type=int,
+        default=0,
+        help="Scroll the LinkedIn conversation list and scan/click visible threads after each page.",
+    )
+    parser.add_argument(
+        "--scroll-active-pages",
+        type=int,
+        default=0,
+        help="Scroll the currently open conversation upward and scan after each page.",
+    )
     parser.add_argument("--delay", type=float, default=1.0, help="Delay after clicking a thread.")
     parser.add_argument(
         "--sync-index", action="store_true", help="Also ingest the DB into .inbox_index.sqlite3."
@@ -464,14 +549,33 @@ def main() -> int:
     page = find_linkedin_page(args.cdp_url)
     db_path = Path(args.db).expanduser() if args.db else default_db_path()
     total = {"threads": 0, "messages": 0}
+    clicked = 0
+    scrolls = 0
     with CdpConnection(page.websocket_url, timeout=10) as conn:
         first_scan = evaluate_scan(conn)
         if first_scan.get("loginRequired"):
             print("LinkedIn is not signed in. Sign in through Brave, then rerun.")
             return 2
         scans = [first_scan]
-        for index in range(max(args.click_visible, 0)):
-            click_visible_thread(conn, index)
+        for _active_page in range(max(args.scroll_active_pages, 0)):
+            if not scroll_active_thread(conn):
+                break
+            time.sleep(max(args.delay, 0))
+            scans.append(evaluate_scan(conn))
+        for _page in range(max(args.scroll_pages, 0) + 1):
+            for index in range(max(args.click_visible, 0)):
+                if click_visible_thread(conn, index):
+                    clicked += 1
+                    time.sleep(max(args.delay, 0))
+                    for _active_page in range(max(args.scroll_active_pages, 0)):
+                        if not scroll_active_thread(conn):
+                            break
+                        time.sleep(max(args.delay, 0))
+                        scans.append(evaluate_scan(conn))
+                    scans.append(evaluate_scan(conn))
+            if not scroll_thread_list(conn):
+                break
+            scrolls += 1
             time.sleep(max(args.delay, 0))
             scans.append(evaluate_scan(conn))
         for scan in scans:
@@ -480,7 +584,12 @@ def main() -> int:
             total["messages"] += written["messages"]
     if args.sync_index:
         run_index_sync()
-    print(json.dumps({"db_path": str(db_path), **total}, sort_keys=True))
+    print(
+        json.dumps(
+            {"clicked": clicked, "db_path": str(db_path), "scrolls": scrolls, **total},
+            sort_keys=True,
+        )
+    )
     return 0
 
 

@@ -193,6 +193,21 @@ TOOLS: list[Tool] = [
             Param("account", str, "", "query"),
         ],
     ),
+    Tool(
+        name="get_command_center",
+        method="GET",
+        path="/inbox/command-center",
+        description=(
+            "Get the read-only command center: source coverage, Now, people, jobs, "
+            "admin, waiting, approval candidates, and agent work lanes."
+        ),
+        readonly=True,
+        params=[
+            Param("workflow", str, "", "query"),
+            Param("account", str, "", "query"),
+            Param("limit", int, 10, "query"),
+        ],
+    ),
     # ---------- Gmail (write) ----------
     Tool(
         name="send_email_reply",

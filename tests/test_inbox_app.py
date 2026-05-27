@@ -2122,6 +2122,35 @@ def test_collect_auxiliary_data_uses_inbox_now_brief_and_surfaces_index_health()
     client.index_view.assert_not_called()
 
 
+def test_collect_auxiliary_data_prefers_command_center() -> None:
+    client = MagicMock()
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
+    client.command_center.return_value = {
+        "now_items": [{"now_kind": "thread", "thread_id": "now-1", "title": "Reply"}],
+        "actionable_threads": [{"thread_id": "action-1"}],
+        "waiting_threads": [{"thread_id": "wait-1"}],
+        "index_health": _make_index_health(),
+        "queues": [],
+        "source_coverage": [],
+    }
+
+    app = _make_app(client)
+    snapshot = app._collect_auxiliary_data()
+
+    assert snapshot.now_threads == [{"now_kind": "thread", "thread_id": "now-1", "title": "Reply"}]
+    assert snapshot.actionable_threads == [{"thread_id": "action-1"}]
+    assert snapshot.waiting_threads == [{"thread_id": "wait-1"}]
+    assert snapshot.index_health == _make_index_health()
+    client.command_center.assert_called_once_with(limit=20)
+    client.inbox_now.assert_not_called()
+    client.index_health.assert_not_called()
+    client.index_view.assert_not_called()
+
+
 def test_collect_poll_data_marks_changed_when_index_health_changes() -> None:
     client = MagicMock()
     client.conversations.return_value = []

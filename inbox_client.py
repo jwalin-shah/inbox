@@ -140,6 +140,16 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def command_center(self, *, workflow: str = "", account: str = "", limit: int = 10) -> dict:
+        params: dict[str, str | int] = {"limit": limit}
+        if workflow:
+            params["workflow"] = workflow
+        if account:
+            params["account"] = account
+        r = self._client.get("/inbox/command-center", params=params)
+        r.raise_for_status()
+        return r.json()
+
     # ── Messages ─────────────────────────────────────────────────────────
 
     def messages(

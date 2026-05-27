@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -30,6 +31,10 @@ LINKEDIN_PROGRESS_EVERY = 250
 _ATTACHMENT_TEXT = "(attachment)"
 CLI_MODES = ("bootstrap", "incremental", "rebuild", "summary")
 SyncScope = tuple[str, str]
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _iso_from_ms(value: int | str | None) -> str:
@@ -105,6 +110,19 @@ def _json(value: object) -> str:
     import json
 
     return json.dumps(value, sort_keys=True)
+
+
+def _sync_or_record_error(
+    store: MessageIndexStore,
+    source: str,
+    account: str,
+    sync_func: Any,
+) -> dict[str, int]:
+    try:
+        return sync_func(store)
+    except Exception as exc:
+        store.record_sync_error(source=source, account=account, error=str(exc))
+        return {}
 
 
 def _fetch_gmail_full_message(service: Any, message_id: str) -> dict[str, Any]:
@@ -519,6 +537,20 @@ def _sync_imessage_from_local_store(store: MessageIndexStore, *, full_sync: bool
     checkpoint_rowid = int(state.get("checkpoint_value", "0") or 0)
     highest_rowid = checkpoint_rowid
     count = 0
+    if _env_truthy("INBOX_DISABLE_IMESSAGE_SYNC"):
+        store.set_sync_state(
+            source="imessage",
+            account="local",
+            checkpoint_type="rowid",
+            checkpoint_value=str(checkpoint_rowid),
+            status="idle",
+            metadata={
+                "disabled": True,
+                "reason": "INBOX_DISABLE_IMESSAGE_SYNC",
+                "messages_processed": 0,
+            },
+        )
+        return {"local": 0}
     store.mark_sync_started(
         source="imessage",
         account="local",
@@ -832,10 +864,10 @@ def rebuild_all_threads(store: MessageIndexStore) -> int:
 
 
 def bootstrap(store: MessageIndexStore) -> dict[str, dict[str, int]]:
-    gmail_stats = sync_gmail_bootstrap(store)
-    imessage_stats = sync_imessage_bootstrap(store)
-    whatsapp_stats = sync_whatsapp_bootstrap(store)
-    linkedin_stats = sync_linkedin_bootstrap(store)
+    gmail_stats = _sync_or_record_error(store, "gmail", "all", sync_gmail_bootstrap)
+    imessage_stats = _sync_or_record_error(store, "imessage", "local", sync_imessage_bootstrap)
+    whatsapp_stats = _sync_or_record_error(store, "whatsapp", "brave-cdp", sync_whatsapp_bootstrap)
+    linkedin_stats = _sync_or_record_error(store, "linkedin", "brave-cdp", sync_linkedin_bootstrap)
     result = {
         "gmail": gmail_stats,
         "imessage": imessage_stats,
@@ -853,10 +885,14 @@ def bootstrap(store: MessageIndexStore) -> dict[str, dict[str, int]]:
 
 
 def incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
-    gmail_stats = sync_gmail_incremental(store)
-    imessage_stats = sync_imessage_incremental(store)
-    whatsapp_stats = sync_whatsapp_incremental(store)
-    linkedin_stats = sync_linkedin_incremental(store)
+    gmail_stats = _sync_or_record_error(store, "gmail", "all", sync_gmail_incremental)
+    imessage_stats = _sync_or_record_error(store, "imessage", "local", sync_imessage_incremental)
+    whatsapp_stats = _sync_or_record_error(
+        store, "whatsapp", "brave-cdp", sync_whatsapp_incremental
+    )
+    linkedin_stats = _sync_or_record_error(
+        store, "linkedin", "brave-cdp", sync_linkedin_incremental
+    )
     result = {
         "gmail": gmail_stats,
         "imessage": imessage_stats,

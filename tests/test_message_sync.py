@@ -595,6 +595,36 @@ def test_sync_imessage_bootstrap_advances_checkpoint_for_skipped_rows(tmp_path, 
     assert state["checkpoint_value"] == "2"
 
 
+def test_sync_imessage_incremental_can_be_disabled_for_sandboxed_runners(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.set_sync_state(
+        source="imessage",
+        account="local",
+        checkpoint_type="rowid",
+        checkpoint_value="42",
+        full_sync=False,
+        status="error",
+        last_error="unable to open database file",
+        metadata={},
+    )
+    monkeypatch.setenv("INBOX_DISABLE_IMESSAGE_SYNC", "1")
+    monkeypatch.setattr(
+        message_sync,
+        "_imessage_messages_after",
+        lambda _last_rowid: (_ for _ in ()).throw(AssertionError("should not read chat.db")),
+    )
+
+    stats = message_sync.sync_imessage_incremental(store)
+
+    assert stats == {"local": 0}
+    state = store.get_sync_state("imessage", "local")
+    assert state is not None
+    assert state["status"] == "idle"
+    assert state["last_error"] == ""
+    assert state["checkpoint_value"] == "42"
+    assert state["metadata"]["disabled"] is True
+
+
 def _create_openhuman_whatsapp_db(db_path):
     db_path.parent.mkdir(parents=True)
     conn = sqlite3.connect(db_path)
@@ -948,6 +978,44 @@ def test_incremental_rebuilds_only_changed_imessage_scope(tmp_path, monkeypatch)
     assert changed_imessage["latest_external_id"] == "imsg-2"
     assert changed_imessage["latest_subject"] == "New iMessage"
     assert changed_imessage["updated_at"] != "sentinel"
+
+
+def test_incremental_records_source_error_and_continues(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    def fake_gmail_incremental(sync_store: MessageIndexStore) -> dict[str, int]:
+        sync_store.upsert_item(
+            _indexed_item(
+                source="gmail",
+                account="acct@example.com",
+                external_id="gmail-1",
+                thread_id="gmail-thread",
+                created_at="2026-04-18T01:00:00+00:00",
+                subject="New Gmail",
+            )
+        )
+        return {"acct@example.com": 1}
+
+    monkeypatch.setattr(message_sync, "sync_gmail_incremental", fake_gmail_incremental)
+    monkeypatch.setattr(
+        message_sync,
+        "sync_imessage_incremental",
+        lambda _store: (_ for _ in ()).throw(OSError("messages db unavailable")),
+    )
+    monkeypatch.setattr(message_sync, "sync_whatsapp_incremental", lambda _store: {})
+    monkeypatch.setattr(message_sync, "sync_linkedin_incremental", lambda _store: {})
+
+    result = message_sync.incremental(store)
+
+    assert result == {
+        "gmail": {"acct@example.com": 1},
+        "imessage": {},
+        "whatsapp": {},
+        "linkedin": {},
+    }
+    assert store.get_sync_state("imessage", "local")["status"] == "error"
+    rows = _thread_rows(store)
+    assert rows[("gmail", "acct@example.com", "gmail-thread")]["latest_subject"] == "New Gmail"
 
 
 def test_rebuild_all_threads_preserves_global_repair_path(tmp_path):

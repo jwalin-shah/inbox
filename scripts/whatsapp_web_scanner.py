@@ -164,9 +164,38 @@ def idb_scan_expression(limit: int) -> str:
       cursor.continue();
     }};
   }});
-  const textField = (value) => {{
-    for (const field of ["body", "text", "caption", "displayText", "display", "messageText", "formattedText", "formattedBody"]) {{
-      const text = String(value && value[field] ? value[field] : "").trim();
+  const textFieldNames = [
+    "body",
+    "text",
+    "caption",
+    "displayText",
+    "display",
+    "messageText",
+    "formattedText",
+    "formattedBody",
+    "conversation",
+    "selectedDisplayText",
+    "matchedText",
+    "title",
+    "description",
+  ];
+  const textField = (value, seen = new Set(), depth = 0) => {{
+    if (!value || depth > 5) return "";
+    if (typeof value === "string") return value.trim();
+    if (typeof value !== "object") return "";
+    if (seen.has(value)) return "";
+    seen.add(value);
+    for (const field of textFieldNames) {{
+      const text = String(value[field] || "").trim();
+      if (text) return text;
+    }}
+    for (const field of ["message", "content", "quotedMsg", "quotedStanza", "extendedTextMessage", "pollCreationMessage"]) {{
+      const text = textField(value[field], seen, depth + 1);
+      if (text) return text;
+    }}
+    for (const nested of Object.values(value)) {{
+      if (!nested || typeof nested !== "object") continue;
+      const text = textField(nested, seen, depth + 1);
       if (text) return text;
     }}
     return "";
@@ -332,7 +361,7 @@ def evaluate_idb_scan(conn: CdpConnection, limit: int) -> dict[str, Any]:
     return value
 
 
-def click_visible_chat(conn: CdpConnection, index: int) -> None:
+def click_visible_chat(conn: CdpConnection, index: int) -> bool:
     expression = f"""
     (() => {{
       const rows = Array.from(document.querySelectorAll(
@@ -345,7 +374,25 @@ def click_visible_chat(conn: CdpConnection, index: int) -> None:
       return true;
     }})()
     """
-    conn.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    result = conn.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    return bool(result.get("result", {}).get("value"))
+
+
+def scroll_chat_list(conn: CdpConnection) -> bool:
+    expression = """
+    (() => {
+      const list =
+        document.querySelector('[aria-label="Chat list"]') ||
+        document.querySelector('div[role="grid"]') ||
+        document.querySelector('[data-testid="chat-list"]');
+      if (!list) return false;
+      const before = list.scrollTop;
+      list.scrollTop = before + Math.max(list.clientHeight || 700, 700);
+      return list.scrollTop !== before;
+    })()
+    """
+    result = conn.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    return bool(result.get("result", {}).get("value"))
 
 
 def init_db(db_path: Path) -> None:
@@ -405,10 +452,58 @@ MESSAGE_BODY_FIELDS = (
     "messageText",
     "formattedText",
     "formattedBody",
+    "conversation",
+    "selectedDisplayText",
+    "matchedText",
+    "title",
+    "description",
 )
 
 
 def message_body(message: dict[str, Any]) -> str:
+    nested_fields = (
+        "message",
+        "content",
+        "quotedMsg",
+        "quotedStanza",
+        "extendedTextMessage",
+        "pollCreationMessage",
+    )
+
+    def extract(value: Any, seen: set[int], depth: int) -> str:
+        if value is None or depth > 5:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if not isinstance(value, dict):
+            if isinstance(value, list | tuple):
+                for item in value:
+                    if not isinstance(item, dict | list | tuple):
+                        continue
+                    text = extract(item, seen, depth + 1)
+                    if text:
+                        return text
+            return ""
+        obj_id = id(value)
+        if obj_id in seen:
+            return ""
+        seen.add(obj_id)
+        for field in MESSAGE_BODY_FIELDS:
+            text = extract(value.get(field), seen, depth + 1)
+            if text:
+                return text
+        for field in nested_fields:
+            text = extract(value.get(field), seen, depth + 1)
+            if text:
+                return text
+        for item in value.values():
+            if not isinstance(item, dict | list | tuple):
+                continue
+            text = extract(item, seen, depth + 1)
+            if text:
+                return text
+        return ""
+
     for field in MESSAGE_BODY_FIELDS:
         value = message.get(field)
         if value is None:
@@ -416,7 +511,7 @@ def message_body(message: dict[str, Any]) -> str:
         text = str(value).strip()
         if text:
             return text
-    return ""
+    return extract(message, set(), 0)
 
 
 def stable_message_id(message: dict[str, Any]) -> str:
@@ -555,6 +650,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--click-visible", type=int, default=0, help="Click and scan the first N visible chats."
     )
+    parser.add_argument(
+        "--scroll-pages",
+        type=int,
+        default=0,
+        help="After each visible-click pass, scroll the chat list this many pages and scan again.",
+    )
     parser.add_argument("--delay", type=float, default=1.0, help="Delay after clicking a chat.")
     parser.add_argument(
         "--idb", action="store_true", help="Read WhatsApp Web's IndexedDB model-storage DB."
@@ -590,10 +691,17 @@ def main() -> int:
             print("WhatsApp Web is not paired yet. Pair the QR code in Brave, then rerun.")
             return 2
         scans = [first_scan]
-        for index in range(max(args.click_visible, 0)):
-            click_visible_chat(conn, index)
-            time.sleep(max(args.delay, 0))
-            scans.append(evaluate_scan(conn))
+        for page in range(max(args.scroll_pages, 0) + 1):
+            for index in range(max(args.click_visible, 0)):
+                if not click_visible_chat(conn, index):
+                    continue
+                time.sleep(max(args.delay, 0))
+                scans.append(evaluate_scan(conn))
+            if page < max(args.scroll_pages, 0):
+                if not scroll_chat_list(conn):
+                    break
+                time.sleep(max(args.delay, 0))
+                scans.append(evaluate_scan(conn))
         for scan in scans:
             written = write_scan(db_path, scan, args.account_id)
             total["chats"] += written["chats"]

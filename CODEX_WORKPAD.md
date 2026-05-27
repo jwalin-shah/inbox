@@ -217,3 +217,74 @@ git diff --check
 ```
 
 Result: passed.
+
+---
+
+# Command Center Slice - 2026-05-27
+
+## Scope
+
+- Branch: `codex/inbox-safe-daily-brief-slice`
+- Added read-only command center endpoint for the "one place" Inbox surface.
+
+## Implemented
+
+- `GET /inbox/command-center`
+- `InboxClient.command_center(...)`
+- MCP/tool registry route `get_command_center`
+- TUI refresh prefers the command-center endpoint when available
+- `MessageIndexStore.source_counts()`
+- Source coverage for indexed sources such as Gmail, iMessage, WhatsApp, and
+  LinkedIn
+- Agent lanes for `capture`, `triage`, `draft`, and `browser_exec`
+
+## Validation
+
+Reported during implementation:
+
+```bash
+focused tests
+```
+
+Result: passed, 6 passed.
+
+```bash
+broader related slice
+```
+
+Result: passed, 61 passed.
+
+```bash
+ruff on touched files
+```
+
+Result: passed.
+
+Verified after restarting main server:
+
+```bash
+scripts/validate_agent_safe.sh
+```
+
+Result: passed. Ruff passed, Bandit completed with existing warnings only,
+message sync CLI smoke passed, and safe pytest passed with 20 passed and 945
+deselected.
+
+```bash
+curl -H "Authorization: Bearer $INBOX_SERVER_TOKEN" \
+  "http://127.0.0.1:9849/inbox/command-center?limit=3"
+```
+
+Result: returned `read_model: command_center`, six queues, source coverage,
+agent lanes, approval candidates, now items, and waiting threads.
+
+## Residual Risk
+
+- Live `/inbox/command-center?limit=3` on the main data set took about 41
+  seconds. The endpoint works, but performance should be improved before
+  treating it as a fast dashboard refresh path.
+
+## Next
+
+- Commit this branch as a preservation point.
+- Add a follow-up slice to make command-center refresh latency bounded.
