@@ -18,10 +18,12 @@ from inbox import (
     InboxApp,
     MessageView,
     NotificationItem,
+    OpsQueueItem,
     ReminderItem,
     SearchResultItem,
     SearchScreen,
 )
+from ops_brain import load_ops_queue_rows, ops_brain_status
 
 
 class HarnessInboxApp(InboxApp):
@@ -79,6 +81,37 @@ def _make_index_health(
         "reasons": reasons or [],
         "sync_states": [],
     }
+
+
+def _make_source_coverage() -> list[dict]:
+    return [
+        {
+            "source": "gmail",
+            "account": "j@example.com",
+            "item_count": 12,
+            "thread_count": 5,
+            "latest_item_at": "2026-05-10T12:00:00+00:00",
+            "last_success_at": "2026-05-10T12:05:00+00:00",
+            "last_success_age_seconds": 60,
+            "status": "ok",
+            "healthy": True,
+            "stale": False,
+            "reasons": [],
+        },
+        {
+            "source": "linkedin",
+            "account": "",
+            "item_count": 0,
+            "thread_count": 0,
+            "latest_item_at": "",
+            "last_success_at": "",
+            "last_success_age_seconds": None,
+            "status": "missing",
+            "healthy": False,
+            "stale": True,
+            "reasons": ["no_sync_state"],
+        },
+    ]
 
 
 def test_poll_interval_reads_env_override(monkeypatch) -> None:
@@ -2135,7 +2168,7 @@ def test_collect_auxiliary_data_prefers_command_center() -> None:
         "waiting_threads": [{"thread_id": "wait-1"}],
         "index_health": _make_index_health(),
         "queues": [],
-        "source_coverage": [],
+        "source_coverage": _make_source_coverage(),
     }
 
     app = _make_app(client)
@@ -2145,10 +2178,39 @@ def test_collect_auxiliary_data_prefers_command_center() -> None:
     assert snapshot.actionable_threads == [{"thread_id": "action-1"}]
     assert snapshot.waiting_threads == [{"thread_id": "wait-1"}]
     assert snapshot.index_health == _make_index_health()
+    assert snapshot.source_coverage == _make_source_coverage()
     client.command_center.assert_called_once_with(limit=20)
     client.inbox_now.assert_not_called()
     client.index_health.assert_not_called()
     client.index_view.assert_not_called()
+
+
+def test_collect_poll_data_marks_changed_when_source_coverage_changes() -> None:
+    client = MagicMock()
+    client.conversations.return_value = []
+    client.calendar_events.return_value = []
+    client.notes.return_value = []
+    client.reminders.return_value = []
+    client.reminder_lists.return_value = []
+    client.github_notifications.return_value = []
+    client.command_center.return_value = {
+        "now_items": [],
+        "actionable_threads": [],
+        "waiting_threads": [],
+        "index_health": _make_index_health(),
+        "source_coverage": _make_source_coverage(),
+    }
+
+    app = _make_app(client)
+    app.conversations = []
+    app.index_health = _make_index_health()
+    app.source_coverage = []
+
+    snapshot = app._collect_poll_data()
+
+    assert snapshot.changed is True
+    assert snapshot.source_coverage == _make_source_coverage()
+    client.command_center.assert_called_once_with(limit=20)
 
 
 def test_collect_poll_data_marks_changed_when_index_health_changes() -> None:
@@ -2237,6 +2299,67 @@ def test_indexed_tabs_show_index_health_state(
                 assert expected in _sidebar_text(app)
 
     asyncio.run(runner())
+
+
+def test_health_tab_renders_command_center_source_coverage() -> None:
+    async def runner() -> None:
+        app = _make_app(MagicMock())
+        app.source_coverage = _make_source_coverage()
+        app.capture_health = {"healthy": True, "summary": {"ok": 0, "total": 0}, "sources": []}
+
+        async with app.run_test() as pilot:
+            app._active_filter = "health"
+            app._render_sidebar()
+            await pilot.pause()
+
+            sidebar = _sidebar_text(app)
+            assert "Source coverage 1/2 current" in sidebar
+            assert "Gmail" in sidebar
+            assert "12 items" in sidebar
+            assert "5 threads" in sidebar
+            assert "LinkedIn" in sidebar
+            assert "no sync state" in sidebar
+            assert "1/2 coverage current" in _status_text(app)
+            assert "1 sync gap" in _status_text(app)
+
+    asyncio.run(runner())
+
+
+def test_source_coverage_selection_shows_sync_gap_detail() -> None:
+    async def runner() -> None:
+        app = _make_app(MagicMock())
+        app.source_coverage = _make_source_coverage()
+
+        async with app.run_test() as pilot:
+            app._active_filter = "health"
+            app._render_sidebar()
+            await pilot.pause()
+            lv = app.query_one("#contact-list", ListView)
+
+            class _Event:
+                item = lv.children[2]
+
+            app.on_item_selected(_Event())
+
+            detail = app.query_one("#detail-view", DetailView).detail
+            assert detail == _make_source_coverage()[1]
+            assert "source coverage" in _status_text(app)
+
+    asyncio.run(runner())
+
+
+def test_detail_view_renders_source_coverage_sync_gaps() -> None:
+    detail = DetailView()
+    detail.detail = _make_source_coverage()[1]
+
+    children = list(detail.compose())
+
+    assert len(children) == 1
+    text = str(children[0].content)
+    assert "LinkedIn coverage" in text
+    assert "Threads indexed: 0" in text
+    assert "Stale reasons / sync gaps" in text
+    assert "no sync state" in text
 
 
 def test_collect_auxiliary_data_github_failure_preserves_old() -> None:
@@ -2647,6 +2770,50 @@ def test_drive_tab_empty_state() -> None:
             await pilot.pause(0.5)
             status_text = _status_text(app)
             assert "0 files" in status_text
+
+    asyncio.run(runner())
+
+
+def test_ops_brain_loads_local_reconciliation_queues(tmp_path, monkeypatch) -> None:
+    reconciliation = tmp_path / "reconciliation"
+    reconciliation.mkdir()
+    (reconciliation / "connector_gmail_evidence_queue.csv").write_text(
+        "priority,lane,subject,evidence_role,candidate_action\n"
+        "P0,insurance,Claim thread,Active claim,Read and promote source-backed action\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPS_KERNEL_PATH", str(tmp_path))
+
+    rows = load_ops_queue_rows()
+    status = ops_brain_status()
+
+    assert rows[0]["_ops_queue_id"] == "connector_gmail"
+    assert rows[0]["_ops_title"] == "Claim thread"
+    assert status["queue_rows"] == 1
+    assert (
+        status["provider_policy"] == "providers are replaceable adapters; local ledgers are truth"
+    )
+
+
+def test_ops_tab_shows_local_queue_rows(tmp_path, monkeypatch) -> None:
+    async def runner() -> None:
+        reconciliation = tmp_path / "reconciliation"
+        reconciliation.mkdir()
+        (reconciliation / "connector_gmail_evidence_queue.csv").write_text(
+            "priority,lane,subject,evidence_role,candidate_action\n"
+            "P0,stanford,Itemized bill,Itemized bill evidence,Review attachment\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPS_KERNEL_PATH", str(tmp_path))
+        app = _make_app(MagicMock())
+
+        async with app.run_test() as pilot:
+            app.action_filter_ops()
+            await pilot.pause(0.5)
+            assert app._active_filter == "ops"
+            assert "ops rows" in _status_text(app)
+            lv = app.query_one("#contact-list", ListView)
+            assert any(isinstance(child, OpsQueueItem) for child in lv.children)
 
     asyncio.run(runner())
 

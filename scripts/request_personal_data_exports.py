@@ -13,9 +13,58 @@ import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 DEFAULT_STATE_PATH = Path.home() / ".local/state/inbox/data-export-email-watch.json"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+
+STATUS_RANK = {
+    "not_started": 0,
+    "opened_export_page": 10,
+    "browser_seen_export_page": 20,
+    "login_required_seen": 30,
+    "request_ui_seen": 40,
+    "request_submitted_seen": 50,
+    "request_submitted_manually": 60,
+    "confirmation_email_seen": 70,
+    "export_email_seen": 75,
+    "ready_ui_seen": 80,
+    "ready_email_seen": 90,
+    "download_link_expired": 95,
+    "download_link_opened": 100,
+}
+
+STATUS_STAGE = {
+    "not_started": "request",
+    "opened_export_page": "request",
+    "browser_seen_export_page": "request",
+    "login_required_seen": "request",
+    "request_ui_seen": "request",
+    "request_submitted_seen": "status",
+    "request_submitted_manually": "status",
+    "confirmation_email_seen": "status",
+    "export_email_seen": "status",
+    "ready_ui_seen": "ready",
+    "ready_email_seen": "ready",
+    "download_link_expired": "request",
+    "download_link_opened": "download",
+}
+
+MANUAL_BOUNDARY = {
+    "not_started": "open_request_page",
+    "opened_export_page": "complete_provider_request_in_browser",
+    "browser_seen_export_page": "complete_provider_request_in_browser",
+    "login_required_seen": "login_or_2fa_required",
+    "request_ui_seen": "submit_export_request_manually",
+    "request_submitted_seen": "wait_for_ready_email_or_status",
+    "request_submitted_manually": "wait_for_ready_email_or_status",
+    "confirmation_email_seen": "wait_for_ready_email_or_status",
+    "export_email_seen": "review_export_email",
+    "ready_ui_seen": "open_download_link_manually",
+    "ready_email_seen": "open_download_link_manually",
+    "download_link_expired": "re_request_export_in_browser",
+    "download_link_opened": "browser_download_may_require_manual_confirmation",
+}
 
 
 @dataclass(frozen=True)
@@ -157,6 +206,11 @@ def parse_args() -> argparse.Namespace:
         help="Show local request/open/email status without opening browser tabs.",
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With --status, print the normalized status model as JSON.",
+    )
+    parser.add_argument(
         "--state-path",
         default=str(DEFAULT_STATE_PATH),
         help="Path for local export request/watch state.",
@@ -167,6 +221,11 @@ def parse_args() -> argparse.Namespace:
         help="Print URLs that would open without opening browser tabs.",
     )
     parser.add_argument(
+        "--open",
+        action="store_true",
+        help="Actually open selected export pages. Default only reports what would be opened.",
+    )
+    parser.add_argument(
         "--record-only",
         action="store_true",
         help="Record selected pages as opened without opening browser tabs.",
@@ -175,6 +234,11 @@ def parse_args() -> argparse.Namespace:
         "--mark-requested",
         action="store_true",
         help="Mark selected providers as manually requested without opening browser tabs.",
+    )
+    parser.add_argument(
+        "--mark-expired",
+        action="store_true",
+        help="Mark selected providers' prior ready/download links as expired and needing re-request.",
     )
     parser.add_argument(
         "--delay",
@@ -226,7 +290,7 @@ def print_targets(targets: list[ExportTarget]) -> None:
         print(f"          {target.login_hint}")
 
 
-def load_state(path: Path) -> dict:
+def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
@@ -236,10 +300,130 @@ def load_state(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def save_state(path: Path, state: dict) -> None:
+def save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = datetime.now().isoformat(timespec="seconds")
     path.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def better_status(old: str, new: str) -> str:
+    return new if STATUS_RANK.get(new, 0) >= STATUS_RANK.get(old, 0) else old
+
+
+def provider_status(raw: dict[str, Any]) -> str:
+    status = str(raw.get("status") or "not_started")
+    if status == "download_link_expired":
+        return status
+    requested_at = str(raw.get("requested_at") or "")
+    last_email_at = str(raw.get("last_email_at") or "")
+    if (
+        requested_at
+        and last_email_at
+        and requested_at > last_email_at
+        and status in {"ready_email_seen", "export_email_seen", "confirmation_email_seen"}
+    ):
+        return "request_submitted_manually"
+    if raw.get("last_download_opened_at"):
+        status = better_status(status, "download_link_opened")
+    elif last_email_at and not raw.get("status"):
+        status = better_status(status, "export_email_seen")
+    return status if status in STATUS_RANK else "export_email_seen"
+
+
+def provider_stage(status: str) -> str:
+    return STATUS_STAGE.get(status, "status")
+
+
+def provider_manual_boundary(status: str) -> str:
+    return MANUAL_BOUNDARY.get(status, "review_provider_status_manually")
+
+
+def normalize_provider_status(target: ExportTarget, raw: dict[str, Any]) -> dict[str, Any]:
+    status = provider_status(raw)
+    ready_at = raw.get("last_email_at") if status == "ready_email_seen" else ""
+    if status == "ready_ui_seen":
+        ready_at = raw.get("last_browser_seen_at") or ""
+    download_opened_at = str(raw.get("last_download_opened_at") or "")
+    return {
+        "key": target.key,
+        "name": str(raw.get("name") or target.name),
+        "status": status,
+        "stage": provider_stage(status),
+        "manual_boundary": provider_manual_boundary(status),
+        "priority": target.priority,
+        "url": str(raw.get("url") or target.url),
+        "request": {
+            "opened_at": str(raw.get("opened_at") or ""),
+            "opened_count": int(raw.get("opened_count") or 0),
+            "requested_at": str(raw.get("requested_at") or ""),
+        },
+        "browser": {
+            "seen_at": str(raw.get("last_browser_seen_at") or ""),
+            "url": str(raw.get("last_browser_url") or ""),
+            "title": str(raw.get("last_browser_title") or ""),
+            "signal": str(raw.get("last_browser_signal") or ""),
+        },
+        "email": {
+            "seen_at": str(raw.get("last_email_at") or ""),
+            "title": str(raw.get("last_email_title") or ""),
+            "snippet": str(raw.get("last_email_snippet") or ""),
+            "event_count": len(raw.get("email_events") or [])
+            if isinstance(raw.get("email_events"), list)
+            else 0,
+        },
+        "ready": {
+            "ready_at": str(ready_at or ""),
+            "source": "email"
+            if status == "ready_email_seen"
+            else "browser"
+            if status == "ready_ui_seen"
+            else "",
+        },
+        "download": {
+            "opened_at": download_opened_at,
+            "download_dir": str(raw.get("download_dir") or ""),
+            "expired_at": str(raw.get("last_download_expired_at") or ""),
+            "expired_reason": str(raw.get("download_expired_reason") or ""),
+            "event_count": len(raw.get("download_open_events") or [])
+            if isinstance(raw.get("download_open_events"), list)
+            else 0,
+        },
+    }
+
+
+def build_status_model(state: dict[str, Any]) -> dict[str, Any]:
+    providers_state = state.get("providers") if isinstance(state.get("providers"), dict) else {}
+    providers = [
+        normalize_provider_status(
+            target,
+            providers_state.get(target.key, {})
+            if isinstance(providers_state.get(target.key), dict)
+            else {},
+        )
+        for target in EXPORT_TARGETS
+    ]
+    counts: dict[str, int] = {}
+    for provider in providers:
+        stage = str(provider["stage"])
+        counts[stage] = counts.get(stage, 0) + 1
+    return {
+        "schema": "inbox.data_exports.status.v1",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "state_updated_at": str(state.get("updated_at") or ""),
+        "summary": {
+            "total": len(providers),
+            "by_stage": counts,
+            "ready": sum(1 for provider in providers if provider["stage"] == "ready"),
+            "download": sum(1 for provider in providers if provider["stage"] == "download"),
+            "manual_attention": sum(
+                1
+                for provider in providers
+                if provider["manual_boundary"]
+                not in {"wait_for_ready_email_or_status", "review_export_email"}
+            ),
+        },
+        "providers": providers,
+    }
 
 
 def mark_opened(path: Path, targets: list[ExportTarget]) -> None:
@@ -255,7 +439,10 @@ def mark_opened(path: Path, targets: list[ExportTarget]) -> None:
                 "note": target.note,
                 "login_hint": target.login_hint,
                 "opened_at": opened_at,
-                "status": "opened_export_page",
+                "status": better_status(
+                    str(provider.get("status") or "not_started"),
+                    "opened_export_page",
+                ),
             }
         )
         provider["opened_count"] = int(provider.get("opened_count", 0)) + 1
@@ -268,6 +455,12 @@ def mark_requested(path: Path, targets: list[ExportTarget]) -> None:
     requested_at = datetime.now().isoformat(timespec="seconds")
     for target in targets:
         provider = providers.setdefault(target.key, {})
+        old_status = str(provider.get("status") or "not_started")
+        status = (
+            "request_submitted_manually"
+            if old_status == "download_link_expired"
+            else better_status(old_status, "request_submitted_manually")
+        )
         provider.update(
             {
                 "name": target.name,
@@ -275,32 +468,58 @@ def mark_requested(path: Path, targets: list[ExportTarget]) -> None:
                 "note": target.note,
                 "login_hint": target.login_hint,
                 "requested_at": requested_at,
-                "status": "request_submitted_manually",
+                "status": status,
+            }
+        )
+        if old_status == "download_link_expired":
+            provider.pop("last_download_expired_at", None)
+            provider.pop("download_expired_reason", None)
+    save_state(path, state)
+
+
+def mark_expired(path: Path, targets: list[ExportTarget], reason: str) -> None:
+    state = load_state(path)
+    providers = state.setdefault("providers", {})
+    expired_at = datetime.now().isoformat(timespec="seconds")
+    for target in targets:
+        provider = providers.setdefault(target.key, {})
+        provider.update(
+            {
+                "name": target.name,
+                "url": target.url,
+                "note": target.note,
+                "login_hint": target.login_hint,
+                "last_download_expired_at": expired_at,
+                "download_expired_reason": reason,
+                "status": "download_link_expired",
             }
         )
     save_state(path, state)
 
 
-def print_status(path: Path) -> None:
+def print_status(path: Path, *, as_json: bool = False) -> None:
     state = load_state(path)
-    providers = state.get("providers", {})
-    for target in EXPORT_TARGETS:
-        status = providers.get(target.key, {})
-        opened_at = status.get("opened_at", "not opened")
-        requested_at = status.get("requested_at", "")
-        current = status.get("status", "not_started")
-        email_at = status.get("last_email_at", "")
-        email_title = status.get("last_email_title", "")
-        print(f"{target.key:9} {current}")
+    model = build_status_model(state)
+    if as_json:
+        print(json.dumps(model, indent=2, sort_keys=True))
+        return
+    for provider in model["providers"]:
+        print(f"{provider['key']:9} {provider['stage']}:{provider['status']}")
+        print(f"          next:   {provider['manual_boundary']}")
+        opened_at = provider["request"]["opened_at"] or "not opened"
         print(f"          opened: {opened_at}")
-        if requested_at:
-            print(f"          requested: {requested_at}")
-        if email_at or email_title:
-            print(f"          email:  {email_at} {email_title}".rstrip())
-        events = status.get("email_events")
-        if isinstance(events, list) and len(events) > 1:
-            print(f"          email events: {len(events)}")
-        print(f"          url:    {target.url}")
+        if provider["request"]["requested_at"]:
+            print(f"          requested: {provider['request']['requested_at']}")
+        if provider["email"]["seen_at"] or provider["email"]["title"]:
+            print(
+                f"          email:  {provider['email']['seen_at']} "
+                f"{provider['email']['title']}".rstrip()
+            )
+        if provider["download"]["opened_at"]:
+            print(f"          download opened: {provider['download']['opened_at']}")
+        if provider["download"]["expired_at"]:
+            print(f"          expired: {provider['download']['expired_at']}")
+        print(f"          url:    {provider['url']}")
 
 
 def open_target_via_cdp(cdp_url: str, target: ExportTarget) -> None:
@@ -326,7 +545,7 @@ def main() -> int:
         print_targets(list(EXPORT_TARGETS))
         return 0
     if args.status:
-        print_status(state_path)
+        print_status(state_path, as_json=args.json)
         return 0
 
     selected = select_targets(args)
@@ -334,10 +553,20 @@ def main() -> int:
     if args.mark_requested:
         mark_requested(state_path, selected)
         return 0
+    if getattr(args, "mark_expired", False):
+        mark_expired(
+            state_path,
+            selected,
+            "ready/download link was stale and no file landed in the downloads directory",
+        )
+        return 0
     if args.record_only:
         mark_opened(state_path, selected)
         return 0
     if args.dry_run:
+        return 0
+    if not args.open:
+        print("Dry run only. Re-run with --open to open browser tabs.")
         return 0
 
     for target in selected:

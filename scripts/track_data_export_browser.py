@@ -24,6 +24,7 @@ from request_personal_data_exports import (  # noqa: E402
     DEFAULT_STATE_PATH,
     EXPORT_TARGETS,
     ExportTarget,
+    better_status,
     load_state,
     save_state,
 )
@@ -94,19 +95,6 @@ READY_TERMS = (
     "your google data is ready",
     "copy of your information is ready",
 )
-
-STATUS_RANK = {
-    "not_started": 0,
-    "opened_export_page": 1,
-    "browser_seen_export_page": 2,
-    "login_required_seen": 3,
-    "request_ui_seen": 4,
-    "request_submitted_seen": 5,
-    "request_submitted_manually": 6,
-    "confirmation_email_seen": 7,
-    "ready_ui_seen": 8,
-    "ready_email_seen": 9,
-}
 
 PROVIDER_HOSTS = {
     "linkedin": ("linkedin.com",),
@@ -397,10 +385,6 @@ def classify_status(page_data: dict[str, Any]) -> tuple[str, str]:
     if any(term in text for term in LOGIN_TERMS):
         return "login_required_seen", "login/verification language visible"
     return "browser_seen_export_page", "provider page visible"
-
-
-def better_status(old: str, new: str) -> str:
-    return new if STATUS_RANK.get(new, 0) >= STATUS_RANK.get(old, 0) else old
 
 
 def update_state_for_page(

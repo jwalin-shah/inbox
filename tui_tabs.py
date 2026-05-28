@@ -147,6 +147,16 @@ TUI_TABS: tuple[TabMeta, ...] = (
         "command_name": "Switch to Capture Health",
         "command_description": "Show source capture and egress health",
     },
+    {
+        "id": "ops",
+        "label": "Ops",
+        "textual_tab_id": "tab-ops",
+        "mode": "detail",
+        "action": "action_filter_ops",
+        "command_id": "switch_ops",
+        "command_name": "Switch to Ops",
+        "command_description": "Show provider-agnostic ops queues",
+    },
 )
 
 TAB_BY_TEXTUAL_ID = {tab["textual_tab_id"]: tab for tab in TUI_TABS}

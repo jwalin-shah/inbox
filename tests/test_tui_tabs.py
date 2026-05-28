@@ -13,4 +13,4 @@ def test_tui_tabs_have_unique_ids_and_textual_ids():
 
 def test_tui_tabs_include_expected_detail_modes():
     detail_tabs = {tab["id"] for tab in TUI_TABS if tab["mode"] == "detail"}
-    assert detail_tabs == {"calendar", "notes", "reminders", "github", "drive", "health"}
+    assert detail_tabs == {"calendar", "notes", "reminders", "github", "drive", "health", "ops"}

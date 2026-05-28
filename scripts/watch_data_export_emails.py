@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from request_personal_data_exports import better_status
 
 from inbox_client import InboxClient
 
@@ -20,6 +23,7 @@ DEFAULT_STATE_PATH = Path.home() / ".local/state/inbox/data-export-email-watch.j
 DEFAULT_ENV_PATH = Path.home() / ".config/raycast/inbox-workflows.env"
 EXPORT_QUERY = (
     '("ready to download" OR "ready for download" OR "Your data is ready for download" OR '
+    '"download request is complete" OR "download from Data & Privacy" OR '
     '"download your data" OR "data export" OR "Google data" OR "Takeout" OR '
     '"Archive of Google data scheduled" OR "Scheduled Archive of Google Data started" OR '
     '"preparing your data for download" OR '
@@ -58,6 +62,8 @@ READY_TERMS = (
     "available to download",
     "download your files",
     "download your information",
+    "download request is complete",
+    "download from data & privacy",
     "your google data is ready",
     "copy of your information is ready",
 )
@@ -189,19 +195,22 @@ def update_provider_status(state: dict[str, Any], hits: list[dict[str, str | boo
             continue
         provider = providers.setdefault(provider_key, {})
         new_status = classify_email_status(hit)
-        old_status = str(provider.get("status") or "")
-        if old_status == "ready_email_seen" and new_status != "ready_email_seen":
-            status = old_status
-        else:
-            status = new_status
-        provider.update(
-            {
-                "status": status,
-                "last_email_at": hit.get("timestamp") or "",
-                "last_email_title": hit.get("title") or "",
-                "last_email_snippet": hit.get("snippet") or "",
-            }
-        )
+        old_status = str(provider.get("status") or "not_started")
+        requested_at = str(provider.get("requested_at") or "")
+        hit_timestamp = str(hit.get("timestamp") or "")
+        if requested_at and hit_timestamp and hit_timestamp < requested_at:
+            continue
+        status = better_status(old_status, new_status)
+        provider["status"] = status
+        current_timestamp = str(provider.get("last_email_at") or "")
+        if status == new_status and hit_timestamp >= current_timestamp:
+            provider.update(
+                {
+                    "last_email_at": hit_timestamp,
+                    "last_email_title": hit.get("title") or "",
+                    "last_email_snippet": hit.get("snippet") or "",
+                }
+            )
         events = provider.setdefault("email_events", [])
         if isinstance(events, list):
             event = {
@@ -220,7 +229,11 @@ def update_provider_status(state: dict[str, Any], hits: list[dict[str, str | boo
 def find_export_emails(client: InboxClient, newer_than: str, limit: int) -> list[dict[str, Any]]:
     query = f"{EXPORT_QUERY} newer_than:{newer_than}"
     data = client.search(query, sources=["gmail"], limit=limit)
-    return [normalize_result(item, set()) for item in data.get("results", [])]
+    return filter_export_hits([normalize_result(item, set()) for item in data.get("results", [])])
+
+
+def filter_export_hits(hits: list[dict[str, str | bool]]) -> list[dict[str, str | bool]]:
+    return [hit for hit in hits if str(hit.get("provider") or "unknown") != "unknown"]
 
 
 def notify(hit_count: int) -> None:
@@ -251,7 +264,7 @@ def poll_once(
     seen = seen_ids_from_state(state)
     query = f"{EXPORT_QUERY} newer_than:{args.newer_than}"
     data = client.search(query, sources=["gmail"], limit=args.limit)
-    hits = [normalize_result(item, seen) for item in data.get("results", [])]
+    hits = filter_export_hits([normalize_result(item, seen) for item in data.get("results", [])])
     printable = hits if args.include_seen else [hit for hit in hits if hit["is_new"]]
     print_hits(printable, as_json=args.json)
 

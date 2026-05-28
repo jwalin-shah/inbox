@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from request_personal_data_exports import DEFAULT_STATE_PATH, load_state, save_state
+from request_personal_data_exports import DEFAULT_STATE_PATH, better_status, load_state, save_state
 from track_data_export_browser import CdpConnection
 
 from services import google_auth_all
@@ -35,20 +36,58 @@ class ReadyProvider:
     account: str
     query: str
     preferred_domains: tuple[str, ...]
+    required_url_terms: tuple[str, ...] = ()
 
 
 READY_PROVIDERS: tuple[ReadyProvider, ...] = (
     ReadyProvider(
+        key="linkedin",
+        account="jwalinshah13@gmail.com",
+        query='from:(LinkedIn) ("ready" OR "download") newer_than:30d',
+        preferred_domains=("linkedin.com",),
+        required_url_terms=("download",),
+    ),
+    ReadyProvider(
+        key="openai",
+        account="jwalinshah13@gmail.com",
+        query='(from:(OpenAI) OR from:(ChatGPT)) ("ready" OR "export" OR "download") newer_than:30d',
+        preferred_domains=("openai.com", "chatgpt.com"),
+        required_url_terms=("backend-api/estuary/content", ".zip"),
+    ),
+    ReadyProvider(
         key="claude",
         account="jwalinshah13@gmail.com",
-        query='from:(Anthropic) "Your data is ready for download" newer_than:7d',
+        query='from:(Anthropic) "Your data is ready for download" newer_than:30d',
         preferred_domains=("claude.ai",),
+        required_url_terms=("/export/", "/download/"),
     ),
     ReadyProvider(
         key="github",
         account="jwalinshah13@gmail.com",
-        query='from:(GitHub) "Your data export is ready to download" newer_than:7d',
+        query='from:(GitHub) "Your data export is ready to download" newer_than:30d',
         preferred_domains=("github.com",),
+        required_url_terms=("migration/download",),
+    ),
+    ReadyProvider(
+        key="google",
+        account="jwalinshah13@gmail.com",
+        query='("Your Google data has been exported" OR "Google data" OR "Takeout") newer_than:30d',
+        preferred_domains=("takeout.google.com", "drive.google.com", "google.com"),
+        required_url_terms=("takeout",),
+    ),
+    ReadyProvider(
+        key="spotify",
+        account="jwalinshah13@gmail.com",
+        query='from:(Spotify) ("ready to download" OR "download") newer_than:30d',
+        preferred_domains=("spotify.com",),
+        required_url_terms=("download",),
+    ),
+    ReadyProvider(
+        key="apple",
+        account="jwalinsshah@gmail.com",
+        query='from:(Apple) ("ready" OR "download" OR "preparing your data") newer_than:30d',
+        preferred_domains=("privacy.apple.com", "apple.com"),
+        required_url_terms=("account/archive",),
     ),
 )
 
@@ -79,7 +118,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL)
     parser.add_argument("--download-dir", default=str(DEFAULT_DOWNLOAD_DIR))
     parser.add_argument("--state-path", default=str(DEFAULT_STATE_PATH))
+    parser.add_argument("--include-urls", action="store_true")
+    parser.add_argument(
+        "--write-links",
+        help="Write a local Markdown checklist containing private ready download links.",
+    )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="Actually open ready links and allow browser downloads. Default only reports links.",
+    )
     return parser.parse_args()
 
 
@@ -118,12 +167,16 @@ def domain_for(url: str) -> str:
     return (parsed.hostname or "").lower()
 
 
-def keep_link(url: str, preferred_domains: tuple[str, ...]) -> bool:
+def keep_link(url: str, provider: ReadyProvider) -> bool:
     lower = url.lower()
-    if any(term in lower for term in ("unsubscribe", "privacy", "terms", "preferences")):
+    if any(term in lower for term in ("unsubscribe", "terms", "preferences")):
         return False
     host = domain_for(url)
-    return any(host == domain or host.endswith(f".{domain}") for domain in preferred_domains)
+    if not any(
+        host == domain or host.endswith(f".{domain}") for domain in provider.preferred_domains
+    ):
+        return False
+    return all(term.lower() in lower for term in provider.required_url_terms)
 
 
 def ready_provider_map() -> dict[str, ReadyProvider]:
@@ -193,8 +246,9 @@ def collect_ready_links(provider: ReadyProvider) -> list[dict[str, str]]:
         msg_id = str(msg_ref.get("id") or "")
         full = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
         headers = {h["name"]: h["value"] for h in full.get("payload", {}).get("headers", [])}
-        for url in extract_links(full.get("payload", {})):
-            if url in seen_urls or not keep_link(url, provider.preferred_domains):
+        for raw_url in extract_links(full.get("payload", {})):
+            url = html.unescape(raw_url).rstrip(").,")
+            if url in seen_urls or not keep_link(url, provider):
                 continue
             seen_urls.add(url)
             found.append(
@@ -209,6 +263,43 @@ def collect_ready_links(provider: ReadyProvider) -> list[dict[str, str]]:
     return found
 
 
+def render_links_markdown(ready_links: list[dict[str, str]], download_dir: Path) -> str:
+    generated_at = datetime.now().isoformat(timespec="seconds")
+    lines = [
+        "# Personal Data Export Download Links",
+        "",
+        f"Generated: {generated_at}",
+        "",
+        "These links are private signed/account-bound export links from Gmail. Open them in your normal logged-in browser, then save the downloaded archives into:",
+        "",
+        f"`{download_dir}`",
+        "",
+    ]
+    if not ready_links:
+        lines.extend(["No ready download links found.", ""])
+        return "\n".join(lines)
+
+    for index, item in enumerate(ready_links, start=1):
+        lines.extend(
+            [
+                f"## {index}. {item['provider']}",
+                "",
+                f"- Subject: {item['subject']}",
+                f"- Gmail message id: `{item['message_id']}`",
+                f"- Domain: `{item['domain']}`",
+                f"- Link: {item['url']}",
+                "- Done: [ ] downloaded into `_downloads`",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def write_links(path: Path, ready_links: list[dict[str, str]], download_dir: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_links_markdown(ready_links, download_dir), encoding="utf-8")
+
+
 def update_state(path: Path, opened: list[dict[str, str]], download_dir: Path) -> None:
     if not opened:
         return
@@ -217,6 +308,8 @@ def update_state(path: Path, opened: list[dict[str, str]], download_dir: Path) -
     now = datetime.now().isoformat(timespec="seconds")
     for item in opened:
         provider = providers.setdefault(item["provider"], {})
+        old_status = str(provider.get("status") or "not_started")
+        provider["status"] = better_status(old_status, "download_link_opened")
         provider["last_download_opened_at"] = now
         provider["download_dir"] = str(download_dir)
         events = provider.setdefault("download_open_events", [])
@@ -255,6 +348,7 @@ def main() -> int:
                     "message_id": item["message_id"],
                     "subject": item["subject"],
                     "domain": item["domain"],
+                    **({"url": item["url"]} if args.include_urls else {}),
                 }
                 for item in ready_links
             ],
@@ -262,7 +356,9 @@ def main() -> int:
             sort_keys=True,
         )
     )
-    if args.dry_run or not ready_links:
+    if args.write_links:
+        write_links(Path(os.path.expanduser(args.write_links)), ready_links, download_dir)
+    if args.dry_run or not args.open or not ready_links:
         return 0
 
     set_download_dir(args.cdp_url, download_dir)
