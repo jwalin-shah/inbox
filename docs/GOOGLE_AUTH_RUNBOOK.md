@@ -6,6 +6,16 @@ refresh tokens.
 
 ## Diagnose
 
+Start with the local helper:
+
+```bash
+cd ~/projects/inbox
+scripts/restore_google_oauth.sh
+```
+
+If it reports that `credentials.json` is missing, restore the Google OAuth
+client secret first. The helper does not print secrets.
+
 Run the read-only diagnostic:
 
 ```bash
@@ -53,6 +63,18 @@ Go to Google Cloud Console:
    Internal Workspace app if all accounts are in the same Google Workspace.
 6. Keep yourself listed as a test user until the publishing state is changed.
 7. Reauthorize each account after the consent-screen change.
+
+## Reauthorize On This Mac
+
+After `credentials.json` is present and the Inbox server is running:
+
+```bash
+cd ~/projects/inbox
+scripts/restore_google_oauth.sh --start
+```
+
+This calls the local `/accounts/add` endpoint, opens the browser OAuth flow, and
+stores the resulting per-account token under `tokens/<email>.json`.
 
 Google's documented refresh-token expiration cases include app access revoked,
 six months of inactivity, password changes with Gmail scopes, refresh-token
