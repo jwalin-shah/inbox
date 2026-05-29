@@ -18,8 +18,34 @@ Requirements:
   - INBOX_SERVER_TOKEN available in the environment or ~/.config/inbox/server.env
   - credentials.json present in the inbox repo
 
+The Google OAuth client secret is sensitive. Restore credentials.json from a
+trusted local secret source such as Keeper, Google Cloud Console, or a direct
+encrypted transfer. Do not paste it into chat.
+
 After browser OAuth completes, re-run:
   scripts/restore_google_oauth.sh
+EOF
+}
+
+print_missing_credentials_help() {
+  cat >&2 <<EOF
+Missing $ROOT/credentials.json. Restore the Google OAuth client secret first.
+
+Expected file:
+  $ROOT/credentials.json
+
+Current token directory:
+  $ROOT/tokens
+
+Safe restore options:
+  - Keeper or another password manager attachment/note
+  - Google Cloud Console OAuth client JSON download
+  - Direct encrypted transfer from the old Mac
+
+After restoring credentials.json:
+  $0 --start
+
+Do not paste credentials.json into chat.
 EOF
 }
 
@@ -52,7 +78,7 @@ if [[ -z "${INBOX_SERVER_TOKEN:-}" ]]; then
 fi
 
 if [[ ! -f "$ROOT/credentials.json" ]]; then
-  echo "Missing $ROOT/credentials.json. Restore the Google OAuth client secret first." >&2
+  print_missing_credentials_help
   exit 2
 fi
 
