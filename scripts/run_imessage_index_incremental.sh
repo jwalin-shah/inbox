@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
-export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}"
 
 ENV_FILE="${INBOX_ENV_FILE:-${INBOX_WORKFLOWS_ENV:-$ROOT_DIR/config/inbox.env}}"
 if [[ -f "$ENV_FILE" ]]; then
@@ -15,4 +14,7 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
-exec uv run python mcp_server.py
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}"
+export INBOX_DISABLE_IMESSAGE_SYNC="${INBOX_DISABLE_IMESSAGE_SYNC:-0}"
+
+exec uv run python message_sync.py imessage-incremental

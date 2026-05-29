@@ -229,6 +229,24 @@ TOOLS: list[Tool] = [
             Param("account", str, "", "body"),
         ],
     ),
+    Tool(
+        name="create_email_draft",
+        method="POST",
+        path="/messages/gmail/drafts",
+        description=(
+            "Create a Gmail draft without sending it. Confirmation-gated because it "
+            "writes to Gmail."
+        ),
+        readonly=False,
+        confirm=True,
+        params=[
+            Param("to", str, _EMPTY, "body"),
+            Param("subject", str, _EMPTY, "body"),
+            Param("body", str, _EMPTY, "body"),
+            Param("thread_id", str, "", "body"),
+            Param("account", str, "", "body"),
+        ],
+    ),
     # ---------- Google Sheets (read) ----------
     Tool(
         name="list_sheets",
@@ -302,6 +320,7 @@ TOOLS: list[Tool] = [
         params=[
             Param("message_id", str, _EMPTY, "path"),
             Param("thread_id", str, "", "query"),
+            Param("account", str, "", "query"),
         ],
     ),
     Tool(
@@ -317,6 +336,14 @@ TOOLS: list[Tool] = [
         method="POST",
         path="/messages/gmail/{message_id}/read",
         description="Mark a Gmail message as read. Confirmation-gated.",
+        confirm=True,
+        params=[Param("message_id", str, _EMPTY, "path")],
+    ),
+    Tool(
+        name="delete_email_thread",
+        method="POST",
+        path="/messages/gmail/{message_id}/delete",
+        description="Move a Gmail message/thread to Trash. Confirmation-gated.",
         confirm=True,
         params=[Param("message_id", str, _EMPTY, "path")],
     ),

@@ -43,6 +43,8 @@ def test_create_sheet_and_append_rows_are_confirm_gated():
     by_name = {tool.name: tool for tool in TOOLS}
     assert by_name["create_sheet"].confirm is True
     assert by_name["append_sheet_rows"].confirm is True
+    assert by_name["create_email_draft"].confirm is True
+    assert by_name["delete_email_thread"].confirm is True
 
 
 def test_all_mutating_tools_require_confirm():
@@ -172,6 +174,59 @@ def test_index_view_dispatches_to_named_index_route():
         "method": "GET",
         "path": "/index/views/waiting-on-me",
         "params": {"limit": 7},
+        "json": None,
+    }
+
+
+def test_gmail_agent_tools_dispatch_to_expected_routes():
+    handlers = _handlers()
+
+    thread = asyncio.run(
+        handlers["get_email_thread"](
+            message_id="msg/1",
+            thread_id="thread 1",
+            account="me@example.com",
+        )
+    )
+    draft = asyncio.run(
+        handlers["create_email_draft"](
+            to="alice@example.com",
+            subject="Hello",
+            body="Draft body",
+            thread_id="thread 1",
+            account="me@example.com",
+            confirm=True,
+        )
+    )
+    deleted = asyncio.run(
+        handlers["delete_email_thread"](
+            message_id="msg/1",
+            confirm=True,
+        )
+    )
+
+    assert thread == {
+        "method": "GET",
+        "path": "/messages/gmail/msg%2F1",
+        "params": {"thread_id": "thread 1", "account": "me@example.com"},
+        "json": None,
+    }
+    assert draft == {
+        "method": "POST",
+        "path": "/messages/gmail/drafts",
+        "params": None,
+        "json": {
+            "to": "alice@example.com",
+            "subject": "Hello",
+            "body": "Draft body",
+            "thread_id": "thread 1",
+            "account": "me@example.com",
+        },
+    }
+    assert deleted == {
+        "method": "POST",
+        "path": "/messages/gmail/msg%2F1/delete",
+        "params": None,
         "json": None,
     }
 

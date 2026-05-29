@@ -1267,6 +1267,74 @@ class TestGmailExtensions:
         data = resp.json()
         assert len(data) == 1
         assert data[0]["name"] == "Alice"
+        assert data[0]["id"] == "msg1"
+        assert data[0]["message_id"] == "msg1"
+        assert data[0]["thread_id"] == "thread1"
+        assert data[0]["account"] == "me@gmail.com"
+        assert data[0]["gmail_account"] == "me@gmail.com"
+        assert data[0]["subject"] == data[0]["snippet"]
+        assert data[0]["from"] == "alice@example.com"
+        assert data[0]["timestamp"] == data[0]["last_ts"]
+
+    @patch("inbox_server.gmail_thread")
+    def test_get_gmail_thread_by_message_id_with_account(self, mock_thread, client):
+        import inbox_server
+
+        svc = MagicMock()
+        inbox_server.state.gmail_services = {"me@gmail.com": svc}
+        mock_thread.return_value = [
+            Msg(
+                sender="Alice",
+                body="Hello",
+                ts=datetime(2025, 1, 1, 12, 0),
+                is_me=False,
+                source="gmail",
+                message_id="msg1",
+            )
+        ]
+
+        resp = client.get(
+            "/messages/gmail/msg1",
+            params={"thread_id": "thread1", "account": "me@gmail.com"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["message_id"] == "msg1"
+        assert data[0]["source"] == "gmail"
+        mock_thread.assert_called_once_with(svc, "msg1", "thread1")
+
+    @patch("inbox_server.gmail_create_draft")
+    def test_gmail_create_draft(self, mock_create_draft, client):
+        import inbox_server
+
+        inbox_server.state.gmail_services = {"me@gmail.com": MagicMock()}
+        mock_create_draft.return_value = {
+            "id": "draft1",
+            "message_id": "msg1",
+            "thread_id": "thread1",
+        }
+
+        resp = client.post(
+            "/messages/gmail/drafts",
+            json={
+                "to": "alice@example.com",
+                "subject": "Hello",
+                "body": "Draft body",
+                "thread_id": "thread1",
+                "account": "me@gmail.com",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "ok": True,
+            "account": "me@gmail.com",
+            "draft_id": "draft1",
+            "message_id": "msg1",
+            "thread_id": "thread1",
+        }
+        mock_create_draft.assert_called_once()
 
     @patch("inbox_server.gmail_reply")
     def test_gmail_reply(self, mock_reply, client):

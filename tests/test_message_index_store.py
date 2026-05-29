@@ -63,6 +63,60 @@ def test_upsert_item_replaces_existing_row(tmp_path):
     assert rows[0]["latest_subject"] == "Updated subject"
 
 
+def test_list_threads_filters_by_source_and_account(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _item(
+            source="imessage",
+            account="local",
+            external_id="im1",
+            thread_id="chat-1",
+            sender="+15551234567",
+            body="Indexed iMessage",
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="me@example.com",
+            external_id="gm1",
+            thread_id="thread-1",
+            sender="sender@example.com",
+            subject="Email",
+        )
+    )
+    store.rebuild_threads()
+
+    rows = store.list_threads(limit=5, source="imessage", account="local")
+
+    assert [row["thread_id"] for row in rows] == ["chat-1"]
+
+
+def test_list_thread_items_returns_recent_items_chronologically(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    for idx in range(3):
+        store.upsert_item(
+            _item(
+                source="whatsapp",
+                account="brave-cdp",
+                external_id=f"wa-{idx}",
+                thread_id="chat-1",
+                sender="Me" if idx == 2 else "Alex",
+                body=f"Message {idx}",
+                created_at=f"2026-04-18T0{idx}:00:00+00:00",
+            )
+        )
+
+    rows = store.list_thread_items(
+        source="whatsapp",
+        account="brave-cdp",
+        thread_id="chat-1",
+        limit=2,
+    )
+
+    assert [row["external_id"] for row in rows] == ["wa-1", "wa-2"]
+
+
 def test_rebuild_threads_marks_human_reply_as_actionable(tmp_path):
     store = MessageIndexStore(tmp_path / "index.sqlite3")
     store.upsert_item(

@@ -1360,6 +1360,41 @@ def gmail_compose_send(service, to: str, subject: str, body: str) -> bool:
         return False
 
 
+def gmail_create_draft(
+    service,
+    to: str,
+    subject: str,
+    body: str,
+    thread_id: str = "",
+) -> dict[str, str]:
+    """Create a Gmail draft without sending it."""
+    _assert_live_write_allowed("create Gmail draft")
+    msg = MIMEText(body)
+    msg["to"] = to
+    msg["subject"] = subject
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    message: dict[str, str] = {"raw": raw}
+    if thread_id:
+        message["threadId"] = thread_id
+    try:
+        result = service.users().drafts().create(userId="me", body={"message": message}).execute()
+        drafted_message = result.get("message", {})
+        return {
+            "id": result.get("id", ""),
+            "message_id": drafted_message.get("id", ""),
+            "thread_id": drafted_message.get("threadId", thread_id),
+        }
+    except Exception:
+        _log_service_failure(
+            "gmail_create_draft",
+            to=to,
+            subject=subject,
+            body_length=len(body),
+            thread_id=thread_id,
+        )
+        return {}
+
+
 def gmail_reply(
     service,
     msg_id: str,
@@ -2537,13 +2572,27 @@ def _whatsapp_pid() -> int | None:
     Returns None if WhatsApp is not running or Objective-C imports fail.
     """
     try:
-        from Foundation import NSWorkspace
+        from AppKit import NSWorkspace
 
         ws = NSWorkspace.sharedWorkspace()
         apps = ws.runningApplications()
         for app in apps:
             if app.bundleIdentifier() == "net.whatsapp.WhatsApp":
                 return app.processIdentifier()
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "/Applications/WhatsApp.app/Contents/MacOS/WhatsApp"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line:
+                return int(line)
     except Exception:
         pass
     return None
@@ -2771,6 +2820,11 @@ def whatsapp_contacts(limit: int = 20) -> list[Contact]:
     return contacts[:limit]
 
 
+def whatsapp_accessibility_contacts(limit: int = 20) -> list[Contact]:
+    """List WhatsApp conversations from the live desktop Accessibility tree only."""
+    return _whatsapp_accessibility_tree()[:limit]
+
+
 def _whatsapp_select_chat(chat_name: str) -> bool:
     """Click the sidebar AXButton whose parsed name matches chat_name."""
     try:
@@ -2949,7 +3003,7 @@ def whatsapp_contacts_all(max_pages: int = 10) -> list[Contact]:
         seen: dict[str, Contact] = {}
         stagnant = 0
         for _ in range(max_pages):
-            for c in whatsapp_contacts(limit=200):
+            for c in whatsapp_accessibility_contacts(limit=200):
                 if c.name and c.name not in seen:
                     seen[c.name] = c
             before = len(seen)
@@ -2957,7 +3011,7 @@ def whatsapp_contacts_all(max_pages: int = 10) -> list[Contact]:
             if err != 0:
                 break
             time.sleep(0.3)
-            for c in whatsapp_contacts(limit=200):
+            for c in whatsapp_accessibility_contacts(limit=200):
                 if c.name and c.name not in seen:
                     seen[c.name] = c
             if len(seen) == before:
@@ -3079,6 +3133,11 @@ def whatsapp_thread(chat_name: str, limit: int = 50) -> list[Msg]:
     openhuman_messages = _openhuman_whatsapp_thread(chat_name, limit)
     if openhuman_messages:
         return openhuman_messages
+    return whatsapp_accessibility_thread(chat_name, limit=limit)
+
+
+def whatsapp_accessibility_thread(chat_name: str, limit: int = 50) -> list[Msg]:
+    """Fetch visible WhatsApp messages for a conversation from Accessibility only."""
     try:
         if not whatsapp_check_accessibility(prompt=False):
             return []

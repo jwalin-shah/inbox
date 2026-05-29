@@ -593,6 +593,8 @@ class MessageIndexStore:
         self,
         *,
         limit: int = 25,
+        source: str | None = None,
+        account: str | None = None,
         actionable_only: bool = False,
         newest_only: bool = False,
         actions: tuple[str, ...] | None = None,
@@ -603,6 +605,12 @@ class MessageIndexStore:
     ) -> list[dict[str, object]]:
         predicates: list[str] = []
         params: list[object] = []
+        if source:
+            predicates.append("source = ?")
+            params.append(source)
+        if account:
+            predicates.append("account = ?")
+            params.append(account)
         if actionable_only:
             predicates.append("actionability IN ('reply', 'review', 'track')")
         if newest_only:
@@ -637,6 +645,38 @@ class MessageIndexStore:
             _q = f"SELECT * FROM threads {where_clause} ORDER BY {order_clause} LIMIT ?"  # nosec B608
             rows = conn.execute(_q, params).fetchall()
         return [self._thread_row_to_dict(row) for row in rows]
+
+    def list_thread_items(
+        self,
+        *,
+        source: str,
+        account: str,
+        thread_id: str,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM (
+                    SELECT *
+                    FROM items
+                    WHERE source = ?
+                      AND account = ?
+                      AND thread_id = ?
+                      AND is_deleted = 0
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                )
+                ORDER BY created_at ASC, id ASC
+                """,
+                (source, account, thread_id, limit),
+            ).fetchall()
+        return [self._item_row_to_dict(row) for row in rows]
+
+    def _item_row_to_dict(self, row: sqlite3.Row) -> dict[str, object]:
+        keys = list(row.keys())
+        return {key: (_json_loads(row[key]) if key.endswith("_json") else row[key]) for key in keys}
 
     def _thread_row_to_dict(self, row: sqlite3.Row) -> dict[str, object]:
         keys = list(row.keys())

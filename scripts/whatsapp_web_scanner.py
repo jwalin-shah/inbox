@@ -346,6 +346,13 @@ def evaluate_scan(conn: CdpConnection) -> dict[str, Any]:
     return value
 
 
+def try_evaluate_scan(conn: CdpConnection) -> dict[str, Any] | None:
+    try:
+        return evaluate_scan(conn)
+    except RuntimeError:
+        return None
+
+
 def evaluate_idb_scan(conn: CdpConnection, limit: int) -> dict[str, Any]:
     result = conn.command(
         "Runtime.evaluate",
@@ -370,12 +377,45 @@ def click_visible_chat(conn: CdpConnection, index: int) -> bool:
       const row = rows[{index}];
       if (!row) return false;
       row.scrollIntoView({{block: 'center'}});
-      row.click();
-      return true;
+      const rect = row.getBoundingClientRect();
+      return {{
+        x: rect.left + Math.min(Math.max(rect.width / 2, 24), rect.width - 8),
+        y: rect.top + Math.min(Math.max(rect.height / 2, 8), rect.height - 8),
+      }};
     }})()
     """
     result = conn.command("Runtime.evaluate", {"expression": expression, "returnByValue": True})
-    return bool(result.get("result", {}).get("value"))
+    point = result.get("result", {}).get("value")
+    if not isinstance(point, dict):
+        return False
+    x = float(point.get("x") or 0)
+    y = float(point.get("y") or 0)
+    if x <= 0 or y <= 0:
+        return False
+    conn.command("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+    conn.command(
+        "Input.dispatchMouseEvent",
+        {
+            "type": "mousePressed",
+            "x": x,
+            "y": y,
+            "button": "left",
+            "buttons": 1,
+            "clickCount": 1,
+        },
+    )
+    conn.command(
+        "Input.dispatchMouseEvent",
+        {
+            "type": "mouseReleased",
+            "x": x,
+            "y": y,
+            "button": "left",
+            "buttons": 0,
+            "clickCount": 1,
+        },
+    )
+    return True
 
 
 def scroll_chat_list(conn: CdpConnection) -> bool:
@@ -696,12 +736,16 @@ def main() -> int:
                 if not click_visible_chat(conn, index):
                     continue
                 time.sleep(max(args.delay, 0))
-                scans.append(evaluate_scan(conn))
+                scan = try_evaluate_scan(conn)
+                if scan:
+                    scans.append(scan)
             if page < max(args.scroll_pages, 0):
                 if not scroll_chat_list(conn):
                     break
                 time.sleep(max(args.delay, 0))
-                scans.append(evaluate_scan(conn))
+                scan = try_evaluate_scan(conn)
+                if scan:
+                    scans.append(scan)
         for scan in scans:
             written = write_scan(db_path, scan, args.account_id)
             total["chats"] += written["chats"]

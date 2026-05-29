@@ -188,9 +188,65 @@ class TestClientMessages:
         call_args = client._client.get.call_args
         assert call_args[1]["params"]["thread_id"] == "t1"
 
+    def test_messages_with_account(self, client):
+        client._client.get.return_value = _mock_response([])
+        client.messages("gmail", "msg1", account="me@gmail.com")
+        call_args = client._client.get.call_args
+        assert call_args[1]["params"]["account"] == "me@gmail.com"
+
     def test_send(self, client):
         client._client.post.return_value = _mock_response({"ok": True})
         assert client.send("42", "imessage", "hello") is True
+
+
+class TestClientGmail:
+    def test_gmail_search(self, client):
+        client._client.get.return_value = _mock_response([{"message_id": "msg1"}])
+        result = client.gmail_search(q="invoice", account="me@gmail.com", limit=5)
+        assert result == [{"message_id": "msg1"}]
+        client._client.get.assert_called_once_with(
+            "/gmail/search",
+            params={
+                "q": "invoice",
+                "limit": 5,
+                "label": "",
+                "account": "me@gmail.com",
+                "from_filter": "",
+                "subject_filter": "",
+                "after": "",
+                "before": "",
+            },
+        )
+
+    def test_gmail_thread(self, client):
+        client._client.get.return_value = _mock_response([{"message_id": "msg1"}])
+        result = client.gmail_thread("msg1", thread_id="thread1", account="me@gmail.com")
+        assert result == [{"message_id": "msg1"}]
+        client._client.get.assert_called_once_with(
+            "/messages/gmail/msg1",
+            params={"limit": 50, "thread_id": "thread1", "account": "me@gmail.com"},
+        )
+
+    def test_gmail_create_draft(self, client):
+        client._client.post.return_value = _mock_response({"ok": True, "draft_id": "draft1"})
+        result = client.gmail_create_draft(
+            "alice@example.com",
+            "Hello",
+            "Draft body",
+            account="me@gmail.com",
+            thread_id="thread1",
+        )
+        assert result["draft_id"] == "draft1"
+        client._client.post.assert_called_once_with(
+            "/messages/gmail/drafts",
+            json={
+                "to": "alice@example.com",
+                "subject": "Hello",
+                "body": "Draft body",
+                "account": "me@gmail.com",
+                "thread_id": "thread1",
+            },
+        )
 
 
 # ── Calendar ────────────────────────────────────────────────────────────────

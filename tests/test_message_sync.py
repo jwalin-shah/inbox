@@ -189,7 +189,18 @@ def test_message_sync_cli_smoke_is_no_secret_success_path():
     assert result.stderr == ""
     assert json.loads(result.stdout) == {
         "entrypoint": "message_sync.py",
-        "modes": ["bootstrap", "incremental", "rebuild", "summary"],
+        "modes": [
+            "bootstrap",
+            "incremental",
+            "incremental-no-imessage",
+            "imessage-incremental",
+            "whatsapp-bootstrap",
+            "whatsapp-incremental",
+            "linkedin-bootstrap",
+            "linkedin-incremental",
+            "rebuild",
+            "summary",
+        ],
         "ok": True,
     }
 

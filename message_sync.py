@@ -29,7 +29,18 @@ IMESSAGE_PROGRESS_EVERY = 250
 WHATSAPP_PROGRESS_EVERY = 250
 LINKEDIN_PROGRESS_EVERY = 250
 _ATTACHMENT_TEXT = "(attachment)"
-CLI_MODES = ("bootstrap", "incremental", "rebuild", "summary")
+CLI_MODES = (
+    "bootstrap",
+    "incremental",
+    "incremental-no-imessage",
+    "imessage-incremental",
+    "whatsapp-bootstrap",
+    "whatsapp-incremental",
+    "linkedin-bootstrap",
+    "linkedin-incremental",
+    "rebuild",
+    "summary",
+)
 SyncScope = tuple[str, str]
 
 
@@ -909,6 +920,68 @@ def incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
     return result
 
 
+def incremental_without_imessage(store: MessageIndexStore) -> dict[str, dict[str, int]]:
+    gmail_stats = _sync_or_record_error(store, "gmail", "all", sync_gmail_incremental)
+    whatsapp_stats = _sync_or_record_error(
+        store, "whatsapp", "brave-cdp", sync_whatsapp_incremental
+    )
+    linkedin_stats = _sync_or_record_error(
+        store, "linkedin", "brave-cdp", sync_linkedin_incremental
+    )
+    result = {
+        "gmail": gmail_stats,
+        "imessage": {},
+        "whatsapp": whatsapp_stats,
+        "linkedin": linkedin_stats,
+    }
+    rebuild_changed_threads(
+        store,
+        _changed_scopes("gmail", gmail_stats)
+        | _changed_scopes("whatsapp", whatsapp_stats)
+        | _changed_scopes("linkedin", linkedin_stats),
+    )
+    return result
+
+
+def imessage_incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
+    imessage_stats = _sync_or_record_error(store, "imessage", "local", sync_imessage_incremental)
+    result = {"imessage": imessage_stats}
+    rebuild_changed_threads(store, _changed_scopes("imessage", imessage_stats))
+    return result
+
+
+def whatsapp_bootstrap(store: MessageIndexStore) -> dict[str, dict[str, int]]:
+    whatsapp_stats = _sync_or_record_error(store, "whatsapp", "brave-cdp", sync_whatsapp_bootstrap)
+    result = {"whatsapp": whatsapp_stats}
+    rebuild_changed_threads(store, _changed_scopes("whatsapp", whatsapp_stats))
+    return result
+
+
+def whatsapp_incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
+    whatsapp_stats = _sync_or_record_error(
+        store, "whatsapp", "brave-cdp", sync_whatsapp_incremental
+    )
+    result = {"whatsapp": whatsapp_stats}
+    rebuild_changed_threads(store, _changed_scopes("whatsapp", whatsapp_stats))
+    return result
+
+
+def linkedin_bootstrap(store: MessageIndexStore) -> dict[str, dict[str, int]]:
+    linkedin_stats = _sync_or_record_error(store, "linkedin", "brave-cdp", sync_linkedin_bootstrap)
+    result = {"linkedin": linkedin_stats}
+    rebuild_changed_threads(store, _changed_scopes("linkedin", linkedin_stats))
+    return result
+
+
+def linkedin_incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
+    linkedin_stats = _sync_or_record_error(
+        store, "linkedin", "brave-cdp", sync_linkedin_incremental
+    )
+    result = {"linkedin": linkedin_stats}
+    rebuild_changed_threads(store, _changed_scopes("linkedin", linkedin_stats))
+    return result
+
+
 def print_summary(store: MessageIndexStore, limit: int) -> None:
     for row in store.list_threads(limit=limit, actionable_only=True, newest_only=True):
         print(
@@ -956,6 +1029,18 @@ def main(argv: list[str] | None = None) -> int:
         print(bootstrap(store))
     elif args.mode == "incremental":
         print(incremental(store))
+    elif args.mode == "incremental-no-imessage":
+        print(incremental_without_imessage(store))
+    elif args.mode == "imessage-incremental":
+        print(imessage_incremental(store))
+    elif args.mode == "whatsapp-bootstrap":
+        print(whatsapp_bootstrap(store))
+    elif args.mode == "whatsapp-incremental":
+        print(whatsapp_incremental(store))
+    elif args.mode == "linkedin-bootstrap":
+        print(linkedin_bootstrap(store))
+    elif args.mode == "linkedin-incremental":
+        print(linkedin_incremental(store))
     elif args.mode == "rebuild":
         print({"threads": rebuild_all_threads(store)})
     else:

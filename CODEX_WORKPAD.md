@@ -1,5 +1,23 @@
 # WP-182 Workpad
 
+## Local Dirty Preservation - 2026-05-28
+
+Current checkout contains a mixed local slice on branch
+`codex/inbox-safe-daily-brief-slice` at `cc9138f`.
+
+Preservation archive:
+
+```text
+/Users/jwalinshah/project-archives/inbox-dirty-preservation-20260528-142026
+```
+
+Archive contents include `tracked-changes.patch`, `git-diff-stat.txt`,
+`git-status-short.txt`, `untracked-files.txt`, and copied untracked files.
+
+Do not reset or broad-refactor this checkout before splitting the dirty surface
+into reviewable slices. Current dirty surface includes inbox auth/client/server
+changes, WhatsApp/message index sync changes, run scripts, and related tests.
+
 ## Issue
 
 - Work pack: `WP-182`

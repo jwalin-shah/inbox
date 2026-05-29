@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 import ambient_notes
 import egress_audit
@@ -65,7 +65,7 @@ from gmail_triage import (
 from memory_store import MemoryStore
 from message_index_store import MessageIndexStore
 from message_sync import bootstrap as index_bootstrap_sync
-from message_sync import incremental as index_incremental_sync
+from message_sync import incremental_without_imessage as index_incremental_sync
 from scheduler import SchedulerStore
 from services import (
     IMSG_DB,
@@ -140,6 +140,7 @@ from services import (
     gmail_compose_send,
     gmail_contacts,
     gmail_contacts_by_label,
+    gmail_create_draft,
     gmail_create_filter,
     gmail_delete,
     gmail_filter_audit,
@@ -246,19 +247,26 @@ GOOGLE_SERVICE_SET = tuple[
 
 
 class ConversationOut(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str
+    message_id: str = ""
     name: str
     source: str
     snippet: str
+    subject: str = ""
     unread: int
     last_ts: str
+    timestamp: str = ""
     guid: str = ""
     is_group: bool = False
     members: list[str] = []
     reply_to: str = ""
+    from_: str = Field(default="", alias="from")
     thread_id: str = ""
     message_id_header: str = ""
     gmail_account: str = ""
+    account: str = ""
 
 
 class MessageOut(BaseModel):
@@ -810,6 +818,10 @@ class ComposeRequest(BaseModel):
     account: str = ""
 
 
+class GmailDraftRequest(ComposeRequest):
+    thread_id: str = ""
+
+
 class GmailReplyRequest(BaseModel):
     msg_id: str
     body: str
@@ -976,20 +988,26 @@ def _empty_google_services() -> GOOGLE_SERVICE_SET:
 
 
 def _contact_to_out(c: Contact) -> ConversationOut:
+    ts = c.last_ts.isoformat()
     return ConversationOut(
         id=c.id,
+        message_id=c.id,
         name=c.name,
         source=c.source,
         snippet=c.snippet,
+        subject=c.snippet if c.source == "gmail" else "",
         unread=c.unread,
-        last_ts=c.last_ts.isoformat(),
+        last_ts=ts,
+        timestamp=ts,
         guid=c.guid,
         is_group=c.is_group,
         members=c.members,
         reply_to=c.reply_to,
+        from_=c.reply_to or c.name,
         thread_id=c.thread_id,
         message_id_header=c.message_id_header,
         gmail_account=c.gmail_account,
+        account=c.gmail_account,
     )
 
 
@@ -1918,7 +1936,9 @@ async def _fetch_conversations(source: str, limit: int, account: str = "") -> li
     fetch_tasks: list[asyncio.Task[list[Contact]]] = []
 
     if source in ("all", "imessage"):
-        fetch_tasks.append(asyncio.create_task(asyncio.to_thread(imsg_contacts, limit=limit)))
+        fetch_tasks.append(
+            asyncio.create_task(asyncio.to_thread(_indexed_imessage_contacts, limit))
+        )
 
     if source in ("all", "gmail"):
         targets = (
@@ -1932,10 +1952,30 @@ async def _fetch_conversations(source: str, limit: int, account: str = "") -> li
             )
 
     if source in ("all", "linkedin"):
-        fetch_tasks.append(asyncio.create_task(asyncio.to_thread(linkedin_contacts, limit=limit)))
+        fetch_tasks.append(
+            asyncio.create_task(
+                asyncio.to_thread(
+                    _indexed_contacts,
+                    "linkedin",
+                    "brave-cdp",
+                    limit,
+                    lambda: linkedin_contacts(limit=limit),
+                )
+            )
+        )
 
     if source in ("all", "whatsapp"):
-        fetch_tasks.append(asyncio.create_task(asyncio.to_thread(whatsapp_contacts, limit=limit)))
+        fetch_tasks.append(
+            asyncio.create_task(
+                asyncio.to_thread(
+                    _indexed_contacts,
+                    "whatsapp",
+                    "brave-cdp",
+                    limit,
+                    lambda: whatsapp_contacts(limit=limit),
+                )
+            )
+        )
 
     if not fetch_tasks:
         return []
@@ -1946,6 +1986,129 @@ async def _fetch_conversations(source: str, limit: int, account: str = "") -> li
         results.extend(contacts)
 
     return results
+
+
+def _indexed_imessage_contacts(limit: int = 30) -> list[Contact]:
+    """Return iMessage conversations from the local index.
+
+    Reading ~/Library/Messages/chat.db from the long-running launchd server is brittle under
+    macOS TCC. The index is the normal read model for agent-facing views; the sync job owns
+    raw database access.
+    """
+    if os.environ.get("INBOX_TEST_MODE"):
+        return imsg_contacts(limit=limit)
+    rows = state.index_store.list_threads(
+        limit=limit,
+        source="imessage",
+        account="local",
+        sort_mode="recent",
+    )
+    if not rows:
+        return imsg_contacts(limit=limit)
+    contacts: list[Contact] = []
+    for row in rows:
+        participants = row.get("participants_json")
+        members = [str(value) for value in participants] if isinstance(participants, list) else []
+        name = ", ".join(members[:3]) if members else str(row.get("latest_sender") or "iMessage")
+        if len(members) > 3:
+            name += f" +{len(members) - 3}"
+        last_ts = _parse_index_timestamp(str(row.get("latest_item_at") or ""))
+        contacts.append(
+            Contact(
+                id=str(row.get("thread_id") or ""),
+                name=name,
+                source="imessage",
+                snippet=str(row.get("latest_snippet") or "")[:60],
+                unread=int(row.get("unread_count") or 0),
+                last_ts=last_ts,
+                guid=str(row.get("thread_id") or ""),
+                is_group=len(members) > 1,
+                members=members,
+            )
+        )
+    return contacts
+
+
+def _indexed_contacts(
+    source: str,
+    account: str,
+    limit: int,
+    fallback: Callable[[], list[Contact]],
+) -> list[Contact]:
+    if os.environ.get("INBOX_TEST_MODE"):
+        return fallback()
+    rows = state.index_store.list_threads(
+        limit=limit,
+        source=source,
+        account=account,
+        sort_mode="recent",
+    )
+    if not rows:
+        return fallback()
+    contacts: list[Contact] = []
+    for row in rows:
+        participants = row.get("participants_json")
+        members = [str(value) for value in participants] if isinstance(participants, list) else []
+        thread_id = str(row.get("thread_id") or "")
+        subject = str(row.get("latest_subject") or "")
+        latest_sender = str(row.get("latest_sender") or "")
+        name = subject or (", ".join(members[:3]) if members else latest_sender) or thread_id
+        if len(members) > 3 and not subject:
+            name += f" +{len(members) - 3}"
+        contacts.append(
+            Contact(
+                id=thread_id,
+                name=name,
+                source=source,
+                snippet=str(row.get("latest_snippet") or "")[:60],
+                unread=int(row.get("unread_count") or 0),
+                last_ts=_parse_index_timestamp(str(row.get("latest_item_at") or "")),
+                guid=thread_id,
+                is_group=len(members) > 1,
+                members=members,
+                reply_to=account,
+                thread_id=thread_id,
+            )
+        )
+    return contacts
+
+
+def _indexed_thread_messages(
+    source: str,
+    account: str,
+    thread_id: str,
+    limit: int,
+) -> list[Msg]:
+    if os.environ.get("INBOX_TEST_MODE"):
+        return []
+    rows = state.index_store.list_thread_items(
+        source=source,
+        account=account,
+        thread_id=thread_id,
+        limit=limit,
+    )
+    return [
+        Msg(
+            sender=str(row.get("sender") or ""),
+            body=str(row.get("body_text") or row.get("snippet") or ""),
+            ts=_parse_index_timestamp(str(row.get("created_at") or "")),
+            is_me=str(row.get("sender") or "") == "Me",
+            source=source,
+            message_id=str(row.get("external_id") or ""),
+        )
+        for row in rows
+        if str(row.get("body_text") or row.get("snippet") or "")
+    ]
+
+
+def _parse_index_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(UTC)
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(UTC).replace(tzinfo=None)
 
 
 @app.get("/conversations", response_model=list[ConversationOut])
@@ -1974,24 +2137,34 @@ async def list_conversations(source: str = "all", limit: int = 50, account: str 
 
 
 @app.get("/messages/{source}/{conv_id}", response_model=list[MessageOut])
-async def get_messages(source: str, conv_id: str, thread_id: str = "", limit: int = 50):
+async def get_messages(
+    source: str,
+    conv_id: str,
+    thread_id: str = "",
+    limit: int = 50,
+    account: str = "",
+):
     if source == "imessage":
-        msgs = await asyncio.to_thread(imsg_thread, conv_id, limit=limit)
+        msgs = await asyncio.to_thread(
+            _indexed_thread_messages, "imessage", "local", conv_id, limit
+        )
+        if not msgs:
+            msgs = await asyncio.to_thread(imsg_thread, conv_id, limit=limit)
     elif source == "gmail":
-        # Find the right service
+        _, svc = _get_gmail_service_for_message(conv_id, thread_id, account)
         contact = state.conv_cache.get(_cache_key("gmail", conv_id))
-        if contact and contact.gmail_account in state.gmail_services:
-            svc = state.gmail_services[contact.gmail_account]
-        elif state.gmail_services:
-            svc = next(iter(state.gmail_services.values()))
-        else:
-            raise HTTPException(404, "No Gmail service available")
         tid = thread_id or (contact.thread_id if contact else "")
         msgs = await asyncio.to_thread(gmail_thread, svc, conv_id, tid)
     elif source == "linkedin":
-        msgs = await asyncio.to_thread(linkedin_thread, conv_id, limit=limit)
+        acct = account or "brave-cdp"
+        msgs = await asyncio.to_thread(_indexed_thread_messages, "linkedin", acct, conv_id, limit)
+        if not msgs:
+            msgs = await asyncio.to_thread(linkedin_thread, conv_id, limit=limit)
     elif source == "whatsapp":
-        msgs = await asyncio.to_thread(whatsapp_thread, conv_id, limit=limit)
+        acct = account or "brave-cdp"
+        msgs = await asyncio.to_thread(_indexed_thread_messages, "whatsapp", acct, conv_id, limit)
+        if not msgs:
+            msgs = await asyncio.to_thread(whatsapp_thread, conv_id, limit=limit)
     else:
         raise HTTPException(400, f"Unknown source: {source}")
 
@@ -2143,6 +2316,26 @@ async def compose_email(req: ComposeRequest):
     _, svc = _get_gmail_service_for_account(req.account)
     ok = await asyncio.to_thread(gmail_compose_send, svc, req.to, req.subject, req.body)
     return {"ok": ok}
+
+
+@app.post("/messages/gmail/drafts")
+async def create_gmail_draft(req: GmailDraftRequest):
+    acct, svc = _get_gmail_service_for_account(req.account)
+    draft = await asyncio.to_thread(
+        gmail_create_draft,
+        svc,
+        req.to,
+        req.subject,
+        req.body,
+        req.thread_id,
+    )
+    return {
+        "ok": bool(draft),
+        "account": acct,
+        "draft_id": draft.get("id", ""),
+        "message_id": draft.get("message_id", ""),
+        "thread_id": draft.get("thread_id", req.thread_id),
+    }
 
 
 @app.post("/messages/gmail/reply")
@@ -2988,24 +3181,15 @@ async def get_whatsapp_messages_full(chat_name: str, max_loads: int = 10, limit:
 
 @app.get("/whatsapp/contacts", response_model=list[ConversationOut])
 async def list_whatsapp_contacts(limit: int = 20):
-    """List WhatsApp conversations via macOS Accessibility API (read-only).
-    WhatsApp app must be running. Returns empty list if app is not running or AX tree inspection fails.
-    """
-    contacts = await asyncio.to_thread(whatsapp_contacts, limit)
-    return [
-        ConversationOut(
-            id=c.id,
-            name=c.name,
-            source=c.source,
-            snippet=c.snippet,
-            unread=c.unread,
-            last_ts=c.last_ts.isoformat(),
-            guid=c.guid,
-            is_group=c.is_group,
-            members=c.members,
-        )
-        for c in contacts
-    ]
+    """List WhatsApp conversations from the normalized index, with source fallback."""
+    contacts = await asyncio.to_thread(
+        _indexed_contacts,
+        "whatsapp",
+        "brave-cdp",
+        limit,
+        lambda: whatsapp_contacts(limit=limit),
+    )
+    return [_contact_to_out(c) for c in contacts]
 
 
 @app.get("/whatsapp/messages/{chat_name}", response_model=list[MessageOut])
@@ -3015,19 +3199,12 @@ async def get_whatsapp_messages(chat_name: str, limit: int = 50):
     limit: Max messages to return.
     Placeholder: returns empty list pending AX tree navigation implementation.
     """
-    messages = await asyncio.to_thread(whatsapp_thread, chat_name, limit)
-    return [
-        MessageOut(
-            sender=m.sender,
-            body=m.body,
-            ts=m.ts.isoformat(),
-            is_me=m.is_me,
-            source=m.source,
-            attachments=m.attachments,
-            message_id=m.message_id,
-        )
-        for m in messages
-    ]
+    messages = await asyncio.to_thread(
+        _indexed_thread_messages, "whatsapp", "brave-cdp", chat_name, limit
+    )
+    if not messages:
+        messages = await asyncio.to_thread(whatsapp_thread, chat_name, limit)
+    return [_msg_to_out(m) for m in messages]
 
 
 # ── LinkedIn ─────────────────────────────────────────────────────────────────
@@ -3035,13 +3212,23 @@ async def get_whatsapp_messages(chat_name: str, limit: int = 50):
 
 @app.get("/linkedin/contacts", response_model=list[ConversationOut])
 async def list_linkedin_contacts(limit: int = 20):
-    contacts = await asyncio.to_thread(linkedin_contacts, limit)
+    contacts = await asyncio.to_thread(
+        _indexed_contacts,
+        "linkedin",
+        "brave-cdp",
+        limit,
+        lambda: linkedin_contacts(limit),
+    )
     return [_contact_to_out(c) for c in contacts]
 
 
 @app.get("/linkedin/messages/{thread_id}", response_model=list[MessageOut])
 async def get_linkedin_messages(thread_id: str, limit: int = 50):
-    messages = await asyncio.to_thread(linkedin_thread, thread_id, limit)
+    messages = await asyncio.to_thread(
+        _indexed_thread_messages, "linkedin", "brave-cdp", thread_id, limit
+    )
+    if not messages:
+        messages = await asyncio.to_thread(linkedin_thread, thread_id, limit)
     return [_msg_to_out(m) for m in messages]
 
 

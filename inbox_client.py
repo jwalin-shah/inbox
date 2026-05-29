@@ -158,10 +158,13 @@ class InboxClient:
         conv_id: str,
         thread_id: str = "",
         limit: int = 50,
+        account: str = "",
     ) -> list[dict]:
         params: dict = {"limit": limit}
         if thread_id:
             params["thread_id"] = thread_id
+        if account:
+            params["account"] = account
         r = self._client.get(f"/messages/{source}/{conv_id}", params=params)
         r.raise_for_status()
         return r.json()
@@ -223,6 +226,46 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def gmail_thread(
+        self,
+        message_id: str,
+        thread_id: str = "",
+        account: str = "",
+        limit: int = 50,
+    ) -> list[dict]:
+        return self.messages(
+            "gmail",
+            message_id,
+            thread_id=thread_id,
+            account=account,
+            limit=limit,
+        )
+
+    def gmail_search(
+        self,
+        q: str = "",
+        limit: int = 20,
+        label: str = "",
+        account: str = "",
+        from_filter: str = "",
+        subject_filter: str = "",
+        after: str = "",
+        before: str = "",
+    ) -> list[dict]:
+        params = {
+            "q": q,
+            "limit": limit,
+            "label": label,
+            "account": account,
+            "from_filter": from_filter,
+            "subject_filter": subject_filter,
+            "after": after,
+            "before": before,
+        }
+        r = self._client.get("/gmail/search", params=params)
+        r.raise_for_status()
+        return r.json()
+
     def gmail_compose(self, to: str, subject: str, body: str, account: str = "") -> bool:
         r = self._client.post(
             "/messages/compose",
@@ -230,6 +273,27 @@ class InboxClient:
         )
         r.raise_for_status()
         return r.json().get("ok", False)
+
+    def gmail_create_draft(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        account: str = "",
+        thread_id: str = "",
+    ) -> dict:
+        r = self._client.post(
+            "/messages/gmail/drafts",
+            json={
+                "to": to,
+                "subject": subject,
+                "body": body,
+                "account": account,
+                "thread_id": thread_id,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
 
     def gmail_conversations_by_label(
         self, label: str = "INBOX", limit: int = 50, account: str = ""

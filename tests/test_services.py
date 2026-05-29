@@ -943,6 +943,52 @@ def test_load_favorites_handles_corrupt_file(tmp_path, monkeypatch):
     assert result == set()
 
 
+def test_gmail_create_draft_uses_drafts_create(monkeypatch):
+    monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
+
+    class FakeDraftCreate:
+        def __init__(self):
+            self.body = None
+
+        def create(self, userId, body):  # noqa: N803
+            self.user_id = userId
+            self.body = body
+            return self
+
+        def execute(self):
+            return {"id": "draft1", "message": {"id": "msg1", "threadId": "thread1"}}
+
+    class FakeUsers:
+        def __init__(self):
+            self.drafts_resource = FakeDraftCreate()
+
+        def drafts(self):
+            return self.drafts_resource
+
+    class FakeGmailService:
+        def __init__(self):
+            self.users_resource = FakeUsers()
+
+        def users(self):
+            return self.users_resource
+
+    svc = FakeGmailService()
+
+    result = services.gmail_create_draft(
+        svc,
+        "alice@example.com",
+        "Hello",
+        "Draft body",
+        thread_id="thread1",
+    )
+
+    assert result == {"id": "draft1", "message_id": "msg1", "thread_id": "thread1"}
+    create_call = svc.users_resource.drafts_resource
+    assert create_call.user_id == "me"
+    assert create_call.body["message"]["threadId"] == "thread1"
+    assert "raw" in create_call.body["message"]
+
+
 class _WriteShouldNotRun:
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"live write service was touched: {name}")
