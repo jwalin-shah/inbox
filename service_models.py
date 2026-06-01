@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 ATTACHMENT_PLACEHOLDER = "\ufffc"
 
@@ -151,3 +152,37 @@ class ThreadSummary:
     last_message_body: str
     last_sender_is_me: bool
     message_count: int
+
+
+@dataclass(frozen=True)
+class ApprovalGateDecision:
+    provider: str
+    operation: str
+    approval_class: str
+    executor: str
+    can_execute: bool
+    reason: str
+    target_resource: str = ""
+    account: str = ""
+    item_count: int = 1
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ApprovalLease:
+    lease_id: str
+    method: str
+    path: str
+    provider: str
+    operation: str
+    approval_class: str
+    executor: str
+    account_ref: str
+    resource_ref: str
+    item_count: int
+    payload_hash: str
+    query_hash: str
+    not_after: datetime
+    nonce: str
+    allowed_uses: int = 1
+    spent: bool = False

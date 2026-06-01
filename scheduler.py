@@ -5,8 +5,11 @@ follow-up reminders, and task↔message links. Pattern mirrors memory_store.py.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +57,164 @@ class TaskMessageLink:
     thread_id: str = ""
     account: str = ""
     created_at: str = ""
+
+
+@dataclass
+class SchedulerApprovalProposal:
+    id: int | None = None
+    proposal_id: str = ""
+    scheduler_kind: str = ""
+    scheduler_row_id: int = 0
+    provider: str = ""
+    operation: str = ""
+    executor: str = "inbox.scheduler.execute"
+    account_ref: str = ""
+    resource_ref: str = ""
+    item_count: int = 1
+    payload_hash: str = ""
+    query_hash: str = ""
+    normalized_intent_hash: str = ""
+    preview_json: str = "{}"
+    state: str = "proposal_pending"
+    created_at: str = ""
+    approved_at: str | None = None
+    approved_by: str = ""
+    approval_expires_at: str | None = None
+    revoked_at: str | None = None
+    denial_reason: str = ""
+
+
+@dataclass
+class SchedulerExecutionLease:
+    id: int | None = None
+    lease_id: str = ""
+    proposal_id: str = ""
+    scheduler_kind: str = ""
+    scheduler_row_id: int = 0
+    provider: str = ""
+    operation: str = ""
+    executor: str = "inbox.scheduler.execute"
+    payload_hash: str = ""
+    query_hash: str = ""
+    normalized_intent_hash: str = ""
+    not_after: str = ""
+    allowed_uses: int = 1
+    spent: int = 0
+    created_at: str = ""
+
+
+@dataclass
+class SchedulerExecutionReceipt:
+    id: int | None = None
+    execution_id: str = ""
+    proposal_id: str = ""
+    lease_id: str = ""
+    scheduler_kind: str = ""
+    scheduler_row_id: int = 0
+    provider: str = ""
+    operation: str = ""
+    status: str = ""
+    changed_count: int = 0
+    provider_receipt_hash: str = ""
+    error: str = ""
+    created_at: str = ""
+
+
+def canonical_json_hash(value: dict[str, Any]) -> str:
+    """Return a stable hash for scheduler approval intent material."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
+
+
+def scheduler_query_hash() -> str:
+    return canonical_json_hash({})
+
+
+def _proposal_id() -> str:
+    return f"sched_prop_{uuid.uuid4().hex}"
+
+
+def scheduled_message_intent(
+    scheduler_row_id: int,
+    source: str,
+    conv_id: str,
+    text: str,
+    send_at: str,
+    account: str,
+) -> dict[str, Any]:
+    payload = {
+        "source": source,
+        "conv_id": conv_id,
+        "text": text,
+        "send_at": send_at,
+        "account": account,
+    }
+    return {
+        "scheduler_kind": "scheduled_message",
+        "scheduler_row_id": scheduler_row_id,
+        "provider": source,
+        "operation": "scheduled_send",
+        "executor": "inbox.scheduler.execute",
+        "account_ref": account,
+        "resource_ref": conv_id,
+        "item_count": 1,
+        "payload": payload,
+        "payload_hash": canonical_json_hash(payload),
+        "query_hash": scheduler_query_hash(),
+    }
+
+
+def followup_intent(
+    scheduler_row_id: int,
+    source: str,
+    conv_id: str,
+    thread_id: str,
+    remind_after: str,
+    reminder_title: str,
+    reminder_list: str,
+) -> dict[str, Any]:
+    payload = {
+        "source": source,
+        "conv_id": conv_id,
+        "thread_id": thread_id,
+        "remind_after": remind_after,
+        "reminder_title": reminder_title,
+        "reminder_list": reminder_list,
+    }
+    return {
+        "scheduler_kind": "followup_reminder",
+        "scheduler_row_id": scheduler_row_id,
+        "provider": "google_tasks",
+        "operation": "followup_task_create",
+        "executor": "inbox.scheduler.execute",
+        "account_ref": "",
+        "resource_ref": thread_id or conv_id,
+        "item_count": 1,
+        "payload": payload,
+        "payload_hash": canonical_json_hash(payload),
+        "query_hash": scheduler_query_hash(),
+    }
+
+
+def normalized_intent_hash(intent: dict[str, Any]) -> str:
+    return canonical_json_hash(intent)
+
+
+def preview_for_intent(intent: dict[str, Any]) -> dict[str, Any]:
+    payload = intent.get("payload", {})
+    preview: dict[str, Any] = {
+        "scheduler_kind": intent["scheduler_kind"],
+        "provider": intent["provider"],
+        "operation": intent["operation"],
+        "resource_ref": intent["resource_ref"],
+    }
+    if intent["scheduler_kind"] == "scheduled_message":
+        preview["send_at"] = payload.get("send_at", "")
+        preview["text_chars"] = len(str(payload.get("text", "")))
+    elif intent["scheduler_kind"] == "followup_reminder":
+        preview["remind_after"] = payload.get("remind_after", "")
+        preview["reminder_title"] = payload.get("reminder_title", "")
+    return preview
 
 
 class SchedulerStore:
@@ -111,7 +272,199 @@ class SchedulerStore:
                 )
                 """
             )
+            self._ensure_approval_schema(conn)
+            self._migrate_legacy_approval_state(conn)
             conn.commit()
+
+    def _ensure_approval_schema(self, conn: sqlite3.Connection) -> None:
+        self._add_column_if_missing(
+            conn,
+            "scheduled_messages",
+            "proposal_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            conn,
+            "scheduled_messages",
+            "intent_hash",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            conn,
+            "scheduled_messages",
+            "approval_state",
+            "TEXT NOT NULL DEFAULT 'missing'",
+        )
+        self._add_column_if_missing(
+            conn,
+            "scheduled_messages",
+            "last_execution_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            conn,
+            "followup_reminders",
+            "proposal_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            conn,
+            "followup_reminders",
+            "intent_hash",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        self._add_column_if_missing(
+            conn,
+            "followup_reminders",
+            "approval_state",
+            "TEXT NOT NULL DEFAULT 'missing'",
+        )
+        self._add_column_if_missing(
+            conn,
+            "followup_reminders",
+            "last_execution_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proposal_id TEXT NOT NULL UNIQUE,
+                scheduler_kind TEXT NOT NULL,
+                scheduler_row_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                executor TEXT NOT NULL,
+                account_ref TEXT NOT NULL DEFAULT '',
+                resource_ref TEXT NOT NULL,
+                item_count INTEGER NOT NULL DEFAULT 1,
+                payload_hash TEXT NOT NULL,
+                query_hash TEXT NOT NULL,
+                normalized_intent_hash TEXT NOT NULL,
+                preview_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                approved_at TEXT,
+                approved_by TEXT NOT NULL DEFAULT '',
+                approval_expires_at TEXT,
+                revoked_at TEXT,
+                denial_reason TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_execution_leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lease_id TEXT NOT NULL UNIQUE,
+                proposal_id TEXT NOT NULL,
+                scheduler_kind TEXT NOT NULL,
+                scheduler_row_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                executor TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                query_hash TEXT NOT NULL,
+                normalized_intent_hash TEXT NOT NULL,
+                not_after TEXT NOT NULL,
+                allowed_uses INTEGER NOT NULL DEFAULT 1,
+                spent INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_execution_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id TEXT NOT NULL UNIQUE,
+                proposal_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                scheduler_kind TEXT NOT NULL,
+                scheduler_row_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                status TEXT NOT NULL,
+                changed_count INTEGER NOT NULL DEFAULT 0,
+                provider_receipt_hash TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    def _add_column_if_missing(
+        self, conn: sqlite3.Connection, table: str, column: str, definition: str
+    ) -> None:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _migrate_legacy_approval_state(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            UPDATE scheduled_messages
+            SET approval_state = 'blocked_missing_approval'
+            WHERE status = 'pending'
+              AND proposal_id = ''
+              AND approval_state IN ('', 'missing', 'blocked_missing_approval')
+            """
+        )
+        conn.execute(
+            """
+            UPDATE followup_reminders
+            SET approval_state = 'blocked_missing_approval'
+            WHERE status = 'active'
+              AND proposal_id = ''
+              AND approval_state IN ('', 'missing', 'blocked_missing_approval')
+            """
+        )
+
+    def _create_scheduler_proposal(
+        self, conn: sqlite3.Connection, intent: dict[str, Any], created_at: str
+    ) -> dict[str, Any]:
+        proposal_id = _proposal_id()
+        intent_hash = normalized_intent_hash(intent)
+        preview_json = json.dumps(
+            preview_for_intent(intent),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        conn.execute(
+            """
+            INSERT INTO scheduler_proposals
+            (
+                proposal_id, scheduler_kind, scheduler_row_id, provider, operation,
+                executor, account_ref, resource_ref, item_count, payload_hash,
+                query_hash, normalized_intent_hash, preview_json, state, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proposal_id,
+                intent["scheduler_kind"],
+                intent["scheduler_row_id"],
+                intent["provider"],
+                intent["operation"],
+                intent["executor"],
+                intent["account_ref"],
+                intent["resource_ref"],
+                intent["item_count"],
+                intent["payload_hash"],
+                intent["query_hash"],
+                intent_hash,
+                preview_json,
+                "proposal_pending",
+                created_at,
+            ),
+        )
+        return {
+            "proposal_id": proposal_id,
+            "intent_hash": intent_hash,
+            "approval_state": "proposal_pending",
+            "preview": json.loads(preview_json),
+        }
 
     # ── Scheduled Messages ──────────────────────────────────────────────
 
@@ -134,8 +487,30 @@ class SchedulerStore:
                     """,
                     (source, conv_id, text, send_at, "pending", account, created_at),
                 )
-                conn.commit()
                 msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                intent = scheduled_message_intent(
+                    msg_id,
+                    source,
+                    conv_id,
+                    text,
+                    send_at,
+                    account,
+                )
+                approval = self._create_scheduler_proposal(conn, intent, created_at)
+                conn.execute(
+                    """
+                    UPDATE scheduled_messages
+                    SET proposal_id = ?, intent_hash = ?, approval_state = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        approval["proposal_id"],
+                        approval["intent_hash"],
+                        approval["approval_state"],
+                        msg_id,
+                    ),
+                )
+                conn.commit()
                 return {
                     "id": msg_id,
                     "source": source,
@@ -145,6 +520,7 @@ class SchedulerStore:
                     "status": "pending",
                     "account": account,
                     "created_at": created_at,
+                    **approval,
                 }
 
     def cancel_scheduled(self, msg_id: int) -> bool:
@@ -174,6 +550,10 @@ class SchedulerStore:
                     "created_at": r[7],
                     "sent_at": r[8],
                     "error": r[9],
+                    "proposal_id": r[10],
+                    "intent_hash": r[11],
+                    "approval_state": r[12],
+                    "last_execution_id": r[13],
                 }
                 for r in rows
             ]
@@ -199,6 +579,10 @@ class SchedulerStore:
                         "created_at": r[7],
                         "sent_at": r[8],
                         "error": r[9],
+                        "proposal_id": r[10],
+                        "intent_hash": r[11],
+                        "approval_state": r[12],
+                        "last_execution_id": r[13],
                     }
                     for r in rows
                 ]
@@ -256,8 +640,31 @@ class SchedulerStore:
                         created_at,
                     ),
                 )
-                conn.commit()
                 fid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                intent = followup_intent(
+                    fid,
+                    source,
+                    conv_id,
+                    thread_id,
+                    remind_after,
+                    reminder_title,
+                    reminder_list,
+                )
+                approval = self._create_scheduler_proposal(conn, intent, created_at)
+                conn.execute(
+                    """
+                    UPDATE followup_reminders
+                    SET proposal_id = ?, intent_hash = ?, approval_state = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        approval["proposal_id"],
+                        approval["intent_hash"],
+                        approval["approval_state"],
+                        fid,
+                    ),
+                )
+                conn.commit()
                 return {
                     "id": fid,
                     "source": source,
@@ -268,6 +675,7 @@ class SchedulerStore:
                     "reminder_list": reminder_list,
                     "status": "active",
                     "created_at": created_at,
+                    **approval,
                 }
 
     def cancel_followup(self, fid: int) -> bool:
@@ -296,6 +704,10 @@ class SchedulerStore:
                     "status": r[7],
                     "created_at": r[8],
                     "fired_at": r[9],
+                    "proposal_id": r[10],
+                    "intent_hash": r[11],
+                    "approval_state": r[12],
+                    "last_execution_id": r[13],
                 }
                 for r in rows
             ]
@@ -321,6 +733,10 @@ class SchedulerStore:
                         "status": r[7],
                         "created_at": r[8],
                         "fired_at": r[9],
+                        "proposal_id": r[10],
+                        "intent_hash": r[11],
+                        "approval_state": r[12],
+                        "last_execution_id": r[13],
                     }
                     for r in rows
                 ]
