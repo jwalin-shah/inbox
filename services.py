@@ -4389,6 +4389,7 @@ def drive_upload(
     name: str = "",
 ) -> DriveFile | None:
     """Upload a file to Google Drive."""
+    _assert_live_write_allowed("upload Google Drive file")
     from googleapiclient.http import MediaFileUpload
 
     p = Path(file_path)
@@ -4837,6 +4838,7 @@ def sheets_rename_sheet(
     sheets_service: object, spreadsheet_id: str, sheet_id: int, new_title: str
 ) -> bool:
     """Rename a sheet tab."""
+    _assert_live_write_allowed("rename Google Sheet tab")
     try:
         sheets_service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
@@ -4861,6 +4863,7 @@ def sheets_rename_sheet(
 
 def sheets_format(sheets_service: object, spreadsheet_id: str, requests: list[dict]) -> dict | None:
     """Apply formatting via raw batchUpdate requests. For max flexibility."""
+    _assert_live_write_allowed("format Google Sheet")
     try:
         result = (
             sheets_service.spreadsheets()
@@ -4880,6 +4883,7 @@ def sheets_copy_to(
     sheets_service: object, spreadsheet_id: str, sheet_id: int, dest_spreadsheet_id: str
 ) -> SheetTab | None:
     """Copy a sheet to another spreadsheet."""
+    _assert_live_write_allowed("copy Google Sheet tab")
     try:
         result = (
             sheets_service.spreadsheets()
@@ -4996,6 +5000,7 @@ def docs_export(
 
 def docs_insert_text(docs_service: object, document_id: str, text: str, index: int = 1) -> bool:
     """Insert text into a document at specified index."""
+    _assert_live_write_allowed("insert Google Doc text")
     try:
         docs_service.documents().batchUpdate(
             documentId=document_id,
@@ -6861,6 +6866,7 @@ def calendar_rsvp_event(
     calendar_id: str = "primary",
 ) -> bool:
     """RSVP to an event (accept/decline/tentative)."""
+    _assert_live_write_allowed("RSVP calendar event")
     try:
         cal_service.events().patch(
             calendarId=calendar_id,

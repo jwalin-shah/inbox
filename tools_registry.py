@@ -525,6 +525,16 @@ TOOLS: list[Tool] = [
         params=[Param("limit", int, 100, "query")],
     ),
     Tool(
+        name="get_capability_inventory",
+        method="GET",
+        path="/capabilities",
+        description=(
+            "List Inbox modules, capabilities, risk categories, approval policy, "
+            "and exposure metadata without calling providers."
+        ),
+        readonly=True,
+    ),
+    Tool(
         name="update_task",
         method="PUT",
         path="/tasks/{task_id}",

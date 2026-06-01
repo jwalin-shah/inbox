@@ -7,22 +7,29 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import json
 import os
-from collections.abc import Callable
+import re
+import sqlite3
+from collections.abc import Callable, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from secrets import compare_digest
+from pathlib import Path
+from secrets import compare_digest, token_urlsafe
 from typing import Any
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 import ambient_notes
 import egress_audit
 import google_account_resolution as _gacct
+from capability_inventory import build_capability_inventory
 from capture_health import CaptureHealthRecord, CaptureHealthStore, capture_summary, utc_now_iso
 from connector_registry import (
     connector_sync_plan,
@@ -67,6 +74,7 @@ from message_index_store import MessageIndexStore
 from message_sync import bootstrap as index_bootstrap_sync
 from message_sync import incremental as index_incremental_sync
 from scheduler import SchedulerStore
+from service_models import ApprovalGateDecision, ApprovalLease
 from services import (
     IMSG_DB,
     MLX_LARGE_MODEL,
@@ -231,6 +239,11 @@ PORT = 9849
 AUTH_TOKEN_ENV = "INBOX_SERVER_TOKEN"  # nosec: B105 - env var name, not a hardcoded credential
 AUTH_BYPASS_ENV = "INBOX_SERVER_ALLOW_UNAUTHENTICATED"
 AUTH_BYPASS_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+APPROVAL_LEASE_HEADER = "x-inbox-approval-lease"
+APPROVAL_LEASE_ENV = "INBOX_APPROVAL_LEASE"
+APPROVAL_TEST_LEASE = "test-local-approval-lease"
+APPROVAL_GUARDED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+APPROVAL_LEASE_TTL_SECONDS = 300
 GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
     dict[str, object],
@@ -239,6 +252,373 @@ GOOGLE_SERVICE_SET = tuple[
     dict[str, object],
     dict[str, object],
 ]
+
+
+@dataclass(frozen=True)
+class ApprovalRouteRule:
+    method: str
+    pattern: re.Pattern[str]
+    provider: str
+    operation: str
+    approval_class: str
+    executor: str
+
+
+_approval_lease_lock = asyncio.Lock()
+_approval_leases: dict[str, ApprovalLease] = {}
+
+
+def _route_rule(
+    method: str,
+    path_pattern: str,
+    provider: str,
+    operation: str,
+    executor: str,
+    approval_class: str = "external_write",
+) -> ApprovalRouteRule:
+    return ApprovalRouteRule(
+        method=method,
+        pattern=re.compile(path_pattern),
+        provider=provider,
+        operation=operation,
+        approval_class=approval_class,
+        executor=executor,
+    )
+
+
+APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
+    _route_rule("POST", r"^/messages/send$", "imessage_gmail", "send_message", "inbox.messages.send"),
+    _route_rule("POST", r"^/messages/compose$", "gmail", "compose_send", "inbox.gmail.send_email"),
+    _route_rule("POST", r"^/messages/gmail/reply$", "gmail", "reply", "inbox.gmail.reply"),
+    _route_rule("POST", r"^/messages/gmail/[^/]+/(archive|delete|unsubscribe|star|unstar|read|unread)$", "gmail", "message_modify", "inbox.gmail.modify", "external_destructive"),
+    _route_rule("POST", r"^/messages/gmail/bulk-unsubscribe$", "gmail", "bulk_unsubscribe", "inbox.gmail.unsubscribe", "external_destructive"),
+    _route_rule("POST", r"^/gmail/(batch-modify|filters|labels)$", "gmail", "gmail_modify", "inbox.gmail.modify", "external_write"),
+    _route_rule("POST", r"^/calendar/events(/quick)?$", "calendar", "create_event", "inbox.calendar.create_event"),
+    _route_rule("PUT", r"^/calendar/events/[^/]+$", "calendar", "update_event", "inbox.calendar.update_event"),
+    _route_rule("DELETE", r"^/calendar/events/[^/]+$", "calendar", "delete_event", "inbox.calendar.delete_event", "external_destructive"),
+    _route_rule("POST", r"^/calendar/events/[^/]+/(rsvp|create-reminder)$", "calendar", "event_action", "inbox.calendar.event_action"),
+    _route_rule("PATCH", r"^/calendar/events/[^/]+/attendees$", "calendar", "modify_attendees", "inbox.calendar.modify_attendees"),
+    _route_rule("PUT", r"^/calendar/events/[^/]+/reminders$", "calendar", "set_reminders", "inbox.calendar.update_event"),
+    _route_rule("POST", r"^/calendar/workflow-event$", "calendar", "create_workflow_event", "inbox.calendar.create_event"),
+    _route_rule("POST", r"^/reminders(/[^/]+/(complete|uncomplete))?$", "apple_reminders", "write_reminder", "inbox.reminders.write"),
+    _route_rule("PUT", r"^/reminders/[^/]+$", "apple_reminders", "edit_reminder", "inbox.reminders.write"),
+    _route_rule("DELETE", r"^/reminders/[^/]+$", "apple_reminders", "delete_reminder", "inbox.reminders.delete", "external_destructive"),
+    _route_rule("POST", r"^/tasks(/[^/]+/complete|/from-message|/links)?$", "google_tasks", "write_task", "inbox.tasks.write"),
+    _route_rule("PUT", r"^/tasks/[^/]+$", "google_tasks", "update_task", "inbox.tasks.write"),
+    _route_rule("DELETE", r"^/tasks(/links)?/[^/]+$", "google_tasks", "delete_task", "inbox.tasks.delete", "external_destructive"),
+    _route_rule("POST", r"^/scheduled$", "scheduler", "create_scheduled_message", "inbox.scheduler.write"),
+    _route_rule("DELETE", r"^/scheduled/[^/]+$", "scheduler", "delete_scheduled_message", "inbox.scheduler.delete", "external_destructive"),
+    _route_rule("POST", r"^/followups$", "scheduler", "create_followup", "inbox.followups.write"),
+    _route_rule("DELETE", r"^/followups/[^/]+$", "scheduler", "delete_followup", "inbox.followups.delete", "external_destructive"),
+    _route_rule("POST", r"^/whatsapp/(launch|send|scroll)$", "whatsapp", "whatsapp_action", "inbox.whatsapp.write"),
+    _route_rule("POST", r"^/github/notifications(/[^/]+/read|/read-all)$", "github", "notification_modify", "inbox.github.notifications"),
+    _route_rule("POST", r"^/drive/(upload|folder|workflow-folder)$", "drive", "drive_write", "inbox.drive.write"),
+    _route_rule("DELETE", r"^/drive/files/[^/]+$", "drive", "drive_delete", "inbox.drive.delete", "external_destructive"),
+    _route_rule("POST", r"^/sheets(/workflow-sheet|/[^/]+/(values/[^/]+/append|values/batch-update|tabs|tabs/[^/]+/copy|format))?$", "sheets", "sheets_write", "inbox.sheets.write"),
+    _route_rule("PUT", r"^/sheets/[^/]+/values/[^/]+$", "sheets", "update_values", "inbox.sheets.update_cells"),
+    _route_rule("PATCH", r"^/sheets/[^/]+/tabs/[^/]+$", "sheets", "rename_tab", "inbox.sheets.write"),
+    _route_rule("DELETE", r"^/sheets/[^/]+(/values/[^/]+|/tabs/[^/]+)?$", "sheets", "sheets_delete", "inbox.sheets.delete", "external_destructive"),
+    _route_rule("POST", r"^/docs(/workflow-doc|/[^/]+/text)?$", "docs", "docs_write", "inbox.docs.write"),
+    _route_rule("DELETE", r"^/docs/[^/]+$", "docs", "docs_delete", "inbox.docs.delete", "external_destructive"),
+    _route_rule("POST", r"^/connectors/[^/]+/sync$", "connector", "execute_sync", "inbox.connectors.sync"),
+    _route_rule("POST", r"^/accounts/(add|reauth)$", "google_oauth", "auth_flow", "inbox.google.auth_flow"),
+)
+
+
+def _approval_rule_for_request(method: str, path: str) -> ApprovalRouteRule | None:
+    if method not in APPROVAL_GUARDED_METHODS:
+        return None
+    for rule in APPROVAL_ROUTE_RULES:
+        if method == rule.method and rule.pattern.match(path):
+            return rule
+    return None
+
+
+def _local_approval_lease() -> str:
+    if os.getenv("INBOX_TEST_MODE", "").lower() in AUTH_BYPASS_TRUE_VALUES:
+        return APPROVAL_TEST_LEASE
+    return os.getenv(APPROVAL_LEASE_ENV, "")
+
+
+def _canonical_payload_hash(body: bytes) -> str:
+    if not body:
+        canonical = b"{}"
+    else:
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            canonical = body
+        else:
+            canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _canonical_query_hash(query_items: Iterable[tuple[str, str]]) -> str:
+    canonical = json.dumps(
+        sorted((str(key), str(value)) for key, value in query_items),
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _approval_body_fields(body: bytes) -> dict[str, Any]:
+    if not body:
+        return {}
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _connector_sync_is_dry_run(path: str, fields: dict[str, Any]) -> bool:
+    return bool(re.match(r"^/connectors/[^/]+/sync$", path)) and fields.get("execute") is not True
+
+
+def _approval_item_count(fields: dict[str, Any]) -> int:
+    for key in ("ids", "message_ids", "event_ids", "file_ids", "task_ids", "values", "requests", "items"):
+        value = fields.get(key)
+        if isinstance(value, list):
+            return max(1, len(value))
+    return 1
+
+
+def _approval_account_ref(request: Request, fields: dict[str, Any]) -> str:
+    account = fields.get("account") or request.query_params.get("account")
+    if isinstance(account, str) and account.strip():
+        return account.strip()
+    return "unspecified"
+
+
+def _approval_resource_ref(request: Request, fields: dict[str, Any]) -> str:
+    path = request.url.path
+    connector_match = re.match(r"^/connectors/([^/]+)/sync$", path)
+    if connector_match:
+        return f"connector:{connector_match.group(1)}"
+    if path == "/calendar/events":
+        calendar_id = fields.get("calendar_id")
+        if isinstance(calendar_id, str) and calendar_id.strip():
+            return f"calendar_id:{calendar_id.strip()}"
+        account = fields.get("account") or request.query_params.get("account")
+        if isinstance(account, str) and account.strip():
+            return f"calendar_account:{account.strip()}"
+        return "calendar:default"
+    if path == "/tasks":
+        title = fields.get("title")
+        if isinstance(title, str) and title.strip():
+            return f"task_title:{title.strip()}"
+    if path == "/drive/folder":
+        return ""
+    if path == "/drive/upload":
+        for key in ("folder_id", "file_id", "parent_id"):
+            value = fields.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"{key}:{value.strip()}"
+        return ""
+    if path == "/drive/workflow-folder":
+        workflow = fields.get("workflow")
+        parent_id = fields.get("parent_id") or fields.get("folder_id")
+        if isinstance(workflow, str) and workflow.strip() and isinstance(parent_id, str) and parent_id.strip():
+            return f"workflow:{workflow.strip()}:parent:{parent_id.strip()}"
+        if isinstance(workflow, str) and workflow.strip():
+            return f"workflow:{workflow.strip()}"
+        return ""
+
+    for key in (
+        "message_id",
+        "thread_id",
+        "conv_id",
+        "event_id",
+        "calendar_id",
+        "file_id",
+        "document_id",
+        "spreadsheet_id",
+        "task_id",
+        "reminder_id",
+        "chat_name",
+        "to",
+        "email",
+    ):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"{key}:{value.strip()}"
+    tail = path.rstrip("/").rsplit("/", 1)[-1]
+    if tail and tail not in {"compose", "events", "tasks", "reminders", "scheduled", "followups", "send"}:
+        return f"path:{tail}"
+    # For create endpoints that have no existing resource ID, use the title/subject as ref
+    for key in ("title", "subject", "name", "summary"):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"{key}:{value.strip()}"
+    if tail:
+        return f"op:{tail}"
+    return ""
+
+
+def _approval_decision(
+    rule: ApprovalRouteRule,
+    *,
+    can_execute: bool,
+    reason: str,
+    request: Request,
+    account_ref: str = "",
+    resource_ref: str = "",
+    item_count: int = 1,
+    metadata: dict[str, Any] | None = None,
+) -> ApprovalGateDecision:
+    return ApprovalGateDecision(
+        provider=rule.provider,
+        operation=rule.operation,
+        approval_class=rule.approval_class,
+        executor=rule.executor,
+        can_execute=can_execute,
+        reason=reason,
+        target_resource=resource_ref or request.url.path,
+        account=account_ref,
+        item_count=item_count,
+        metadata=metadata or {},
+    )
+
+
+def mint_local_approval_lease(
+    method: str,
+    path: str,
+    *,
+    body: bytes | dict[str, Any] | None = None,
+    now: datetime | None = None,
+    ttl_seconds: int = APPROVAL_LEASE_TTL_SECONDS,
+) -> str:
+    """Create a local per-action lease for tests and local approval adapters."""
+    body_bytes = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() if isinstance(body, dict) else body or b""
+    parsed_path = urlsplit(path)
+    request_path = parsed_path.path
+    query_params = {key: values[-1] for key, values in parse_qs(parsed_path.query).items() if values}
+    rule = _approval_rule_for_request(method.upper(), request_path)
+    if rule is None:
+        raise ValueError(f"no approval route rule for {method} {path}")
+    fields = _approval_body_fields(body_bytes)
+    lease_request = type(
+        "_LeaseRequest",
+        (),
+        {"url": type("_Url", (), {"path": request_path})(), "query_params": query_params},
+    )()
+    lease_id = f"lease_{token_urlsafe(18)}"
+    lease = ApprovalLease(
+        lease_id=lease_id,
+        method=method.upper(),
+        path=request_path,
+        provider=rule.provider,
+        operation=rule.operation,
+        approval_class=rule.approval_class,
+        executor=rule.executor,
+        account_ref=_approval_account_ref(lease_request, fields),
+        resource_ref=_approval_resource_ref(lease_request, fields),
+        item_count=_approval_item_count(fields),
+        payload_hash=_canonical_payload_hash(body_bytes),
+        query_hash=_canonical_query_hash(parse_qsl(parsed_path.query, keep_blank_values=True)),
+        not_after=(now or datetime.now(UTC)) + timedelta(seconds=ttl_seconds),
+        nonce=token_urlsafe(18),
+    )
+    _approval_leases[lease_id] = lease
+    return lease_id
+
+
+async def _approval_decision_for_request(request: Request) -> ApprovalGateDecision | None:
+    rule = _approval_rule_for_request(request.method, request.url.path)
+    if rule is None:
+        return None
+    supplied = request.headers.get(APPROVAL_LEASE_HEADER, "")
+    body = await request.body()
+    fields = _approval_body_fields(body)
+    if _connector_sync_is_dry_run(request.url.path, fields):
+        return None
+    payload_hash = _canonical_payload_hash(body)
+    query_hash = _canonical_query_hash(request.query_params.multi_items())
+    account_ref = _approval_account_ref(request, fields)
+    resource_ref = _approval_resource_ref(request, fields)
+    item_count = _approval_item_count(fields)
+    if not supplied:
+        return _approval_decision(
+            rule,
+            can_execute=False,
+            reason="missing_per_action_approval_lease",
+            request=request,
+            account_ref=account_ref,
+            resource_ref=resource_ref,
+            item_count=item_count,
+        )
+    async with _approval_lease_lock:
+        lease = _approval_leases.get(supplied)
+        now = datetime.now(UTC)
+        if lease is None:
+            return _approval_decision(rule, can_execute=False, reason="unknown_per_action_approval_lease", request=request)
+        if not resource_ref:
+            return _approval_decision(
+                rule,
+                can_execute=False,
+                reason="missing_resource_ref",
+                request=request,
+                account_ref=account_ref,
+                resource_ref=resource_ref,
+                item_count=item_count,
+            )
+        checks = (
+            ("method_mismatch", request.method == lease.method),
+            ("path_mismatch", request.url.path == lease.path),
+            ("provider_mismatch", rule.provider == lease.provider),
+            ("operation_mismatch", rule.operation == lease.operation),
+            ("approval_class_mismatch", rule.approval_class == lease.approval_class),
+            ("executor_mismatch", rule.executor == lease.executor),
+            ("account_mismatch", account_ref == lease.account_ref),
+            ("resource_mismatch", resource_ref == lease.resource_ref),
+            ("item_count_mismatch", item_count == lease.item_count),
+            ("query_hash_mismatch", query_hash == lease.query_hash),
+            ("payload_hash_mismatch", payload_hash == lease.payload_hash),
+            ("lease_expired", now <= lease.not_after),
+            ("lease_replayed", not lease.spent),
+        )
+        for reason, passed in checks:
+            if not passed:
+                return _approval_decision(
+                    rule,
+                    can_execute=False,
+                    reason=reason,
+                    request=request,
+                    account_ref=account_ref,
+                    resource_ref=resource_ref,
+                    item_count=item_count,
+                    metadata={
+                        "nonce": lease.nonce,
+                        "payload_hash": payload_hash,
+                        "query_hash": query_hash,
+                    },
+                )
+        _approval_leases[supplied] = ApprovalLease(**{**lease.__dict__, "spent": True})
+    return _approval_decision(
+        rule,
+        can_execute=True,
+        reason="approved_by_per_action_lease",
+        request=request,
+        account_ref=account_ref,
+        resource_ref=resource_ref,
+        item_count=item_count,
+        metadata={"nonce": lease.nonce, "payload_hash": payload_hash, "query_hash": query_hash},
+    )
+
+
+def _deny_approval_response(decision: ApprovalGateDecision) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_403_FORBIDDEN,
+        content={
+            "error": "approval_required",
+            "provider": decision.provider,
+            "operation": decision.operation,
+            "approval_class": decision.approval_class,
+            "executor": decision.executor,
+            "can_execute": False,
+            "reason": decision.reason,
+        },
+    )
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -676,6 +1056,27 @@ class CaptureHealthOut(CaptureStatusOut):
     reasons: list[str]
 
 
+class ProviderStatusOut(BaseModel):
+    provider: str
+    category: str
+    configured: bool
+    authenticated: bool = False
+    readable: bool = False
+    writable: bool = False
+    accounts: list[str] = []
+    blockers: list[str] = []
+    notes: str = ""
+
+
+class ProviderReadinessOut(BaseModel):
+    status: str
+    checked_at: str
+    providers: list[ProviderStatusOut]
+    summary: dict[str, int]
+    api: dict[str, bool]
+    recommendations: list[str]
+
+
 class IndexedThreadListOut(BaseModel):
     view: str
     db_path: str
@@ -801,7 +1202,7 @@ class ConnectorSearchRequest(BaseModel):
 
 
 class ConnectorSyncRequest(BaseModel):
-    execute: bool = False
+    execute: StrictBool = False
 
 
 class TriageRequest(BaseModel):
@@ -1054,6 +1455,20 @@ def _cache_key(source: str, conv_id: str) -> str:
     return f"{source}:{conv_id}"
 
 
+def _scheduler_durable_approval_denial(row: dict[str, Any]) -> str:
+    """Return a fail-closed denial reason when a due scheduler row is not durably approved."""
+    proposal_id = str(row.get("proposal_id") or "").strip()
+    intent_hash = str(row.get("intent_hash") or "").strip()
+    approval_state = str(row.get("approval_state") or "").strip()
+    if not proposal_id:
+        return "missing_durable_approval_proposal_id"
+    if not intent_hash:
+        return "missing_durable_approval_intent_hash"
+    if approval_state != "approved":
+        return f"scheduler_durable_approval_not_approved:{approval_state or 'missing'}"
+    return ""
+
+
 # ── Background scheduler loop ────────────────────────────────────────────────
 
 
@@ -1065,6 +1480,13 @@ async def _process_scheduled_messages() -> None:
             msg_id = msg["id"]
             source = msg["source"]
             try:
+                approval_denial = _scheduler_durable_approval_denial(msg)
+                if approval_denial:
+                    await asyncio.to_thread(state.scheduler.mark_failed, msg_id, approval_denial)
+                    logger.warning(
+                        f"[scheduler] Scheduled message {msg_id} denied: {approval_denial}"
+                    )
+                    continue
                 if source == "gmail":
                     acct = msg.get("account", "")
                     svc_key = acct or (
@@ -1130,6 +1552,10 @@ async def _process_followup_reminders() -> None:
         for fu in due:
             fid = fu["id"]
             try:
+                approval_denial = _scheduler_durable_approval_denial(fu)
+                if approval_denial:
+                    logger.warning(f"[scheduler] Follow-up {fid} denied: {approval_denial}")
+                    continue
                 created_at = datetime.fromisoformat(fu["created_at"])
                 replied = False
                 if fu["source"] == "gmail" and fu["thread_id"]:
@@ -1209,6 +1635,8 @@ _departure_task_created: set[str] = set()
 
 async def _process_departure_alerts() -> None:
     """Check upcoming events and create 'time to leave' tasks when departure time is near."""
+    if os.environ.get("INBOX_ENABLE_DEPARTURE_ALERTS") != "1":
+        return
     home = await asyncio.to_thread(get_current_location)
     if not home:
         return  # No location available — skip departure alerts
@@ -1426,6 +1854,9 @@ async def require_api_token(request: Request, call_next):
             content={"detail": "Unauthorized"},
             headers={"WWW-Authenticate": "Bearer"},
         )
+    decision = await _approval_decision_for_request(request)
+    if decision is not None and not decision.can_execute:
+        return _deny_approval_response(decision)
     return await call_next(request)
 
 
@@ -1447,6 +1878,212 @@ async def health():
         "api_auth_configured": bool(_auth_token()),
         "api_auth_dev_bypass": _auth_bypass_enabled(),
     }
+
+
+def _sqlite_read_probe(path: Path) -> tuple[bool, str]:
+    if not path.exists():
+        return False, "path_missing"
+    try:
+        uri = f"file:{path}?mode=ro&immutable=1"
+        with sqlite3.connect(uri, uri=True, timeout=2.0) as conn:
+            conn.execute("SELECT 1").fetchone()
+        return True, ""
+    except sqlite3.DatabaseError as exc:
+        return False, str(exc)
+    except OSError as exc:
+        return False, str(exc)
+
+
+def _local_sqlite_provider(
+    provider: str,
+    path: Path,
+    notes: str,
+) -> ProviderStatusOut:
+    readable, error = _sqlite_read_probe(path)
+    blockers = [] if readable else [error]
+    return ProviderStatusOut(
+        provider=provider,
+        category="local_sqlite",
+        configured=path.exists(),
+        authenticated=readable,
+        readable=readable,
+        writable=False,
+        blockers=blockers,
+        notes=notes,
+    )
+
+
+def _reminders_provider() -> ProviderStatusOut:
+    candidates = sorted(REMINDERS_DIR.glob("Data-*.sqlite")) if REMINDERS_DIR.exists() else []
+    if not candidates:
+        return ProviderStatusOut(
+            provider="apple_reminders",
+            category="local_sqlite",
+            configured=REMINDERS_DIR.exists(),
+            blockers=["no_reminders_store_found"],
+            notes="Requires macOS Full Disk Access for the launcher process.",
+        )
+
+    readable_errors: list[str] = []
+    for candidate in candidates[:3]:
+        readable, error = _sqlite_read_probe(candidate)
+        if readable:
+            return ProviderStatusOut(
+                provider="apple_reminders",
+                category="local_sqlite",
+                configured=True,
+                authenticated=True,
+                readable=True,
+                writable=False,
+                notes="At least one Reminders SQLite store is readable.",
+            )
+        readable_errors.append(error)
+    return ProviderStatusOut(
+        provider="apple_reminders",
+        category="local_sqlite",
+        configured=True,
+        blockers=[error for error in readable_errors if error],
+        notes="Requires macOS Full Disk Access for the launcher process.",
+    )
+
+
+def _github_provider() -> ProviderStatusOut:
+    from services import _github_token
+
+    configured = _github_token() is not None
+    return ProviderStatusOut(
+        provider="github",
+        category="external_api",
+        configured=configured,
+        authenticated=configured,
+        readable=configured,
+        writable=configured,
+        blockers=[] if configured else ["missing_github_token"],
+        notes="Configured credential presence only; endpoint-specific calls still validate permissions.",
+    )
+
+
+def _google_provider(name: str, services: dict[str, object], writable: bool = True) -> ProviderStatusOut:
+    accounts = list(services.keys())
+    return ProviderStatusOut(
+        provider=name,
+        category="google_api",
+        configured=bool(accounts),
+        authenticated=bool(accounts),
+        readable=bool(accounts),
+        writable=bool(accounts) and writable,
+        accounts=accounts,
+        blockers=[] if accounts else ["no_loaded_google_accounts"],
+        notes="Loaded from local OAuth token files; tokens and secrets are not returned.",
+    )
+
+
+def _optional_db_provider(
+    provider: str,
+    db_path: Path | None,
+    notes: str,
+) -> ProviderStatusOut:
+    if db_path is None:
+        return ProviderStatusOut(
+            provider=provider,
+            category="connector_db",
+            configured=False,
+            blockers=["backing_store_missing"],
+            notes=notes,
+        )
+    readable, error = _sqlite_read_probe(db_path)
+    return ProviderStatusOut(
+        provider=provider,
+        category="connector_db",
+        configured=True,
+        authenticated=readable,
+        readable=readable,
+        writable=False,
+        blockers=[] if readable else [error],
+        notes=notes,
+    )
+
+
+def _provider_recommendations(providers: list[ProviderStatusOut]) -> list[str]:
+    recommendations: list[str] = []
+    local_blocked = [
+        provider.provider
+        for provider in providers
+        if provider.category == "local_sqlite" and provider.configured and not provider.readable
+    ]
+    if local_blocked:
+        recommendations.append(
+            "Grant Full Disk Access to the app that launches Inbox, then restart the server."
+        )
+    if any(provider.provider.startswith("google_") and not provider.readable for provider in providers):
+        recommendations.append("Run scripts/restore_google_oauth.sh --status and reauth missing accounts.")
+    if any(provider.provider == "github" and not provider.configured for provider in providers):
+        recommendations.append("Add github_token.txt or the configured GitHub token source.")
+    if any(provider.provider == "whatsapp" and not provider.configured for provider in providers):
+        recommendations.append("Keep WhatsApp deferred until the browser/native integration path is chosen.")
+    return recommendations
+
+
+def _provider_readiness() -> ProviderReadinessOut:
+    providers = [
+        _google_provider("google_gmail", state.gmail_services),
+        _google_provider("google_calendar", state.cal_services),
+        _google_provider("google_drive", state.drive_services),
+        _google_provider("google_sheets", state.sheets_services),
+        _google_provider("google_docs", state.docs_services),
+        _google_provider("google_tasks", state.tasks_services),
+        _github_provider(),
+        _local_sqlite_provider(
+            "imessage",
+            IMSG_DB,
+            "Requires macOS Full Disk Access for the launcher process.",
+        ),
+        _local_sqlite_provider(
+            "apple_notes",
+            NOTES_DB,
+            "Requires macOS Full Disk Access for the launcher process.",
+        ),
+        _reminders_provider(),
+        _optional_db_provider(
+            "whatsapp",
+            _openhuman_whatsapp_db_path(),
+            "Deferred connector; reports only whether a local OpenHuman backing DB is readable.",
+        ),
+        _optional_db_provider(
+            "linkedin",
+            _openhuman_linkedin_db_path(),
+            "Planning connector; reports only whether a local OpenHuman backing DB is readable.",
+        ),
+    ]
+    summary = {
+        "total": len(providers),
+        "ready": sum(1 for provider in providers if provider.readable),
+        "blocked": sum(1 for provider in providers if provider.configured and not provider.readable),
+        "not_configured": sum(1 for provider in providers if not provider.configured),
+    }
+    status_text = "ok" if summary["blocked"] == 0 else "degraded"
+    return ProviderReadinessOut(
+        status=status_text,
+        checked_at=utc_now_iso(),
+        providers=providers,
+        summary=summary,
+        api={
+            "auth_required": _non_health_auth_required(),
+            "auth_configured": bool(_auth_token()),
+            "dev_bypass_enabled": _auth_bypass_enabled(),
+        },
+        recommendations=_provider_recommendations(providers),
+    )
+
+
+@app.get("/status/providers", response_model=ProviderReadinessOut)
+async def provider_readiness_status():
+    return await asyncio.to_thread(_provider_readiness)
+
+
+@app.get("/providers/status", response_model=ProviderReadinessOut)
+async def provider_readiness_status_alias():
+    return await asyncio.to_thread(_provider_readiness)
 
 
 # ── Capture Health ───────────────────────────────────────────────────────────
@@ -2307,16 +2944,21 @@ async def list_events(
 
 
 @app.get("/calendar/upcoming", response_model=list[CalendarEventOut])
-async def list_upcoming_events(days: int = 7):
+async def list_upcoming_events(days: int = 7, limit: int = 50, account: str = ""):
     days = max(1, min(days, 30))
+    limit = max(1, min(limit, 200))
+    services = state.cal_services
+    if account:
+        services = {account: state.cal_services[account]} if account in state.cal_services else {}
     start_dt = datetime.now()
     end_dt = start_dt + timedelta(days=days - 1)
     evts = await asyncio.to_thread(
         state.source_adapters.calendar.events,
-        state.cal_services,
+        services,
         start_date=start_dt,
         end_date=end_dt,
     )
+    evts = evts[:limit]
     state.events_cache = evts
     return [_event_to_out(e) for e in evts]
 
@@ -3729,6 +4371,11 @@ async def preflight_google_write(
 @app.get("/connectors/status")
 async def connectors_status_endpoint():
     return await asyncio.to_thread(connectors_status)
+
+
+@app.get("/capabilities")
+async def capability_inventory_endpoint():
+    return await asyncio.to_thread(build_capability_inventory)
 
 
 @app.post("/connectors/search")
