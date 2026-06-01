@@ -50,9 +50,25 @@ def client():
     )
 
     with (
-        patch.dict(os.environ, {"INBOX_SERVER_TOKEN": ""}, clear=False),
+        patch.dict(os.environ, {"INBOX_SERVER_TOKEN": "", "INBOX_TEST_MODE": "1"}, clear=False),
         TestClient(inbox_server.create_app(runtime), raise_server_exceptions=False) as c,
     ):
+        original_request = c.request
+
+        def request_with_approval_lease(method, url, **kwargs):
+            path = str(url)
+            rule = inbox_server._approval_rule_for_request(method.upper(), path.split("?", 1)[0])
+            headers = dict(kwargs.pop("headers", {}) or {})
+            assert headers.get("X-Inbox-Approval-Lease") != inbox_server.APPROVAL_TEST_LEASE
+            if rule is not None and "X-Inbox-Approval-Lease" not in headers:
+                headers["X-Inbox-Approval-Lease"] = inbox_server.mint_local_approval_lease(
+                    method.upper(),
+                    path,
+                    body=kwargs.get("json"),
+                )
+            return original_request(method, url, headers=headers, **kwargs)
+
+        c.request = request_with_approval_lease
         yield c
 
 
@@ -98,8 +114,56 @@ class TestHealth:
         assert "a@gmail.com" in data["gmail_accounts"]
         assert data["github_configured"] is True
 
+    def test_provider_status_is_redacted_readiness_rollup(self, client, tmp_path):
+        import inbox_server
+
+        db_path = tmp_path / "messages.sqlite"
+        db_path.write_bytes(b"not a database")
+        inbox_server.state.gmail_services = {"a@gmail.com": MagicMock()}
+        inbox_server.state.cal_services = {"a@gmail.com": MagicMock()}
+        with (
+            patch("services._github_token", return_value="ghp_xxx"),
+            patch("inbox_server.IMSG_DB", db_path),
+            patch("inbox_server.NOTES_DB", tmp_path / "missing-notes.sqlite"),
+            patch("inbox_server.REMINDERS_DIR", tmp_path / "missing-reminders"),
+            patch("inbox_server._openhuman_whatsapp_db_path", return_value=None),
+            patch("inbox_server._openhuman_linkedin_db_path", return_value=None),
+        ):
+            resp = client.get("/status/providers")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "degraded"
+        assert data["api"]["auth_required"] is False
+        providers = {provider["provider"]: provider for provider in data["providers"]}
+        assert providers["google_gmail"]["accounts"] == ["a@gmail.com"]
+        assert providers["github"]["configured"] is True
+        assert providers["imessage"]["configured"] is True
+        assert providers["imessage"]["readable"] is False
+        assert "ghp_xxx" not in resp.text
+        assert "token" not in providers["github"]["notes"].lower()
+
+    def test_provider_status_alias(self, client):
+        resp = client.get("/providers/status")
+        assert resp.status_code == 200
+        assert "providers" in resp.json()
+
 
 class TestConnectorEndpoints:
+    def test_capability_inventory_endpoint(self, client):
+        resp = client.get("/capabilities")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema_version"] == "inbox.capability_inventory.v1"
+        assert data["invariants"]["provider_calls"] is False
+        assert data["summary"]["capabilities"] > 0
+        by_id = {cap["id"]: cap for cap in data["capabilities"]}
+        assert by_id["mcp.get_capability_inventory"]["route"] == {
+            "method": "GET",
+            "path": "/capabilities",
+        }
+
     def test_connectors_status_endpoint(self, client):
         with patch(
             "inbox_server.connectors_status",
@@ -1218,9 +1282,9 @@ class TestDrive:
         )
         with patch.dict(os.environ, {"INBOX_DEFAULT_GOOGLE_ACCOUNT": "jshah1331@gmail.com"}):
             resp = client.post("/drive/folder", json={"name": "MyFolder"})
-        assert resp.status_code == 200
-        assert resp.json()["account"] == "jshah1331@gmail.com"
-        mock_create.assert_called_once_with(default_svc, "MyFolder", parent_id="")
+        assert resp.status_code == 403
+        assert resp.json()["reason"] == "missing_resource_ref"
+        mock_create.assert_not_called()
 
 
 class TestGmailExtensions:
@@ -1452,6 +1516,22 @@ class TestCalendarExtensions:
         data = resp.json()
         assert len(data) == 1
         assert data[0]["summary"] == "Standup"
+
+    @patch("inbox_server.calendar_events")
+    def test_calendar_upcoming_respects_limit(self, mock_events, client):
+        mock_events.return_value = [
+            CalendarEvent(
+                summary=f"Event {idx}",
+                start=datetime(2025, 6, 15, 9 + idx, 0),
+                end=datetime(2025, 6, 15, 9 + idx, 30),
+            )
+            for idx in range(3)
+        ]
+        resp = client.get("/calendar/upcoming", params={"days": 7, "limit": 2})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 2
+        assert [event["summary"] for event in data] == ["Event 0", "Event 1"]
 
     @patch("inbox_server.calendar_create_event")
     def test_create_event_with_attendees(self, mock_create, client):

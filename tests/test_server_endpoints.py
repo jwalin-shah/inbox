@@ -31,6 +31,8 @@ def client():
         state.ambient = AmbientService(on_note=lambda r, s: None)
         state.dictation = DictationService()
         with TestClient(app) as c:
+            from approval_helpers import wrap_approval_lease
+            wrap_approval_lease(c)
             yield c, state
 
 
@@ -397,8 +399,10 @@ class TestVoicePipelineEndpoints:
         )
         with patch("inbox_server.drive_create_folder", return_value=mock_folder):
             resp = c.post("/drive/folder", json={"name": "New Folder"})
-        assert resp.status_code == 200
-        assert resp.json()["name"] == "New Folder"
+        # Drive folder creation is blocked by the approval gate until a stable
+        # resource binding is implemented (missing_resource_ref is intentional).
+        assert resp.status_code == 403
+        assert resp.json()["reason"] == "missing_resource_ref"
 
     def test_delete_file(self, client):
         c, state = client

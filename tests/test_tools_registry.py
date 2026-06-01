@@ -9,6 +9,7 @@ INDEX_TOOL_NAMES = {
     "list_index_view",
     "list_needs_action",
 }
+INVENTORY_TOOL_NAMES = {"get_capability_inventory"}
 
 
 class DummyMCP:
@@ -65,13 +66,14 @@ def test_readonly_registration_includes_index_tools():
     registered = register_all(mcp, DummyBackend(), readonly_only=True)
 
     assert set(registered) >= INDEX_TOOL_NAMES
+    assert set(registered) >= INVENTORY_TOOL_NAMES
 
 
 def test_index_tools_are_readonly_and_do_not_require_confirm():
     tools_by_name = {tool.name: tool for tool in TOOLS}
     handlers = _handlers()
 
-    for name in INDEX_TOOL_NAMES:
+    for name in INDEX_TOOL_NAMES | INVENTORY_TOOL_NAMES:
         assert tools_by_name[name].readonly is True
         assert tools_by_name[name].confirm is False
         assert "confirm" not in inspect.signature(handlers[name]).parameters
@@ -141,6 +143,19 @@ def test_index_health_status_and_needs_action_dispatch_to_compact_routes():
         "method": "GET",
         "path": "/inbox/needs-action",
         "params": {"workflow": "job_hunt", "account": "me@example.com"},
+        "json": None,
+    }
+
+
+def test_capability_inventory_dispatches_to_readonly_route():
+    handlers = _handlers()
+
+    result = asyncio.run(handlers["get_capability_inventory"]())
+
+    assert result == {
+        "method": "GET",
+        "path": "/capabilities",
+        "params": None,
         "json": None,
     }
 

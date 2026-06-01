@@ -10,6 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+from approval_helpers import wrap_approval_lease as _wrap_approval_lease
+
+
 @pytest.fixture()
 def client():
     """Create a test client with mocked startup."""
@@ -27,6 +30,7 @@ def client():
         state.drive_services = {}
         state.sheets_services = {}
         with TestClient(app) as c:
+            _wrap_approval_lease(c)
             yield c, state
 
 
@@ -50,6 +54,7 @@ def client_with_gmail():
             state.drive_services = {}
             state.sheets_services = {}
             state.conv_cache = {}
+            _wrap_approval_lease(c)
             yield c, state, mock_svc
 
 

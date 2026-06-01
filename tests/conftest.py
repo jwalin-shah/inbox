@@ -8,8 +8,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# Ensure project root is importable
+# Ensure project root and tests/ dir are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 # ── Stub heavy dependencies that aren't installed in test envs ──────────────
@@ -40,6 +41,7 @@ for mod in [
     "Quartz",
 ]:
     _stub_module(mod)
+
 
 
 @pytest.fixture
