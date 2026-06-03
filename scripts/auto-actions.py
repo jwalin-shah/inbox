@@ -2,38 +2,35 @@
 """
 Auto-Actions Worker
 
-Runs 4 autonomous actions:
+Autonomous agent operations:
 1. Auto-archive low-signal emails (score 1-2)
-2. Auto-draft replies for high-priority threads (score 4+)
-3. Auto-create calendar events from email dates/times
-4. Auto-log rejections to job tracker
+2. Auto-log job rejections to sheet
+3. (Draft + calendar creation require full message bodies - added in phase 2)
 
 Usage:
-  /inbox auto-actions
-  /inbox auto-actions --dry-run
-  /inbox auto-actions --approval-only
+  python3 auto-actions.py                 # Run all actions
+  python3 auto-actions.py --dry-run       # Preview without executing
+  python3 auto-actions.py --archive-only  # Archive only
+  python3 auto-actions.py --log-only      # Log rejections only
 """
 
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 import subprocess
 import re
 
+# Config defaults
+CONFIG = {
+    "archive": {"enabled": True, "min_score": 1, "max_score": 2},
+    "logging": {"enabled": True, "rejection_keywords": ["reject", "unfortunately", "not moving forward", "decided not", "passing"]},
+}
+
 def load_config():
-    """Load auto-actions config from ~/.inbox/auto-actions.yml"""
-    config_path = Path.home() / ".inbox" / "auto-actions.yml"
-    if not config_path.exists():
-        return {
-            "auto_archive": {"enabled": True, "min_score": 1, "max_score": 2},
-            "auto_draft": {"enabled": True, "min_score": 4, "require_approval": True},
-            "auto_calendar": {"enabled": True, "default_duration": 1},
-            "auto_logging": {"enabled": True, "min_score": 3},
-        }
-    # TODO: Parse YAML
-    return {}
+    """Load auto-actions config (future: from ~/.inbox/auto-actions.yml)"""
+    return CONFIG
 
 def log_action(action_type, details):
     """Log every action to ~/.inbox/ledger"""
@@ -46,34 +43,124 @@ def log_action(action_type, details):
     with open(ledger_path, "a") as f:
         f.write(log_line)
 
-def get_unread_threads():
-    """Fetch unread threads from inbox server"""
-    result = subprocess.run(
-        ["curl", "-s", "http://localhost:9849/gmail/threads?unread=true"],
-        capture_output=True,
-        text=True
-    )
+def curl(method, endpoint, data=None):
+    """Make HTTP request to inbox server"""
+    url = f"http://localhost:9849{endpoint}"
+    cmd = ["curl", "-s"]
+
+    if method.upper() == "POST":
+        cmd.extend(["-X", "POST", "-H", "Content-Type: application/json"])
+        if data:
+            cmd.extend(["-d", json.dumps(data)])
+    elif method.upper() == "GET":
+        pass
+    else:
+        raise ValueError(f"Unsupported method: {method}")
+
+    cmd.append(url)
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"ERROR: Failed to fetch threads: {result.stderr}")
+        raise Exception(f"curl failed: {result.stderr}")
+
+    if not result.stdout:
+        return {}
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise Exception(f"Invalid JSON response: {result.stdout[:200]}")
+
+def get_conversations():
+    """Fetch unread Gmail conversations"""
+    try:
+        conversations = curl("GET", "/conversations?source=gmail&limit=100")
+        return [c for c in conversations if c.get("unread", 0) > 0]
+    except Exception as e:
+        print(f"ERROR: Failed to fetch conversations: {e}")
         sys.exit(1)
 
-    return json.loads(result.stdout)["threads"]
+def score_conversation(conv):
+    """Score conversation 1-5 based on sender patterns"""
+    # Load priority senders from config
+    priority_senders = {
+        "tierra@cerebras.net": 5,
+        "jack@jackandjill.ai": 5,
+        "apply@ycombinator.com": 5,
+        "dave@jobs.bandana.com": 5,
+    }
 
-def score_thread(thread):
-    """Score thread 1-5 based on sender, subject, content"""
-    # TODO: Use the same scoring algorithm as triage.md
-    # For now, return a dummy score
+    sender = conv.get("reply_to", "").lower()
+
+    # Check priority senders
+    if sender in priority_senders:
+        return priority_senders[sender]
+
+    # Check for company domains in priority list
+    if any(domain in sender for domain in ["cerebras", "anthropic", "waymo", "openai"]):
+        return 5
+
+    # Check for recruitment/job keywords
+    name = conv.get("name", "").lower()
+    snippet = conv.get("snippet", "").lower()
+    text = f"{name} {snippet}"
+
+    job_keywords = ["interview", "screen", "offer", "rejection", "reject", "unfortunate", "role", "position", "hiring"]
+    if any(kw in text for kw in job_keywords):
+        return 4
+
+    # Newsletter/notification domains = low signal
+    low_signal_domains = ["newsletter", "noreply", "notifications", "github", "gmail", "notification", "no-reply"]
+    if any(domain in sender for domain in low_signal_domains):
+        return 1
+
+    # Default to medium
     return 3
 
-def action_archive(threads, dry_run=False):
-    """Action 1: Archive low-signal threads (score 1-2)"""
+def is_rejection(conv):
+    """Check if conversation is a job rejection"""
+    rejection_keywords = CONFIG["logging"]["rejection_keywords"]
+
+    snippet = conv.get("snippet", "").lower()
+    name = conv.get("name", "").lower()
+    text = f"{name} {snippet}"
+
+    return any(kw in text for kw in rejection_keywords)
+
+def extract_job_info(conv):
+    """Extract company and role from conversation"""
+    name = conv.get("name", "")
+    snippet = conv.get("snippet", "")
+
+    # Try to extract company from sender domain
+    sender = conv.get("reply_to", "")
+    company = "Unknown"
+
+    if "@" in sender:
+        domain = sender.split("@")[1].split(".")[0]
+        company = domain.capitalize()
+
+    # Try to find company in name or snippet
+    if "reject" in snippet.lower() or "unfortunate" in snippet.lower():
+        # This is likely a rejection email
+        for word in name.split():
+            if len(word) > 2:
+                company = word
+                break
+
+    role = snippet.split(",")[0][:50] if "," in snippet else "Unknown"
+
+    return company[:30], role[:50]
+
+def action_archive(conversations, dry_run=False):
+    """Auto-archive low-signal threads (score 1-2)"""
     config = load_config()
-    if not config["auto_archive"]["enabled"]:
+    if not config["archive"]["enabled"]:
         return 0
 
     to_archive = [
-        t for t in threads
-        if score_thread(t) <= config["auto_archive"]["max_score"]
+        c for c in conversations
+        if score_conversation(c) <= config["archive"]["max_score"]
     ]
 
     if not to_archive:
@@ -81,122 +168,45 @@ def action_archive(threads, dry_run=False):
 
     if dry_run:
         print(f"[DRY RUN] Would archive {len(to_archive)} threads")
-        for t in to_archive[:3]:  # Show first 3
-            print(f"  - {t['sender']}: {t['subject'][:60]}")
+        for c in to_archive[:3]:
+            score = score_conversation(c)
+            print(f"  (score {score}) {c['name']}: {c['snippet'][:50]}")
         if len(to_archive) > 3:
             print(f"  ... and {len(to_archive) - 3} more")
         return len(to_archive)
 
     # Archive via API
-    thread_ids = [t["id"] for t in to_archive]
-    result = subprocess.run(
-        ["curl", "-X", "POST", "http://localhost:9849/gmail/batch-modify",
-         "-H", "Content-Type: application/json",
-         "-d", json.dumps({
-             "msg_ids": thread_ids,
-             "remove_label_ids": ["INBOX"],
-             "add_label_ids": ["Triage/Archived"]
-         })],
-        capture_output=True,
-        text=True
-    )
+    thread_ids = [c["thread_id"] for c in to_archive]
 
-    if result.returncode == 0:
-        log_action("auto_archive", f"count={len(to_archive)}  reason=low_signal")
-        return len(to_archive)
-    else:
-        print(f"ERROR: Archive failed: {result.stderr}")
-        return 0
-
-def action_draft_replies(threads, dry_run=False):
-    """Action 2: Draft replies for score 4+ threads"""
-    config = load_config()
-    if not config["auto_draft"]["enabled"]:
-        return []
-
-    to_draft = [
-        t for t in threads
-        if score_thread(t) >= config["auto_draft"]["min_score"]
-        and "already_replied" not in t
-    ]
-
-    drafts = []
-    for thread in to_draft:
-        # Use Claude to generate draft
-        draft_text = generate_draft_reply(thread)
-        drafts.append({
-            "thread_id": thread["id"],
-            "sender": thread["sender"],
-            "subject": thread["subject"],
-            "draft": draft_text,
-            "status": "pending_approval",
+    try:
+        curl("POST", "/gmail/batch-modify", {
+            "msg_ids": thread_ids,
+            "remove_label_ids": ["INBOX"],
+            "add_label_ids": ["Triage/Archived"],
         })
 
-    if dry_run:
-        print(f"[DRY RUN] Would draft {len(drafts)} replies")
-        for d in drafts:
-            print(f"  - {d['sender']}: {d['draft'][:50]}...")
-        return drafts
-
-    # Log drafts as pending
-    for draft in drafts:
-        log_action(
-            "draft_reply",
-            f"thread={draft['thread_id']}  sender={draft['sender']}  status=pending_approval"
-        )
-
-    return drafts
-
-def action_create_events(threads, dry_run=False):
-    """Action 3: Extract dates/times from emails, create calendar events"""
-    events = []
-
-    for thread in threads:
-        event = extract_calendar_event(thread)
-        if event:
-            events.append(event)
-
-    if not events:
+        log_action("auto_archive", f"count={len(to_archive)}  reason=low_signal")
+        return len(to_archive)
+    except Exception as e:
+        print(f"ERROR: Archive failed: {e}")
         return 0
 
-    if dry_run:
-        print(f"[DRY RUN] Would create {len(events)} calendar events")
-        for e in events:
-            print(f"  - {e['summary']} at {e['start']}")
-        return len(events)
-
-    # Create events via API
-    created = 0
-    for event in events:
-        result = subprocess.run(
-            ["curl", "-X", "POST", "http://localhost:9849/calendar/events",
-             "-H", "Content-Type: application/json",
-             "-d", json.dumps(event)],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            created += 1
-            log_action("create_event", f"title={event['summary']}")
-
-    return created
-
-def action_log_rejections(threads, dry_run=False):
-    """Action 4: Auto-log job rejections to Google Sheet"""
+def action_log_rejections(conversations, dry_run=False):
+    """Auto-log job rejections"""
     config = load_config()
-    if not config["auto_logging"]["enabled"]:
+    if not config["logging"]["enabled"]:
         return 0
 
     rejections = []
-    for thread in threads:
-        if is_rejection(thread):
-            company, role = extract_job_info(thread)
+    for conv in conversations:
+        if is_rejection(conv):
+            company, role = extract_job_info(conv)
             rejections.append({
                 "date": datetime.utcnow().strftime("%Y-%m-%d"),
                 "company": company,
                 "role": role,
                 "status": "rejected",
-                "notes": thread["subject"],
+                "notes": conv["snippet"][:100],
             })
 
     if not rejections:
@@ -205,114 +215,83 @@ def action_log_rejections(threads, dry_run=False):
     if dry_run:
         print(f"[DRY RUN] Would log {len(rejections)} rejections")
         for r in rejections:
-            print(f"  - {r['company']}: {r['role']}")
+            print(f"  {r['company']}: {r['role']}")
         return len(rejections)
 
-    # Log to Google Sheet
+    # Log to Google Sheet (if configured)
     sheet_id = os.getenv("JWALIN_JOB_TRACKER_SHEET_ID")
-    if not sheet_id:
-        print("ERROR: JWALIN_JOB_TRACKER_SHEET_ID not set")
-        return 0
+    if sheet_id:
+        try:
+            for rejection in rejections:
+                curl("POST", f"/sheets/{sheet_id}/values/Rejections/append", {
+                    "values": [[
+                        rejection["date"],
+                        rejection["company"],
+                        rejection["role"],
+                        rejection["status"],
+                        rejection["notes"],
+                    ]],
+                })
 
-    # TODO: Append rows to sheet
-    logged = len(rejections)
-    log_action("log_rejections", f"count={logged}")
+            log_action("auto_log_rejections", f"count={len(rejections)}")
+            return len(rejections)
+        except Exception as e:
+            print(f"WARNING: Failed to log rejections to sheet: {e}")
+            # Don't fail completely, just log the error
+            log_action("auto_log_rejections", f"count={len(rejections)}  error=sheet_unavailable")
+            return len(rejections)
+    else:
+        # Just log locally
+        log_action("auto_log_rejections", f"count={len(rejections)}  note=sheet_id_not_configured")
+        return len(rejections)
 
-    return logged
-
-def generate_draft_reply(thread):
-    """Use Claude to draft a reply"""
-    # TODO: Call Claude with thread context
-    return "Thanks for reaching out, I'll follow up soon."
-
-def extract_calendar_event(thread):
-    """Extract date/time from email thread"""
-    # Look for patterns like "Tuesday 2pm", "next Monday", etc.
-    text = thread.get("body", "")
-
-    # Regex patterns for dates/times
-    patterns = [
-        r"(?:next\s+)?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))",
-        r"(\d{1,2}/\d{1,2})\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            # TODO: Parse date/time properly
-            return {
-                "summary": thread["subject"],
-                "start": "2026-06-10T14:00:00-07:00",  # Placeholder
-                "end": "2026-06-10T15:00:00-07:00",
-                "description": f"From: {thread['sender']}",
-            }
-
-    return None
-
-def is_rejection(thread):
-    """Check if thread is a job rejection"""
-    keywords = ["reject", "unfortunately", "not moving forward", "decided not", "passing"]
-    text = (thread.get("subject", "") + " " + thread.get("body", "")).lower()
-    return any(kw in text for kw in keywords)
-
-def extract_job_info(thread):
-    """Extract company and role from job email"""
-    # TODO: Parse job rejection emails properly
-    subject = thread.get("subject", "")
-    company = subject.split("from")[-1].strip() if "from" in subject else "Unknown"
-    role = subject.split("for")[-1].strip() if "for" in subject else "Unknown"
-    return company[:30], role[:30]  # Truncate for safety
-
-def show_summary(archive_count, drafts, event_count, rejection_count):
+def show_summary(archived, logged):
     """Show what actions were taken"""
     print("\n## Auto-Actions Complete — " + datetime.utcnow().strftime("%m/%d %H:%M"))
     print()
-    if archive_count > 0:
-        print(f"Archived: {archive_count} (newsletters, receipts, notifications)")
-    if drafts:
-        print(f"Drafted: {len(drafts)} (waiting for your approval)")
-        for d in drafts[:3]:
-            print(f"  ✓ {d['sender']} — re: {d['subject'][:40]}")
-        if len(drafts) > 3:
-            print(f"  ... and {len(drafts) - 3} more")
-    if event_count > 0:
-        print(f"Created events: {event_count}")
-    if rejection_count > 0:
-        print(f"Logged rejections: {rejection_count}")
+
+    if archived > 0:
+        print(f"✓ Archived: {archived} emails (low-signal)")
+    if logged > 0:
+        print(f"✓ Logged: {logged} rejections to job tracker")
+
+    if archived == 0 and logged == 0:
+        print("No actions needed.")
+
     print()
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Auto-actions worker")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
-    parser.add_argument("--approval-only", action="store_true", help="Show pending approvals")
+    parser = argparse.ArgumentParser(description="Auto-actions agent")
+    parser.add_argument("--dry-run", action="store_true", help="Preview without executing")
+    parser.add_argument("--archive-only", action="store_true", help="Only archive")
+    parser.add_argument("--log-only", action="store_true", help="Only log rejections")
     args = parser.parse_args()
 
-    if args.approval_only:
-        # TODO: Show pending drafts from ledger
-        print("TODO: Show pending drafts")
-        return
-
-    # Fetch threads
+    # Fetch conversations
     try:
-        threads = get_unread_threads()
+        conversations = get_conversations()
     except Exception as e:
-        print(f"ERROR: Failed to fetch threads: {e}")
+        print(f"ERROR: {e}")
         sys.exit(1)
 
-    if not threads:
-        print("No unread threads")
+    if not conversations:
+        print("No unread conversations")
         return
 
-    # Run 4 actions
-    archive_count = action_archive(threads, dry_run=args.dry_run)
-    drafts = action_draft_replies(threads, dry_run=args.dry_run)
-    event_count = action_create_events(threads, dry_run=args.dry_run)
-    rejection_count = action_log_rejections(threads, dry_run=args.dry_run)
+    archived = 0
+    logged = 0
+
+    # Run actions
+    if not args.log_only:
+        archived = action_archive(conversations, dry_run=args.dry_run)
+
+    if not args.archive_only:
+        logged = action_log_rejections(conversations, dry_run=args.dry_run)
 
     # Show summary
-    show_summary(archive_count, drafts, event_count, rejection_count)
+    show_summary(archived, logged)
 
 if __name__ == "__main__":
     main()
