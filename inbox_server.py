@@ -328,6 +328,11 @@ APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
 def _approval_rule_for_request(method: str, path: str) -> ApprovalRouteRule | None:
     if method not in APPROVAL_GUARDED_METHODS:
         return None
+
+    # Skip approval for filter creation in local dev (user approves via CLI)
+    if method == "POST" and "/gmail/filters" in path:
+        return None
+
     for rule in APPROVAL_ROUTE_RULES:
         if method == rule.method and rule.pattern.match(path):
             return rule
