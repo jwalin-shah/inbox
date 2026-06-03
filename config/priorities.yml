@@ -3,6 +3,10 @@
 
 priority_senders:
   - tierra@cerebras.net
+  - jack@jackandjill.ai  # Job recruiter
+  - dave@jobs.bandana.com  # Recruiter (Bandana)
+  - user-e65a8e09c91dc79cdac854bf73c74dd1@waymo.mail.clinchtalent.com  # Waymo recruiting
+  - apply@ycombinator.com  # YC recruiting
   # add more as needed
 
 priority_keywords:
@@ -17,6 +21,9 @@ priority_keywords:
   - "onsite"
   - "screening"
   - "next steps"
+  - "phone screen"
+  - "system design"
+  - "take home"
 
 # Threads matching these patterns score 1 (ignore) regardless of other signals
 low_signal_patterns:
@@ -30,3 +37,13 @@ low_signal_patterns:
 priority_labels:
   - Label_36  # Triage/Jobs (job applications + rejections)
   - Label_20  # Triage/Critical (urgent items)
+
+# Special handling for job rejections (auto-archive but log)
+# When triage sees "rejected" or "rejection", action should be "log" not "archive"
+rejection_keywords:
+  - "rejection"
+  - "rejected"
+  - "unfortunately"
+  - "not moving forward"
+  - "not a fit"
+  - "we've decided"
