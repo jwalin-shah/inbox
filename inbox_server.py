@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 from collections.abc import Callable, Iterable
 from contextlib import asynccontextmanager, suppress
@@ -151,6 +152,7 @@ from services import (
     gmail_create_filter,
     gmail_delete,
     gmail_filter_audit,
+    gmail_inbox_counts,
     gmail_label_create,
     gmail_labels,
     gmail_mark_read,
@@ -166,6 +168,7 @@ from services import (
     google_auth_all,
     google_auth_diagnostics,
     imsg_contacts,
+    imsg_messages,
     imsg_send,
     imsg_thread,
     init_contacts,
@@ -287,50 +290,215 @@ def _route_rule(
 
 
 APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
-    _route_rule("POST", r"^/messages/send$", "imessage_gmail", "send_message", "inbox.messages.send"),
+    _route_rule(
+        "POST", r"^/messages/send$", "imessage_gmail", "send_message", "inbox.messages.send"
+    ),
     _route_rule("POST", r"^/messages/compose$", "gmail", "compose_send", "inbox.gmail.send_email"),
     _route_rule("POST", r"^/messages/gmail/reply$", "gmail", "reply", "inbox.gmail.reply"),
-    _route_rule("POST", r"^/messages/gmail/[^/]+/(archive|delete|unsubscribe|star|unstar|read|unread)$", "gmail", "message_modify", "inbox.gmail.modify", "external_destructive"),
-    _route_rule("POST", r"^/messages/gmail/bulk-unsubscribe$", "gmail", "bulk_unsubscribe", "inbox.gmail.unsubscribe", "external_destructive"),
-    _route_rule("POST", r"^/gmail/(batch-modify|filters|labels)$", "gmail", "gmail_modify", "inbox.gmail.modify", "external_write"),
-    _route_rule("POST", r"^/calendar/events(/quick)?$", "calendar", "create_event", "inbox.calendar.create_event"),
-    _route_rule("PUT", r"^/calendar/events/[^/]+$", "calendar", "update_event", "inbox.calendar.update_event"),
-    _route_rule("DELETE", r"^/calendar/events/[^/]+$", "calendar", "delete_event", "inbox.calendar.delete_event", "external_destructive"),
-    _route_rule("POST", r"^/calendar/events/[^/]+/(rsvp|create-reminder)$", "calendar", "event_action", "inbox.calendar.event_action"),
-    _route_rule("PATCH", r"^/calendar/events/[^/]+/attendees$", "calendar", "modify_attendees", "inbox.calendar.modify_attendees"),
-    _route_rule("PUT", r"^/calendar/events/[^/]+/reminders$", "calendar", "set_reminders", "inbox.calendar.update_event"),
-    _route_rule("POST", r"^/calendar/workflow-event$", "calendar", "create_workflow_event", "inbox.calendar.create_event"),
-    _route_rule("POST", r"^/reminders(/[^/]+/(complete|uncomplete))?$", "apple_reminders", "write_reminder", "inbox.reminders.write"),
-    _route_rule("PUT", r"^/reminders/[^/]+$", "apple_reminders", "edit_reminder", "inbox.reminders.write"),
-    _route_rule("DELETE", r"^/reminders/[^/]+$", "apple_reminders", "delete_reminder", "inbox.reminders.delete", "external_destructive"),
-    _route_rule("POST", r"^/tasks(/[^/]+/complete|/from-message|/links)?$", "google_tasks", "write_task", "inbox.tasks.write"),
+    _route_rule(
+        "POST",
+        r"^/messages/gmail/[^/]+/(archive|delete|unsubscribe|star|unstar|read|unread)$",
+        "gmail",
+        "message_modify",
+        "inbox.gmail.modify",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST",
+        r"^/messages/gmail/bulk-unsubscribe$",
+        "gmail",
+        "bulk_unsubscribe",
+        "inbox.gmail.unsubscribe",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST",
+        r"^/gmail/(batch-modify|filters|labels)$",
+        "gmail",
+        "gmail_modify",
+        "inbox.gmail.modify",
+        "external_write",
+    ),
+    _route_rule(
+        "POST",
+        r"^/calendar/events(/quick)?$",
+        "calendar",
+        "create_event",
+        "inbox.calendar.create_event",
+    ),
+    _route_rule(
+        "PUT",
+        r"^/calendar/events/[^/]+$",
+        "calendar",
+        "update_event",
+        "inbox.calendar.update_event",
+    ),
+    _route_rule(
+        "DELETE",
+        r"^/calendar/events/[^/]+$",
+        "calendar",
+        "delete_event",
+        "inbox.calendar.delete_event",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST",
+        r"^/calendar/events/[^/]+/(rsvp|create-reminder)$",
+        "calendar",
+        "event_action",
+        "inbox.calendar.event_action",
+    ),
+    _route_rule(
+        "PATCH",
+        r"^/calendar/events/[^/]+/attendees$",
+        "calendar",
+        "modify_attendees",
+        "inbox.calendar.modify_attendees",
+    ),
+    _route_rule(
+        "PUT",
+        r"^/calendar/events/[^/]+/reminders$",
+        "calendar",
+        "set_reminders",
+        "inbox.calendar.update_event",
+    ),
+    _route_rule(
+        "POST",
+        r"^/calendar/workflow-event$",
+        "calendar",
+        "create_workflow_event",
+        "inbox.calendar.create_event",
+    ),
+    _route_rule(
+        "POST",
+        r"^/reminders(/[^/]+/(complete|uncomplete))?$",
+        "apple_reminders",
+        "write_reminder",
+        "inbox.reminders.write",
+    ),
+    _route_rule(
+        "PUT", r"^/reminders/[^/]+$", "apple_reminders", "edit_reminder", "inbox.reminders.write"
+    ),
+    _route_rule(
+        "DELETE",
+        r"^/reminders/[^/]+$",
+        "apple_reminders",
+        "delete_reminder",
+        "inbox.reminders.delete",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST",
+        r"^/tasks(/[^/]+/complete|/from-message|/links)?$",
+        "google_tasks",
+        "write_task",
+        "inbox.tasks.write",
+    ),
     _route_rule("PUT", r"^/tasks/[^/]+$", "google_tasks", "update_task", "inbox.tasks.write"),
-    _route_rule("DELETE", r"^/tasks(/links)?/[^/]+$", "google_tasks", "delete_task", "inbox.tasks.delete", "external_destructive"),
-    _route_rule("POST", r"^/scheduled$", "scheduler", "create_scheduled_message", "inbox.scheduler.write"),
-    _route_rule("DELETE", r"^/scheduled/[^/]+$", "scheduler", "delete_scheduled_message", "inbox.scheduler.delete", "external_destructive"),
+    _route_rule(
+        "DELETE",
+        r"^/tasks(/links)?/[^/]+$",
+        "google_tasks",
+        "delete_task",
+        "inbox.tasks.delete",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST", r"^/scheduled$", "scheduler", "create_scheduled_message", "inbox.scheduler.write"
+    ),
+    _route_rule(
+        "DELETE",
+        r"^/scheduled/[^/]+$",
+        "scheduler",
+        "delete_scheduled_message",
+        "inbox.scheduler.delete",
+        "external_destructive",
+    ),
     _route_rule("POST", r"^/followups$", "scheduler", "create_followup", "inbox.followups.write"),
-    _route_rule("DELETE", r"^/followups/[^/]+$", "scheduler", "delete_followup", "inbox.followups.delete", "external_destructive"),
-    _route_rule("POST", r"^/whatsapp/(launch|send|scroll)$", "whatsapp", "whatsapp_action", "inbox.whatsapp.write"),
-    _route_rule("POST", r"^/github/notifications(/[^/]+/read|/read-all)$", "github", "notification_modify", "inbox.github.notifications"),
-    _route_rule("POST", r"^/drive/(upload|folder|workflow-folder)$", "drive", "drive_write", "inbox.drive.write"),
-    _route_rule("DELETE", r"^/drive/files/[^/]+$", "drive", "drive_delete", "inbox.drive.delete", "external_destructive"),
-    _route_rule("POST", r"^/sheets(/workflow-sheet|/[^/]+/(values/[^/]+/append|values/batch-update|tabs|tabs/[^/]+/copy|format))?$", "sheets", "sheets_write", "inbox.sheets.write"),
-    _route_rule("PUT", r"^/sheets/[^/]+/values/[^/]+$", "sheets", "update_values", "inbox.sheets.update_cells"),
-    _route_rule("PATCH", r"^/sheets/[^/]+/tabs/[^/]+$", "sheets", "rename_tab", "inbox.sheets.write"),
-    _route_rule("DELETE", r"^/sheets/[^/]+(/values/[^/]+|/tabs/[^/]+)?$", "sheets", "sheets_delete", "inbox.sheets.delete", "external_destructive"),
-    _route_rule("POST", r"^/docs(/workflow-doc|/[^/]+/text)?$", "docs", "docs_write", "inbox.docs.write"),
-    _route_rule("DELETE", r"^/docs/[^/]+$", "docs", "docs_delete", "inbox.docs.delete", "external_destructive"),
-    _route_rule("POST", r"^/connectors/[^/]+/sync$", "connector", "execute_sync", "inbox.connectors.sync"),
-    _route_rule("POST", r"^/accounts/(add|reauth)$", "google_oauth", "auth_flow", "inbox.google.auth_flow"),
+    _route_rule(
+        "DELETE",
+        r"^/followups/[^/]+$",
+        "scheduler",
+        "delete_followup",
+        "inbox.followups.delete",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST",
+        r"^/whatsapp/(launch|send|scroll)$",
+        "whatsapp",
+        "whatsapp_action",
+        "inbox.whatsapp.write",
+    ),
+    _route_rule(
+        "POST",
+        r"^/github/notifications(/[^/]+/read|/read-all)$",
+        "github",
+        "notification_modify",
+        "inbox.github.notifications",
+    ),
+    _route_rule(
+        "POST",
+        r"^/drive/(upload|folder|workflow-folder)$",
+        "drive",
+        "drive_write",
+        "inbox.drive.write",
+    ),
+    _route_rule(
+        "DELETE",
+        r"^/drive/files/[^/]+$",
+        "drive",
+        "drive_delete",
+        "inbox.drive.delete",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST",
+        r"^/sheets(/workflow-sheet|/[^/]+/(values/[^/]+/append|values/batch-update|tabs|tabs/[^/]+/copy|format))?$",
+        "sheets",
+        "sheets_write",
+        "inbox.sheets.write",
+    ),
+    _route_rule(
+        "PUT",
+        r"^/sheets/[^/]+/values/[^/]+$",
+        "sheets",
+        "update_values",
+        "inbox.sheets.update_cells",
+    ),
+    _route_rule(
+        "PATCH", r"^/sheets/[^/]+/tabs/[^/]+$", "sheets", "rename_tab", "inbox.sheets.write"
+    ),
+    _route_rule(
+        "DELETE",
+        r"^/sheets/[^/]+(/values/[^/]+|/tabs/[^/]+)?$",
+        "sheets",
+        "sheets_delete",
+        "inbox.sheets.delete",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST", r"^/docs(/workflow-doc|/[^/]+/text)?$", "docs", "docs_write", "inbox.docs.write"
+    ),
+    _route_rule(
+        "DELETE",
+        r"^/docs/[^/]+$",
+        "docs",
+        "docs_delete",
+        "inbox.docs.delete",
+        "external_destructive",
+    ),
+    _route_rule(
+        "POST", r"^/connectors/[^/]+/sync$", "connector", "execute_sync", "inbox.connectors.sync"
+    ),
+    _route_rule(
+        "POST", r"^/accounts/(add|reauth)$", "google_oauth", "auth_flow", "inbox.google.auth_flow"
+    ),
 )
 
 
 def _approval_rule_for_request(method: str, path: str) -> ApprovalRouteRule | None:
     if method not in APPROVAL_GUARDED_METHODS:
-        return None
-
-    # Skip approval for filter creation in local dev (user approves via CLI)
-    if method == "POST" and "/gmail/filters" in path:
         return None
 
     for rule in APPROVAL_ROUTE_RULES:
@@ -381,7 +549,16 @@ def _connector_sync_is_dry_run(path: str, fields: dict[str, Any]) -> bool:
 
 
 def _approval_item_count(fields: dict[str, Any]) -> int:
-    for key in ("ids", "message_ids", "event_ids", "file_ids", "task_ids", "values", "requests", "items"):
+    for key in (
+        "ids",
+        "message_ids",
+        "event_ids",
+        "file_ids",
+        "task_ids",
+        "values",
+        "requests",
+        "items",
+    ):
         value = fields.get(key)
         if isinstance(value, list):
             return max(1, len(value))
@@ -423,7 +600,12 @@ def _approval_resource_ref(request: Request, fields: dict[str, Any]) -> str:
     if path == "/drive/workflow-folder":
         workflow = fields.get("workflow")
         parent_id = fields.get("parent_id") or fields.get("folder_id")
-        if isinstance(workflow, str) and workflow.strip() and isinstance(parent_id, str) and parent_id.strip():
+        if (
+            isinstance(workflow, str)
+            and workflow.strip()
+            and isinstance(parent_id, str)
+            and parent_id.strip()
+        ):
             return f"workflow:{workflow.strip()}:parent:{parent_id.strip()}"
         if isinstance(workflow, str) and workflow.strip():
             return f"workflow:{workflow.strip()}"
@@ -448,7 +630,15 @@ def _approval_resource_ref(request: Request, fields: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return f"{key}:{value.strip()}"
     tail = path.rstrip("/").rsplit("/", 1)[-1]
-    if tail and tail not in {"compose", "events", "tasks", "reminders", "scheduled", "followups", "send"}:
+    if tail and tail not in {
+        "compose",
+        "events",
+        "tasks",
+        "reminders",
+        "scheduled",
+        "followups",
+        "send",
+    }:
         return f"path:{tail}"
     # For create endpoints that have no existing resource ID, use the title/subject as ref
     for key in ("title", "subject", "name", "summary"):
@@ -494,10 +684,16 @@ def mint_local_approval_lease(
     ttl_seconds: int = APPROVAL_LEASE_TTL_SECONDS,
 ) -> str:
     """Create a local per-action lease for tests and local approval adapters."""
-    body_bytes = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() if isinstance(body, dict) else body or b""
+    body_bytes = (
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        if isinstance(body, dict)
+        else body or b""
+    )
     parsed_path = urlsplit(path)
     request_path = parsed_path.path
-    query_params = {key: values[-1] for key, values in parse_qs(parsed_path.query).items() if values}
+    query_params = {
+        key: values[-1] for key, values in parse_qs(parsed_path.query).items() if values
+    }
     rule = _approval_rule_for_request(method.upper(), request_path)
     if rule is None:
         raise ValueError(f"no approval route rule for {method} {path}")
@@ -556,7 +752,9 @@ async def _approval_decision_for_request(request: Request) -> ApprovalGateDecisi
         lease = _approval_leases.get(supplied)
         now = datetime.now(UTC)
         if lease is None:
-            return _approval_decision(rule, can_execute=False, reason="unknown_per_action_approval_lease", request=request)
+            return _approval_decision(
+                rule, can_execute=False, reason="unknown_per_action_approval_lease", request=request
+            )
         if not resource_ref:
             return _approval_decision(
                 rule,
@@ -653,6 +851,11 @@ class MessageOut(BaseModel):
     source: str
     attachments: list[dict] = []  # type: ignore[type-arg]
     message_id: str = ""
+
+
+class IMessageOut(MessageOut):
+    chat_id: str
+    contact: str
 
 
 class CalendarEventOut(BaseModel):
@@ -1067,9 +1270,11 @@ class ProviderStatusOut(BaseModel):
     configured: bool
     authenticated: bool = False
     readable: bool = False
+    syncable: bool = False
     writable: bool = False
     accounts: list[str] = []
     blockers: list[str] = []
+    remediation: list[str] = []
     notes: str = ""
 
 
@@ -1208,6 +1413,28 @@ class ConnectorSearchRequest(BaseModel):
 
 class ConnectorSyncRequest(BaseModel):
     execute: StrictBool = False
+
+
+class AhmedOfficeLocationDryRunRequest(BaseModel):
+    event_id: str = "b9quemrk7mua74qfv1b707rik0"
+    calendar_id: str = "primary"
+    account: str = ""
+    query: str = "Ahmed office location"
+    limit: int = 10
+
+
+class GatewayReadProofRequest(BaseModel):
+    account: str = ""
+    gmail_query: str = "in:inbox"
+    gmail_limit: int = 5
+    calendar_days: int = 7
+    calendar_limit: int = 10
+    task_list_id: str = "@default"
+    task_limit: int = 10
+
+
+class GmailReadinessRequest(BaseModel):
+    accounts: list[str] = ["jwalinshah13@gmail.com", "jshah1331@gmail.com"]
 
 
 class TriageRequest(BaseModel):
@@ -1968,18 +2195,75 @@ def _github_provider() -> ProviderStatusOut:
     )
 
 
-def _google_provider(name: str, services: dict[str, object], writable: bool = True) -> ProviderStatusOut:
+_GOOGLE_PROVIDER_SCOPES = {
+    "google_gmail": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.settings.basic",
+    ],
+    "google_calendar": ["https://www.googleapis.com/auth/calendar"],
+    "google_drive": ["https://www.googleapis.com/auth/drive"],
+    "google_sheets": ["https://www.googleapis.com/auth/spreadsheets"],
+    "google_docs": ["https://www.googleapis.com/auth/documents"],
+    "google_contacts": ["https://www.googleapis.com/auth/contacts.readonly"],
+    "google_tasks": ["https://www.googleapis.com/auth/tasks"],
+}
+
+
+def _google_token_accounts(
+    diagnostics: dict[str, Any],
+    required_scopes: list[str],
+) -> tuple[list[str], list[str]]:
+    accounts: list[str] = []
+    blockers: list[str] = []
+    required = set(required_scopes)
+    for token in diagnostics.get("tokens", []):
+        if not isinstance(token, dict):
+            continue
+        missing = set(token.get("missing_scopes") or [])
+        reason = str(token.get("reason") or "")
+        if required and required.issubset(missing):
+            blockers.append(f"{token.get('email_hint', 'unknown')}:missing_required_scopes")
+            continue
+        if reason in {"unreadable_token", "missing_refresh_token"}:
+            blockers.append(f"{token.get('email_hint', 'unknown')}:{reason}")
+            continue
+        accounts.append(str(token.get("email_hint") or "unknown"))
+    return accounts, blockers
+
+
+def _google_provider(
+    name: str,
+    services: dict[str, object],
+    diagnostics: dict[str, Any],
+    writable: bool = True,
+) -> ProviderStatusOut:
     accounts = list(services.keys())
+    token_accounts, token_blockers = _google_token_accounts(
+        diagnostics,
+        _GOOGLE_PROVIDER_SCOPES.get(name, []),
+    )
+    configured = bool(accounts or token_accounts)
+    blockers = list(token_blockers)
+    if token_accounts and not accounts:
+        blockers.append("oauth_token_present_but_service_not_loaded")
+    if not configured:
+        blockers.append("no_google_oauth_token_or_loaded_account")
     return ProviderStatusOut(
         provider=name,
         category="google_api",
-        configured=bool(accounts),
-        authenticated=bool(accounts),
+        configured=configured,
+        authenticated=bool(accounts or token_accounts),
         readable=bool(accounts),
+        syncable=bool(accounts),
         writable=bool(accounts) and writable,
-        accounts=accounts,
-        blockers=[] if accounts else ["no_loaded_google_accounts"],
-        notes="Loaded from local OAuth token files; tokens and secrets are not returned.",
+        accounts=accounts or token_accounts,
+        blockers=blockers,
+        remediation=[]
+        if accounts
+        else ["Run scripts/restore_google_oauth.sh, then restart or rehydrate Inbox auth."],
+        notes="Uses loaded Google services when present; falls back to redacted OAuth token diagnostics for configuration state.",
     )
 
 
@@ -2003,9 +2287,47 @@ def _optional_db_provider(
         configured=True,
         authenticated=readable,
         readable=readable,
+        syncable=readable,
         writable=False,
         blockers=[] if readable else [error],
         notes=notes,
+    )
+
+
+def _job_outreach_provider(providers: list[ProviderStatusOut]) -> ProviderStatusOut:
+    by_name = {provider.provider: provider for provider in providers}
+    gmail = by_name.get("google_gmail")
+    linkedin = by_name.get("linkedin")
+    configured_sources = [
+        provider.provider for provider in (gmail, linkedin) if provider and provider.configured
+    ]
+    gmail_ready = bool(gmail and gmail.readable)
+    linkedin_ready = bool(linkedin and linkedin.readable)
+    blockers: list[str] = []
+    if not gmail_ready:
+        blockers.append("gmail_not_readable")
+    if not linkedin_ready:
+        blockers.append("linkedin_not_readable")
+    ready = gmail_ready and linkedin_ready
+    return ProviderStatusOut(
+        provider="job_outreach",
+        category="workflow",
+        configured=bool(configured_sources),
+        authenticated=ready,
+        readable=ready,
+        syncable=ready,
+        writable=False,
+        accounts=sorted(
+            {account for provider in (gmail, linkedin) if provider for account in provider.accounts}
+        ),
+        blockers=blockers,
+        remediation=[
+            "Make Gmail readable for recruiter email history.",
+            "Make LinkedIn linkedin_data.db readable or sync the LinkedIn export/scanner output.",
+        ]
+        if blockers
+        else [],
+        notes="Readiness for job/recruiter outreach workflows based on Gmail and LinkedIn sources only.",
     )
 
 
@@ -2020,23 +2342,31 @@ def _provider_recommendations(providers: list[ProviderStatusOut]) -> list[str]:
         recommendations.append(
             "Grant Full Disk Access to the app that launches Inbox, then restart the server."
         )
-    if any(provider.provider.startswith("google_") and not provider.readable for provider in providers):
-        recommendations.append("Run scripts/restore_google_oauth.sh --status and reauth missing accounts.")
+    if any(
+        provider.provider.startswith("google_") and not provider.readable for provider in providers
+    ):
+        recommendations.append(
+            "Run scripts/restore_google_oauth.sh and reauth missing accounts if prompted."
+        )
     if any(provider.provider == "github" and not provider.configured for provider in providers):
         recommendations.append("Add github_token.txt or the configured GitHub token source.")
     if any(provider.provider == "whatsapp" and not provider.configured for provider in providers):
-        recommendations.append("Keep WhatsApp deferred until the browser/native integration path is chosen.")
+        recommendations.append(
+            "Keep WhatsApp deferred until the browser/native integration path is chosen."
+        )
     return recommendations
 
 
 def _provider_readiness() -> ProviderReadinessOut:
+    google_diag = google_auth_diagnostics(check_refresh=False)
     providers = [
-        _google_provider("google_gmail", state.gmail_services),
-        _google_provider("google_calendar", state.cal_services),
-        _google_provider("google_drive", state.drive_services),
-        _google_provider("google_sheets", state.sheets_services),
-        _google_provider("google_docs", state.docs_services),
-        _google_provider("google_tasks", state.tasks_services),
+        _google_provider("google_gmail", state.gmail_services, google_diag),
+        _google_provider("google_calendar", state.cal_services, google_diag),
+        _google_provider("google_drive", state.drive_services, google_diag),
+        _google_provider("google_sheets", state.sheets_services, google_diag),
+        _google_provider("google_docs", state.docs_services, google_diag),
+        _google_provider("google_contacts", {}, google_diag, writable=False),
+        _google_provider("google_tasks", state.tasks_services, google_diag),
         _github_provider(),
         _local_sqlite_provider(
             "imessage",
@@ -2060,10 +2390,13 @@ def _provider_readiness() -> ProviderReadinessOut:
             "Planning connector; reports only whether a local OpenHuman backing DB is readable.",
         ),
     ]
+    providers.append(_job_outreach_provider(providers))
     summary = {
         "total": len(providers),
         "ready": sum(1 for provider in providers if provider.readable),
-        "blocked": sum(1 for provider in providers if provider.configured and not provider.readable),
+        "blocked": sum(
+            1 for provider in providers if provider.configured and not provider.readable
+        ),
         "not_configured": sum(1 for provider in providers if not provider.configured),
     }
     status_text = "ok" if summary["blocked"] == 0 else "degraded"
@@ -3615,6 +3948,92 @@ async def get_whatsapp_messages(chat_name: str, limit: int = 50):
     ]
 
 
+# ── iMessage ─────────────────────────────────────────────────────────────────
+
+
+def _parse_imessage_date(value: str, *, end: bool = False) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(400, f"Invalid date: {value}") from exc
+    if len(value) == 10:
+        parsed = parsed.replace(tzinfo=UTC)
+        if end:
+            parsed += timedelta(days=1)
+    elif parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+@app.get("/imessage", response_model=list[IMessageOut])
+async def get_imessage(
+    contact: str = "",
+    date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    limit: int = 100,
+):
+    """Read iMessages, optionally filtered by contact and ISO date range."""
+    if date and (start_date or end_date):
+        raise HTTPException(400, "Use date or start_date/end_date, not both")
+    if limit < 1 or limit > 1000:
+        raise HTTPException(400, "limit must be between 1 and 1000")
+
+    range_start = _parse_imessage_date(date or start_date)
+    range_end = _parse_imessage_date(date or end_date, end=bool(date or end_date))
+    if range_start and range_end and range_start >= range_end:
+        raise HTTPException(400, "start_date must be before end_date")
+
+    messages = await asyncio.to_thread(
+        imsg_messages,
+        contact=contact,
+        start_date=range_start,
+        end_date=range_end,
+        limit=limit,
+    )
+    return [
+        IMessageOut(
+            sender=str(message["sender"]),
+            body=str(message["body"]),
+            ts=message["ts"].isoformat(),
+            is_me=bool(message["is_me"]),
+            source="imessage",
+            message_id=str(message["message_id"]),
+            chat_id=str(message["chat_id"]),
+            contact=str(message["contact"]),
+        )
+        for message in messages
+    ]
+
+
+@app.get("/imessage/contacts", response_model=list[ConversationOut])
+async def list_imessage_contacts(limit: int = 50):
+    """List iMessage contacts needing reply."""
+    contacts = await asyncio.to_thread(imsg_contacts, limit)
+    return [_contact_to_out(c) for c in contacts]
+
+
+@app.get("/imessage/messages/{chat_id}", response_model=list[MessageOut])
+async def get_imessage_messages(chat_id: str, limit: int = 50):
+    """Fetch iMessage conversation thread by chat ID."""
+    messages = await asyncio.to_thread(imsg_thread, chat_id, limit)
+    return [_msg_to_out(m) for m in messages]
+
+
+@app.post("/imessage/send")
+async def send_imessage(contact_id: str, text: str):
+    """Send an iMessage to a contact."""
+    # contact_id would be mapped to Contact object
+    # For now, this is a placeholder
+    try:
+        ok = await asyncio.to_thread(imsg_send, Contact(identifier=contact_id), text)
+        return {"ok": ok}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to send iMessage: {str(e)}") from e
+
+
 # ── LinkedIn ─────────────────────────────────────────────────────────────────
 
 
@@ -4405,6 +4824,515 @@ async def connectors_sync_endpoint(connector_id: str, req: ConnectorSyncRequest)
         )
         raise HTTPException(status_code=status_code, detail=result)
     return result
+
+
+_GATEWAY_PARITY_MATRIX: list[dict[str, Any]] = [
+    {
+        "capability": "personal_data_gateway_read_proof",
+        "local_api": ["POST /gateway/read-proof"],
+        "mcp_tools": ["prove_personal_data_gateway_reads"],
+        "account_selection": "account body parameter; blank reads loaded accounts for each source",
+        "attribution": [
+            "account",
+            "gmail_account",
+            "calendar_id",
+            "event_id",
+            "list_id",
+            "task_id",
+        ],
+        "mutation_policy": "read_only; no provider mutation helpers are called",
+        "canonical": True,
+    },
+    {
+        "capability": "calendar_read",
+        "local_api": [
+            "GET /calendar/events",
+            "GET /calendar/events/{event_id}",
+            "GET /calendar/search",
+        ],
+        "mcp_tools": ["list_calendar_events", "get_calendar_event", "search_calendar_events"],
+        "account_selection": "account query parameter; empty means first loaded/all-account read path depending endpoint",
+        "attribution": ["account", "calendar_id", "event_id"],
+        "mutation_policy": "read_only",
+        "canonical": True,
+    },
+    {
+        "capability": "calendar_create_update",
+        "local_api": ["POST /calendar/events", "PUT /calendar/events/{event_id}"],
+        "mcp_tools": ["create_calendar_event", "update_calendar_event"],
+        "account_selection": "account body/query parameter plus calendar_id where applicable",
+        "attribution": ["account", "calendar_id", "event_id"],
+        "mutation_policy": "review_before_write: per-action approval lease required",
+        "canonical": True,
+    },
+    {
+        "capability": "gmail_multi_account_search_triage",
+        "local_api": [
+            "POST /gateway/gmail-readiness",
+            "GET /gmail/search",
+            "GET /gmail/conversations",
+            "GET /inbox/needs-action",
+        ],
+        "mcp_tools": [
+            "prove_multi_gmail_readiness",
+            "search_email",
+            "list_inbox_threads",
+            "list_needs_action",
+        ],
+        "account_selection": "account query parameter; blank searches loaded accounts",
+        "attribution": ["owning_account", "gmail_account", "thread_id", "message_id"],
+        "mutation_policy": "read_only for readiness/search; explicit reply/modify tools are approval-gated",
+        "canonical": True,
+    },
+    {
+        "capability": "imessage_lookup",
+        "local_api": [
+            "GET /conversations?source=imessage",
+            "GET /messages/imessage/{conv_id}",
+            "POST /search with connector:imessage",
+        ],
+        "mcp_tools": ["list_message_threads", "get_message_thread", "search_personal_data"],
+        "account_selection": "local Messages database; no cloud account selector",
+        "attribution": ["source", "conv_id", "message_id", "sender", "ts"],
+        "mutation_policy": "read_only for lookup; sends are approval-gated elsewhere",
+        "canonical": True,
+    },
+    {
+        "capability": "whatsapp_readiness",
+        "local_api": ["GET /connectors/status", "POST /connectors/whatsapp/sync"],
+        "mcp_tools": ["get_connectors_status", "plan_connector_sync"],
+        "account_selection": "wacli local/session state reported by connector diagnostics",
+        "attribution": ["connector", "storage", "auth_state"],
+        "mutation_policy": "dry_run sync by default; execute requires approval lease",
+        "canonical": True,
+    },
+    {
+        "capability": "tasks_todos",
+        "local_api": ["GET /tasks/lists", "GET /tasks", "POST /tasks", "PUT /tasks/{task_id}"],
+        "mcp_tools": ["list_task_lists", "list_tasks", "create_task", "update_task"],
+        "account_selection": "account query/body parameter",
+        "attribution": ["account", "list_id", "task_id"],
+        "mutation_policy": "review_before_write: per-action approval lease required",
+        "canonical": True,
+    },
+    {
+        "capability": "sheets_app_tracker_access",
+        "local_api": [
+            "GET /sheets",
+            "GET /sheets/{spreadsheet_id}/values/{range_}",
+            "PUT /sheets/{spreadsheet_id}/values/{range_}",
+        ],
+        "mcp_tools": ["list_sheets", "read_sheet_values", "update_sheet_values"],
+        "account_selection": "account query/body parameter",
+        "attribution": ["account", "spreadsheet_id", "range"],
+        "mutation_policy": "reads are direct; writes require approval lease",
+        "canonical": True,
+    },
+    {
+        "capability": "drive_docs_access",
+        "local_api": [
+            "GET /drive/files",
+            "GET /drive/files/{file_id}",
+            "GET /docs",
+            "GET /docs/{document_id}",
+        ],
+        "mcp_tools": ["list_drive_files", "get_drive_file", "list_docs", "get_doc"],
+        "account_selection": "account query/body parameter",
+        "attribution": ["account", "file_id", "document_id"],
+        "mutation_policy": "reads are direct; writes/deletes require approval lease",
+        "canonical": True,
+    },
+]
+
+
+_INFISICAL_SECRET_NAMES = [
+    "INBOX_GOOGLE_OAUTH_CLIENT_JSON",
+    "INBOX_GITHUB_TOKEN",
+    "INBOX_GOOGLE_MAPS_API_KEY",
+    "INBOX_GEMINI_API_KEY",
+    "INBOX_SERVER_TOKEN",
+    "INBOX_MCP_TOKEN",
+]
+
+
+def _infisical_secret_name_gaps() -> dict[str, Any]:
+    binary_path = shutil.which("infisical")
+    return {
+        "binary": "infisical",
+        "binary_path": binary_path or "",
+        "installed": binary_path is not None,
+        "secret_names_only": True,
+        "expected_secret_names": list(_INFISICAL_SECRET_NAMES),
+        "value_policy": "never return or log secret values from this endpoint",
+        "status": "check_not_run" if binary_path else "missing_cli",
+        "remediation": [
+            "Install Infisical CLI if this repo should hydrate local credentials from Infisical.",
+            "Map the expected secret names to local files/env vars without printing values.",
+            "Keep credentials.json, tokens/, and key files gitignored.",
+        ],
+    }
+
+
+def _gateway_status_payload() -> dict[str, Any]:
+    provider_payload = _provider_readiness()
+    connector_payload = connectors_status()
+    missing_connectors = [
+        {
+            "id": connector["id"],
+            "binary": connector["binary"],
+            "auth_state": connector["auth_state"],
+            "remediation": connector.get("remediation", []),
+        }
+        for connector in connector_payload.get("connectors", [])
+        if not connector.get("installed") or connector.get("auth_state") not in {"ok", "unknown"}
+    ]
+    return {
+        "schema_version": "inbox.personal_data_gateway.v0",
+        "canonical_gateway": "inbox_server",
+        "built_in_tool_policy": "Do not rely on built-in Gmail/Calendar/Drive tools for normal operation; use local Inbox API/MCP tools first.",
+        "health": {
+            "status": provider_payload.status,
+            "recommendations": provider_payload.recommendations,
+            "api": provider_payload.api,
+        },
+        "parity_matrix": _GATEWAY_PARITY_MATRIX,
+        "providers": [provider.model_dump() for provider in provider_payload.providers],
+        "connectors": connector_payload,
+        "missing_connector_diagnostics": missing_connectors,
+        "infisical": _infisical_secret_name_gaps(),
+        "review_before_write": {
+            "required": True,
+            "mechanism": "per-action X-Inbox-Approval-Lease; dry-run/proposal endpoints never execute provider mutations",
+            "guarded_classes": ["external_write", "external_destructive"],
+        },
+    }
+
+
+def _gateway_read_proof(req: GatewayReadProofRequest) -> dict[str, Any]:
+    account = req.account.strip()
+    gmail_limit = max(1, min(req.gmail_limit, 50))
+    calendar_days = max(1, min(req.calendar_days, 30))
+    calendar_limit = max(1, min(req.calendar_limit, 100))
+    task_limit = max(1, min(req.task_limit, 100))
+    proof: dict[str, Any] = {
+        "schema_version": "inbox.personal_data_gateway.read_proof.v0",
+        "canonical_gateway": "inbox_server",
+        "read_only": True,
+        "mutation_applied": False,
+        "mutation_policy": "No provider mutation helpers are called by this proof endpoint.",
+        "account_requested": account,
+        "sources": {},
+        "blockers": [],
+    }
+
+    source_blockers: list[str] = []
+
+    gmail_accounts = (
+        {account: state.gmail_services[account]}
+        if account and account in state.gmail_services
+        else ({} if account else state.gmail_services)
+    )
+    gmail_items: list[dict[str, Any]] = []
+    gmail_errors: list[dict[str, str]] = []
+    if account and not gmail_accounts:
+        gmail_errors.append({"account": account, "error": "gmail_account_not_loaded"})
+    elif not gmail_accounts:
+        gmail_errors.append({"account": "", "error": "gmail_service_not_loaded"})
+    for email, svc in gmail_accounts.items():
+        try:
+            contacts = gmail_search(svc, email, req.gmail_query, gmail_limit)
+            gmail_items.extend(
+                _contact_to_out(contact).model_dump() for contact in contacts[:gmail_limit]
+            )
+        except Exception as exc:
+            gmail_errors.append({"account": email, "error": str(exc)})
+    if gmail_errors:
+        source_blockers.append("gmail_read_failed")
+    proof["sources"]["gmail"] = {
+        "ok": not gmail_errors,
+        "operation": "gmail_list",
+        "route_equivalent": "GET /gmail/search",
+        "accounts": list(gmail_accounts.keys()),
+        "query": req.gmail_query,
+        "count": len(gmail_items[:gmail_limit]),
+        "items": gmail_items[:gmail_limit],
+        "errors": gmail_errors,
+    }
+
+    calendar_services = (
+        {account: state.cal_services[account]}
+        if account and account in state.cal_services
+        else ({} if account else state.cal_services)
+    )
+    calendar_errors: list[dict[str, str]] = []
+    calendar_items: list[dict[str, Any]] = []
+    if account and not calendar_services:
+        calendar_errors.append({"account": account, "error": "calendar_account_not_loaded"})
+    elif not calendar_services:
+        calendar_errors.append({"account": "", "error": "calendar_service_not_loaded"})
+    if calendar_services:
+        try:
+            start_dt = datetime.now(UTC)
+            end_dt = start_dt + timedelta(days=calendar_days)
+            events = calendar_events(calendar_services, start_date=start_dt, end_date=end_dt)
+            calendar_items = [
+                _event_to_out(event).model_dump() for event in events[:calendar_limit]
+            ]
+        except Exception as exc:
+            calendar_errors.append({"account": account, "error": str(exc)})
+    if calendar_errors:
+        source_blockers.append("calendar_read_failed")
+    proof["sources"]["calendar"] = {
+        "ok": not calendar_errors,
+        "operation": "calendar_events_read",
+        "route_equivalent": "GET /calendar/events",
+        "accounts": list(calendar_services.keys()),
+        "days": calendar_days,
+        "count": len(calendar_items),
+        "items": calendar_items,
+        "errors": calendar_errors,
+    }
+
+    task_accounts = (
+        {account: state.tasks_services[account]}
+        if account and account in state.tasks_services
+        else ({} if account else state.tasks_services)
+    )
+    task_errors: list[dict[str, str]] = []
+    task_items: list[dict[str, Any]] = []
+    if account and not task_accounts:
+        task_errors.append({"account": account, "error": "tasks_account_not_loaded"})
+    elif not task_accounts:
+        task_errors.append({"account": "", "error": "tasks_service_not_loaded"})
+    for email, svc in task_accounts.items():
+        try:
+            tasks = tasks_list(svc, req.task_list_id, False, task_limit)
+            task_items.extend(_task_to_out(task, email).model_dump() for task in tasks[:task_limit])
+        except Exception as exc:
+            task_errors.append({"account": email, "error": str(exc)})
+    if task_errors:
+        source_blockers.append("tasks_read_failed")
+    proof["sources"]["tasks"] = {
+        "ok": not task_errors,
+        "operation": "task_list_read",
+        "route_equivalent": "GET /tasks",
+        "accounts": list(task_accounts.keys()),
+        "list_id": req.task_list_id,
+        "count": len(task_items[:task_limit]),
+        "items": task_items[:task_limit],
+        "errors": task_errors,
+    }
+
+    proof["ok"] = not source_blockers
+    proof["blockers"] = source_blockers
+    return proof
+
+
+def _gmail_readiness(req: GmailReadinessRequest) -> dict[str, Any]:
+    requested_accounts = [account.strip() for account in req.accounts if account.strip()]
+    if not requested_accounts:
+        requested_accounts = sorted(state.gmail_services.keys())
+
+    token_diag = google_auth_diagnostics(check_refresh=False)
+    loaded_accounts = sorted(state.gmail_services.keys())
+    account_rows: list[dict[str, Any]] = []
+    blockers: list[str] = []
+
+    for account in requested_accounts:
+        svc = state.gmail_services.get(account)
+        row: dict[str, Any] = {
+            "account": account,
+            "loaded": svc is not None,
+            "readable": False,
+            "profile_email": "",
+            "counts": {
+                "messages_total": 0,
+                "threads_total": 0,
+                "inbox_result_size_estimate": 0,
+                "unread_inbox_result_size_estimate": 0,
+            },
+            "errors": [],
+        }
+        if svc is None:
+            row["errors"].append("gmail_account_not_loaded")
+            blockers.append(f"gmail_account_not_loaded:{account}")
+            account_rows.append(row)
+            continue
+
+        try:
+            counts = gmail_inbox_counts(svc)
+            row["profile_email"] = counts.pop("profile_email", "")
+            row["counts"] = counts
+            row["readable"] = True
+        except Exception as exc:
+            row["errors"].append(str(exc) or "gmail_read_failed")
+            blockers.append(f"gmail_read_failed:{account}")
+        account_rows.append(row)
+
+    missing_loaded = [
+        account for account in requested_accounts if account not in state.gmail_services
+    ]
+    return {
+        "schema_version": "inbox.multi_gmail_readiness.v0",
+        "canonical_gateway": "inbox_server",
+        "dry_run": True,
+        "read_only": True,
+        "mutation_applied": False,
+        "mutation_policy": "This endpoint reads Gmail profile and inbox count metadata only; it does not send, delete, label, mark read, or mutate provider data.",
+        "required_accounts": requested_accounts,
+        "loaded_accounts": loaded_accounts,
+        "missing_loaded_accounts": missing_loaded,
+        "accounts": account_rows,
+        "data_connect": {
+            "products": token_diag.get("data_connect", {}),
+            "gmail_native_service": "gmail:v1",
+            "token_diagnostics_redacted": True,
+            "token_counts": token_diag.get("counts", {}),
+            "likely_causes": token_diag.get("likely_causes", []),
+        },
+        "ok": not blockers,
+        "blockers": blockers,
+        "next_fix": "Run scripts/restore_google_oauth.sh --start and authorize each missing Gmail account, then restart the Inbox server."
+        if blockers
+        else "Both required Gmail accounts are loaded and readable through the local Inbox gateway.",
+    }
+
+
+def _extract_office_location_from_hits(
+    results: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any] | None]:
+    patterns = [
+        r"(?:office location|office|meet(?:ing)? at|at)\s*(?:is|:|-)?\s*([A-Z0-9][^.\n,;]{4,120})",
+        r"\b(\d{2,6}\s+[A-Z][A-Za-z0-9 .'-]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Suite|Ste)[^.\n;]{0,80})",
+    ]
+    for hit in results:
+        metadata_text = (
+            (hit.get("metadata") or {}).get("text", "")
+            if isinstance(hit.get("metadata"), dict)
+            else ""
+        )
+        for text in (hit.get("snippet", ""), metadata_text, hit.get("title", "")):
+            if not text:
+                continue
+            for pattern in patterns:
+                match = re.search(pattern, str(text), flags=re.IGNORECASE)
+                if match:
+                    location = match.group(1).strip(" -:,.")
+                    if location:
+                        return location, hit
+    return "", results[0] if results else None
+
+
+def _calendar_event_snapshot(event_id: str, calendar_id: str, account: str) -> dict[str, Any]:
+    if account and account not in state.cal_services:
+        return {
+            "found": False,
+            "error": "calendar_account_not_loaded",
+            "account": account,
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+        }
+    try:
+        acct, svc = _get_cal_service_for_account(account)
+    except Exception as exc:
+        return {
+            "found": False,
+            "error": "calendar_service_unavailable",
+            "detail": str(exc),
+            "account": account,
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+        }
+    try:
+        event = calendar_get_event(svc, event_id, calendar_id)
+    except Exception as exc:
+        return {
+            "found": False,
+            "error": "calendar_event_read_failed",
+            "detail": str(exc),
+            "account": acct,
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+        }
+    if not event:
+        return {
+            "found": False,
+            "error": "event_not_found",
+            "account": acct,
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+        }
+    return {
+        "found": True,
+        "account": acct,
+        "event": _event_to_out(event).model_dump(),
+    }
+
+
+def _ahmed_office_location_dry_run(req: AhmedOfficeLocationDryRunRequest) -> dict[str, Any]:
+    connector_result = search_connectors(req.query, sources=["imessage"], limit=req.limit)
+    location, evidence_hit = _extract_office_location_from_hits(connector_result.get("results", []))
+    event_snapshot = _calendar_event_snapshot(req.event_id, req.calendar_id, req.account)
+    proposal = {
+        "method": "PUT",
+        "path": f"/calendar/events/{req.event_id}",
+        "query": {"calendar_id": req.calendar_id, "account": req.account},
+        "body": {"location": location} if location else {},
+        "requires_approval_lease": True,
+        "would_apply": False,
+    }
+    blockers: list[str] = []
+    if connector_result.get("errors"):
+        blockers.append("imessage_connector_search_error")
+    if not location:
+        blockers.append("office_location_not_found_in_imessage_results")
+    if not event_snapshot.get("found"):
+        blockers.append("calendar_event_not_read")
+    return {
+        "ok": not blockers,
+        "dry_run": True,
+        "workflow": "ahmed_imessage_office_location_to_calendar_update",
+        "mutation_applied": False,
+        "account": req.account,
+        "calendar_id": req.calendar_id,
+        "event_id": req.event_id,
+        "imessage_search": {
+            "query": req.query,
+            "source": "connector:imessage",
+            "limit": req.limit,
+            "result_count": connector_result.get("total", 0),
+            "errors": connector_result.get("errors", []),
+        },
+        "evidence": {"office_location": location, "hit": evidence_hit},
+        "calendar_read": event_snapshot,
+        "proposed_update": proposal,
+        "blockers": blockers,
+        "next_fix": "Install/auth imsg and load the target calendar account, then rerun this dry-run until blockers is empty."
+        if blockers
+        else "Review the proposed update and mint a per-action approval lease before calling PUT /calendar/events/{event_id}.",
+    }
+
+
+@app.get("/gateway/status")
+async def gateway_status_endpoint():
+    return await asyncio.to_thread(_gateway_status_payload)
+
+
+@app.post("/gateway/read-proof")
+async def gateway_read_proof_endpoint(req: GatewayReadProofRequest):
+    return await asyncio.to_thread(_gateway_read_proof, req)
+
+
+@app.post("/gateway/gmail-readiness")
+async def gateway_gmail_readiness_endpoint(req: GmailReadinessRequest):
+    return await asyncio.to_thread(_gmail_readiness, req)
+
+
+@app.post("/gateway/dry-run/ahmed-office-location-calendar-update")
+async def ahmed_office_location_calendar_update_dry_run(
+    req: AhmedOfficeLocationDryRunRequest,
+):
+    return await asyncio.to_thread(_ahmed_office_location_dry_run, req)
 
 
 @app.post("/search")
