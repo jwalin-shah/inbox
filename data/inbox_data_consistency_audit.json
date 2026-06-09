@@ -1,0 +1,244 @@
+{
+  "generated_at": "2026-06-08T15:05:56.866608+00:00",
+  "target": "http://127.0.0.1:9849",
+  "checks": [
+    {
+      "name": "server_health",
+      "status": "PASS",
+      "detail": "status=ok, gmail_accounts=3",
+      "evidence": {}
+    },
+    {
+      "name": "gateway_status",
+      "status": "PASS",
+      "detail": "health=degraded",
+      "evidence": {}
+    },
+    {
+      "name": "imessage_db",
+      "status": "PASS",
+      "detail": "bytes=37281792",
+      "evidence": {}
+    },
+    {
+      "name": "imessage_contacts_api_vs_services",
+      "status": "PASS",
+      "detail": "overlap=20, mismatches=0",
+      "evidence": {
+        "mismatches": []
+      }
+    },
+    {
+      "name": "imessage_thread_spot_check",
+      "status": "PASS",
+      "detail": "checked=5, real_failures=0",
+      "evidence": {
+        "spot_checks": [
+          {
+            "chat_id": "49",
+            "name": "The Ochos",
+            "api_svc_match": true,
+            "svc_db_match": true,
+            "note": null
+          },
+          {
+            "chat_id": "179",
+            "name": "214136",
+            "api_svc_match": true,
+            "svc_db_match": true,
+            "note": "no_text_bodies_attachment_or_reaction_only"
+          },
+          {
+            "chat_id": "3",
+            "name": "Jwalin Shah",
+            "api_svc_match": true,
+            "svc_db_match": true,
+            "note": "no_text_bodies_attachment_or_reaction_only"
+          },
+          {
+            "chat_id": "159",
+            "name": "Soham Shah",
+            "api_svc_match": true,
+            "svc_db_match": true,
+            "note": null
+          },
+          {
+            "chat_id": "8",
+            "name": "family1",
+            "api_svc_match": true,
+            "svc_db_match": true,
+            "note": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "gmail_endpoint_consistency",
+      "status": "PASS",
+      "detail": "unified=58, gmail_route=58",
+      "evidence": {}
+    },
+    {
+      "name": "gmail_api_vs_google_original",
+      "status": "PASS",
+      "detail": "overlap=18, snippet_mismatches=0",
+      "evidence": {
+        "api_top": [
+          {
+            "id": "19ea7bbf892b67cd",
+            "name": "Annabel at Encord"
+          },
+          {
+            "id": "19ea7a773d103ec7",
+            "name": "Blaze Pizza"
+          },
+          {
+            "id": "19ea79aad90f949c",
+            "name": "Astral Codex Ten"
+          }
+        ]
+      }
+    },
+    {
+      "name": "calendar_today_api_vs_google_original",
+      "status": "PASS",
+      "detail": "date=2026-06-08, events=1",
+      "evidence": {}
+    },
+    {
+      "name": "notes_api_vs_sqlite",
+      "status": "PASS",
+      "detail": "api=0, sqlite=0",
+      "evidence": {}
+    },
+    {
+      "name": "reminders_api_vs_sqlite",
+      "status": "PASS",
+      "detail": "api=10, sqlite=10, overlap=10",
+      "evidence": {}
+    },
+    {
+      "name": "contact_book_resolution",
+      "status": "PASS",
+      "detail": "{'+12144910544': 'Veer Mistry', '+12096277456': 'Kevin (deevy)', '+12137131656': 'Xiya Tang'}",
+      "evidence": {}
+    },
+    {
+      "name": "connector_registry",
+      "status": "PASS",
+      "detail": "not_installed=['google', 'whatsapp', 'imessage', 'discord', 'twitter']",
+      "evidence": {}
+    },
+    {
+      "name": "gateway_read_proof",
+      "status": "PASS",
+      "detail": "sources_ok={'gmail': True, 'calendar': True, 'tasks': True}",
+      "evidence": {}
+    },
+    {
+      "name": "search_cross_source",
+      "status": "PASS",
+      "detail": "results=5 (gmail + imessage), response schema inbox.search.v1",
+      "evidence": {
+        "sources": [
+          "gmail",
+          "imessage"
+        ]
+      }
+    }
+  ],
+  "spot_checks": [
+    {
+      "source": "imessage",
+      "chat_id": "49",
+      "name": "The Ochos",
+      "api_svc_match": true,
+      "svc_db_match": true,
+      "note": null
+    },
+    {
+      "source": "imessage",
+      "chat_id": "179",
+      "name": "214136",
+      "api_svc_match": true,
+      "svc_db_match": true,
+      "note": "no_text_bodies_attachment_or_reaction_only"
+    },
+    {
+      "source": "imessage",
+      "chat_id": "3",
+      "name": "Jwalin Shah",
+      "api_svc_match": true,
+      "svc_db_match": true,
+      "note": "no_text_bodies_attachment_or_reaction_only"
+    },
+    {
+      "source": "imessage",
+      "chat_id": "159",
+      "name": "Soham Shah",
+      "api_svc_match": true,
+      "svc_db_match": true,
+      "note": null
+    },
+    {
+      "source": "imessage",
+      "chat_id": "8",
+      "name": "family1",
+      "api_svc_match": true,
+      "svc_db_match": true,
+      "note": null
+    }
+  ],
+  "connector_status": [
+    {
+      "id": "google",
+      "installed": false,
+      "auth_state": "not_installed",
+      "sync_ready": false
+    },
+    {
+      "id": "whatsapp",
+      "installed": false,
+      "auth_state": "not_installed",
+      "sync_ready": false
+    },
+    {
+      "id": "imessage",
+      "installed": false,
+      "auth_state": "not_installed",
+      "sync_ready": false
+    },
+    {
+      "id": "linkedin",
+      "installed": true,
+      "auth_state": "ok",
+      "sync_ready": false
+    },
+    {
+      "id": "discord",
+      "installed": false,
+      "auth_state": "not_installed",
+      "sync_ready": false
+    },
+    {
+      "id": "twitter",
+      "installed": false,
+      "auth_state": "not_installed",
+      "sync_ready": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "info",
+      "title": "Connector CLIs not installed",
+      "detail": "Cross-channel reconcile via gog/imsg/wacli blocked until installed: ['google', 'whatsapp', 'imessage', 'discord', 'twitter']"
+    }
+  ],
+  "summary": {
+    "verdict": "PASS",
+    "pass": 14,
+    "warn": 0,
+    "fail": 0,
+    "total_checks": 14
+  }
+}

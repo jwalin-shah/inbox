@@ -1,0 +1,59 @@
+# Inbox — session brief (orchestrator inject)
+
+Project: inbox (personal communication hub)
+Workspace: /Users/jwalinshah/projects/inbox
+Portfolio owner: orchestrator
+
+## What this repo does
+
+Local FastAPI server + TUI unifying iMessage, Gmail, Google Calendar, Sheets, Docs, Drive, Notes, Reminders, and GitHub. Agents access via HTTP API or MCP. Canonical **personal-data gateway** for the Master Orchestrator — not a replacement for orchestrator queue/routing or Odysseus operator UI.
+
+Primary validation:
+  scripts/validate_agent_safe.sh
+  scripts/check_tooling.sh
+  uv run pytest tests/ -q --no-cov
+
+Server (daily driver): port 9849. Dev worktrees use 9850+ via `dev.sh`.
+
+## Context firewall (mandatory)
+
+- Treat `tokens/`, `credentials.json`, `github_token.txt`, and macOS message/contact DB paths as **HIGH ISOLATION** — personal PII.
+- Do not mix inbox message bodies, contact graphs, or OAuth tokens into cross-project memory, training corpora, or client datasets (e.g. BTW).
+- Orchestrator workers on `project=inbox` must receive project-scoped memory only (`context_pack` filters by project).
+- Stay inside `~/projects/inbox/` unless the task explicitly requires orchestrator coordination files (`orchestrator-mvp/data/portfolio.json`).
+- Never commit, print, or log secrets (`INBOX_SERVER_TOKEN`, OAuth refresh tokens, API keys).
+- Writes that send messages, modify mail, or mutate calendar/reminders require explicit human approval unless the queue item authorizes bounded `INBOX_TEST_MODE=1` validation.
+
+## Hook compatibility
+
+- Inherits global Cursor hooks (`~/.cursor/hooks.json`): Tokenjuice shell wrapping, cmux lifecycle, memjuice session-end digest.
+- No project-local `hooks.json` — do not add one; it would fight the global contract.
+- `memjuice digest` should tag observations with `project=inbox` when run from this workspace.
+
+## Standard tooling
+
+Navigation (prefer over raw file dumps):
+  llm-tldr tree . | llm-tldr search "<concept>" . | rtk read <file> | rtk grep "<pattern>" .
+
+Doctor:
+  scripts/check_tooling.sh
+  scripts/validate_agent_safe.sh
+
+Server health (silent unless failing):
+  curl -sf http://localhost:9849/health
+
+## Common queue tasks
+
+  ./orch queue add --project inbox --role implementer --write-scope services.py "bounded connector change"
+  ./orch queue add --project inbox --role reviewer "read-only review of <module>"
+  uv run python inbox_server.py   # server only for agent access
+  uv run python inbox.py          # TUI + auto-start server
+
+## Integration contract (orchestrator-mvp)
+
+- Control plane stays in `orchestrator-mvp`: queue, routing, proof, provider limits, rollover, memjuice/CocoIndex.
+- Personal connectors stay in `inbox`: Gmail, iMessage, Calendar, MCP gateway, approval leases.
+- Project card: `.orch-context.json` — isolation posture, validation commands, hook inheritance.
+- MCP variants: `mcp_server.py`, `inbox_mcp_stdio.py`, `inbox_mcp_readonly.py` (point agents at `INBOX_SERVER_URL`).
+- Dev routing: primary `http://127.0.0.1:9849`; worktree dev copies on 9850+ — never reuse primary MCP config when testing dev.
+- Agent contracts: `GEMINI.md`, `AGENTS.md`, `CLAUDE.md`.

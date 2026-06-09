@@ -1,0 +1,72 @@
+{
+  "project": "inbox",
+  "description": "Personal connector platform: Gmail, iMessage, Calendar, MCP gateway, approval routing — canonical personal-data gateway for Master Orchestrator",
+  "domain": "personal_communication",
+  "created": "2026-06-08T23:50:00Z",
+  "workspace": "/Users/jwalinshah/projects/inbox",
+  "isolation": "high",
+  "context_firewall": {
+    "project_scoped_memory": true,
+    "no_cross_project_bleed": true,
+    "brief_path": "SESSION_BRIEF.txt",
+    "agent_contracts": ["GEMINI.md", "AGENTS.md", "CLAUDE.md"]
+  },
+  "validation_commands": [
+    "scripts/check_tooling.sh",
+    "scripts/validate_agent_safe.sh",
+    "uv run pytest tests/ -q --no-cov"
+  ],
+  "pipeline_commands": [
+    "uv run python inbox_server.py",
+    "uv run python inbox.py",
+    "scripts/reconcile.py"
+  ],
+  "data_zones": {
+    "high_isolation": [
+      "tokens/",
+      "credentials.json",
+      "github_token.txt",
+      "gemini_api_key.txt",
+      "~/Library/Messages/chat.db",
+      "~/Library/Application Support/AddressBook/"
+    ],
+    "public_docs": ["docs/", "tests/", "DOCS_INDEX.md"]
+  },
+  "hooks_status": "inherits_global (~/.cursor/hooks.json); no project hooks.json",
+  "integration_points": [
+    "orchestrator-mvp/data/portfolio.json (project registration)",
+    "orchestrator-mvp context injection via SESSION_BRIEF.txt",
+    "global Cursor hooks (Tokenjuice, cmux, memjuice digest)",
+    "inbox MCP gateway (stdio/HTTP/readonly variants)",
+    "INBOX_SERVER_URL + INBOX_SERVER_TOKEN env contract"
+  ],
+  "tools_active": [
+    "llm-tldr",
+    "rtk",
+    "scripts/check_tooling.sh",
+    "scripts/validate_agent_safe.sh",
+    "scripts/run_inbox_mcp_http.sh",
+    "scripts/run_inbox_mcp_stdio.sh"
+  ],
+  "mcp_variants": [
+    "mcp_server.py",
+    "inbox_mcp_stdio.py",
+    "inbox_mcp_readonly.py"
+  ],
+  "data_sources": [
+    "Gmail (Google OAuth)",
+    "iMessage (local chat.db)",
+    "Google Calendar / Drive / Sheets / Docs",
+    "Apple Notes / Reminders",
+    "GitHub notifications"
+  ],
+  "active_issues": [
+    "Reconcile depends on gog/imsg/wacli connector CLIs (not_installed until installed)",
+    "Multi-account Google routing must use message-owning account for replies"
+  ],
+  "next_actions": [
+    "Route bounded inbox tasks via ./orch queue add --project inbox",
+    "Keep personal message content out of cross-project memjuice observations",
+    "Use INBOX_TEST_MODE=1 for agent validation runs"
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "sources": [
+    {
+      "id": "gmail",
+      "kind": "connector",
+      "state": "fixture",
+      "writes": "review_before_write_only"
+    },
+    {
+      "id": "google_calendar",
+      "kind": "connector",
+      "state": "fixture",
+      "writes": "review_before_write_only"
+    },
+    {
+      "id": "google_tasks",
+      "kind": "connector",
+      "state": "fixture",
+      "writes": "review_before_write_only"
+    },
+    {
+      "id": "imsg",
+      "kind": "future_cli",
+      "state": "not_installed",
+      "writes": "deferred_until_explicit_approval_adapter"
+    }
+  ],
+  "inbox": [
+    {
+      "id": "gmail-msg-1",
+      "source": "gmail",
+      "subject": "Stanford insurance paperwork",
+      "snippet": "Please review Stanford insurance paperwork by 2026-06-07.",
+      "timestamp": "2026-06-05T09:10:00-07:00",
+      "url": "gmail://thread/stanford"
+    },
+    {
+      "id": "gmail-msg-2",
+      "source": "gmail",
+      "subject": "TPM screening",
+      "snippet": "Can you send hardware TPM screening answers by 2026-06-06?",
+      "timestamp": "2026-06-05T10:00:00-07:00",
+      "url": "gmail://thread/tpm"
+    },
+    {
+      "id": "gmail-msg-3",
+      "source": "gmail",
+      "subject": "Dentist follow-up",
+      "snippet": "Please hold dentist follow-up 2026-06-08 14:00-14:30.",
+      "timestamp": "2026-06-05T10:30:00-07:00",
+      "url": "gmail://thread/dentist"
+    },
+    {
+      "id": "gmail-msg-4",
+      "source": "gmail",
+      "subject": "Newsletter",
+      "snippet": "This week in infrastructure.",
+      "timestamp": "2026-06-05T11:00:00-07:00"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task-1",
+      "source": "google_tasks",
+      "title": "Review Stanford insurance paperwork",
+      "status": "needsAction",
+      "due": "2026-06-07",
+      "url": "https://tasks.example/task-1"
+    }
+  ],
+  "calendar_events": [
+    {
+      "id": "cal-1",
+      "source": "google_calendar",
+      "summary": "Lunch",
+      "start": "2026-06-08T12:00:00",
+      "end": "2026-06-08T13:00:00",
+      "url": "https://calendar.example/cal-1"
+    }
+  ]
+}

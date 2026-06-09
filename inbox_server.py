@@ -168,6 +168,7 @@ from services import (
     google_auth_all,
     google_auth_diagnostics,
     imsg_contacts,
+    imsg_links,
     imsg_messages,
     imsg_send,
     imsg_thread,
@@ -292,6 +293,9 @@ def _route_rule(
 APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
     _route_rule(
         "POST", r"^/messages/send$", "imessage_gmail", "send_message", "inbox.messages.send"
+    ),
+    _route_rule(
+        "POST", r"^/imessage/send$", "imessage_gmail", "send_message", "inbox.messages.send"
     ),
     _route_rule("POST", r"^/messages/compose$", "gmail", "compose_send", "inbox.gmail.send_email"),
     _route_rule("POST", r"^/messages/gmail/reply$", "gmail", "reply", "inbox.gmail.reply"),
@@ -856,6 +860,18 @@ class MessageOut(BaseModel):
 class IMessageOut(MessageOut):
     chat_id: str
     contact: str
+
+
+class IMessageLinkOut(BaseModel):
+    url: str
+    message_id: str
+    chat_id: str
+    contact: str
+    sender: str
+    body: str
+    ts: str
+    is_me: bool
+    source: str = "imessage"
 
 
 class CalendarEventOut(BaseModel):
@@ -4005,6 +4021,54 @@ async def get_imessage(
             contact=str(message["contact"]),
         )
         for message in messages
+    ]
+
+
+@app.get("/imessage/links", response_model=list[IMessageLinkOut])
+async def get_imessage_links(
+    q: str = "x",
+    contact: str = "",
+    date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    limit: int = 100,
+):
+    """Extract links from iMessages. Use q=x for twitter.com / x.com URLs."""
+    if date and (start_date or end_date):
+        raise HTTPException(400, "Use date or start_date/end_date, not both")
+    if limit < 1 or limit > 1000:
+        raise HTTPException(400, "limit must be between 1 and 1000")
+
+    range_start = _parse_imessage_date(date or start_date)
+    range_end = _parse_imessage_date(date or end_date, end=bool(date or end_date))
+    if range_start and range_end and range_start >= range_end:
+        raise HTTPException(400, "start_date must be before end_date")
+
+    try:
+        links = await asyncio.to_thread(
+            imsg_links,
+            link_type=q,
+            contact=contact,
+            start_date=range_start,
+            end_date=range_end,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    return [
+        IMessageLinkOut(
+            url=str(item["url"]),
+            message_id=str(item["message_id"]),
+            chat_id=str(item["chat_id"]),
+            contact=str(item["contact"]),
+            sender=str(item["sender"]),
+            body=str(item["body"]),
+            ts=item["ts"].isoformat(),
+            is_me=bool(item["is_me"]),
+            source="imessage",
+        )
+        for item in links
     ]
 
 

@@ -370,3 +370,12 @@ Only surface output if something needs action:
 - Silent if all good.
 
 Do not report "all good" on every session start — only failures.
+
+## Orchestrator Integration
+
+Read `SESSION_BRIEF.txt` when spawned by the Master Orchestrator (`project=inbox`).
+
+- **Context firewall:** Project-scoped injection only. Personal message bodies, contacts, and OAuth tokens stay in inbox scope — do not pull BTW/client or unrelated portfolio context into inbox work.
+- **Hooks:** Use global `~/.cursor/hooks.json` (Tokenjuice, cmux, memjuice). No project-local hook overrides.
+- **Tooling:** `llm-tldr` / `rtk` first; validate with `scripts/check_tooling.sh` and `scripts/validate_agent_safe.sh`.
+- **Queue example:** `./orch queue add --project inbox --role implementer --write-scope <path> "<task>"`

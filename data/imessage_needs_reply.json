@@ -1,0 +1,448 @@
+{
+  "schema": "inbox.imessage_needs_reply.v0",
+  "generated_at": "2026-06-05T15:54:25-07:00",
+  "queue_item": "48c56767cf",
+  "method": "read_only_local_imessage_sqlite_via_services",
+  "summary": {
+    "contacts_scanned": 170,
+    "recent_actionable_needs_reply": 4,
+    "stale_named_needs_reply": 6,
+    "phone_ambiguous_needs_reply": 0,
+    "waiting_on_others": 22,
+    "excluded_noise": 102,
+    "index_health_note": "GET /index/health healthy=false (no_sync_state); used direct iMessage read model"
+  },
+  "recent_actionable_needs_reply": [
+    {
+      "chat_id": "177",
+      "name": "+15512060717, +17204963920",
+      "members": [
+        "+15512060717",
+        "+17204963920"
+      ],
+      "is_group": true,
+      "unread": 1,
+      "last_ts": "2026-06-05T11:21:11",
+      "age_hours": 11.6,
+      "age_label": "11h",
+      "snippet": "But I appreciate it",
+      "name_resolved": false,
+      "urgency": 5,
+      "evidence_thread": "GET /messages/imessage/177"
+    },
+    {
+      "chat_id": "178",
+      "name": "+15109355072",
+      "members": [
+        "+15109355072"
+      ],
+      "is_group": false,
+      "unread": 1,
+      "last_ts": "2026-06-04T21:32:39",
+      "age_hours": 25.4,
+      "age_label": "1d",
+      "snippet": "i think 15% off",
+      "name_resolved": false,
+      "urgency": 4,
+      "evidence_thread": "GET /messages/imessage/178"
+    },
+    {
+      "chat_id": "8",
+      "name": "family1",
+      "members": [
+        "+16503913948",
+        "+16509543233",
+        "+14086368367"
+      ],
+      "is_group": true,
+      "unread": 1,
+      "last_ts": "2026-06-04T22:55:21",
+      "age_hours": 24.0,
+      "age_label": "1d",
+      "snippet": "whole",
+      "name_resolved": true,
+      "urgency": 4,
+      "evidence_thread": "GET /messages/imessage/8"
+    },
+    {
+      "chat_id": "46",
+      "name": "+14089089659",
+      "members": [
+        "+14089089659"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-06-04T21:03:16",
+      "age_hours": 25.9,
+      "age_label": "1d",
+      "snippet": "Give the other agent this exact message:\n\n  The file is Open",
+      "name_resolved": false,
+      "urgency": 2,
+      "evidence_thread": "GET /messages/imessage/46"
+    }
+  ],
+  "stale_named_needs_reply": [
+    {
+      "chat_id": "49",
+      "name": "The Ochos",
+      "members": [
+        "+18478092441",
+        "+14027699575",
+        "+18324277499",
+        "+14692699815",
+        "+12245320003",
+        "+18474369044",
+        "hari.bhamidipati97@gmail.com"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-06-25T20:36:11",
+      "age_hours": 8282.3,
+      "age_label": "345d",
+      "snippet": "Oooopsss how did that happennnn",
+      "name_resolved": true,
+      "urgency": 3,
+      "evidence_thread": "GET /messages/imessage/49"
+    },
+    {
+      "chat_id": "40",
+      "name": "5 SHAHS",
+      "members": [
+        "+16509543233",
+        "+17204963920",
+        "+16309239298",
+        "+17202069207"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-06-29T21:10:41",
+      "age_hours": 8185.7,
+      "age_label": "341d",
+      "snippet": "thank you thank you",
+      "name_resolved": true,
+      "urgency": 3,
+      "evidence_thread": "GET /messages/imessage/40"
+    },
+    {
+      "chat_id": "19",
+      "name": "Rutu and Younger but For Real",
+      "members": [
+        "+16509543233",
+        "+14089089638",
+        "+14089089651",
+        "+14087507131",
+        "+14088932422",
+        "+14084603962",
+        "+14083935832",
+        "+15109355072",
+        "+15109355070"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-07-19T21:05:23",
+      "age_hours": 7705.8,
+      "age_label": "321d",
+      "snippet": "Heyyyy!",
+      "name_resolved": true,
+      "urgency": 3,
+      "evidence_thread": "GET /messages/imessage/19"
+    },
+    {
+      "chat_id": "81",
+      "name": "Rooftop Pool 8/13",
+      "members": [
+        "+14089089651",
+        "+14083935832",
+        "+14084603962",
+        "+14087282600",
+        "+14089089639",
+        "+14084642614"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-08-12T16:10:21",
+      "age_hours": 7134.7,
+      "age_label": "297d",
+      "snippet": "after all these years and I still can\u2019t understand amion",
+      "name_resolved": true,
+      "urgency": 3,
+      "evidence_thread": "GET /messages/imessage/81"
+    },
+    {
+      "chat_id": "127",
+      "name": "quj",
+      "members": [
+        "+18478092441",
+        "+19132185360",
+        "+14693471312",
+        "+14692376428",
+        "+15123329049",
+        "+12172201479",
+        "+14693883144",
+        "+15128176630",
+        "+18473376415"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-08-23T16:06:32",
+      "age_hours": 6870.8,
+      "age_label": "286d",
+      "snippet": "\ud83d\ude0d\ud83d\ude0d",
+      "name_resolved": true,
+      "urgency": 3,
+      "evidence_thread": "GET /messages/imessage/127"
+    },
+    {
+      "chat_id": "162",
+      "name": "Rutu and Younger but For Real",
+      "members": [
+        "+16509543233",
+        "+14089089651",
+        "+14083935832",
+        "+14084603962",
+        "+15109355070",
+        "+15109355072",
+        "+14089089638",
+        "+14082282247",
+        "+14088932422",
+        "+14087507131"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-12-21T15:27:15",
+      "age_hours": 3991.5,
+      "age_label": "166d",
+      "snippet": "Hey! If y\u2019all r back for break we should meet up for lunch o",
+      "name_resolved": true,
+      "urgency": 3,
+      "evidence_thread": "GET /messages/imessage/162"
+    }
+  ],
+  "phone_ambiguous_needs_reply": [],
+  "waiting_on_others_sample": [
+    {
+      "chat_id": "6",
+      "name": "Fantasy Ball Chat",
+      "age_hours": 30.6,
+      "snippet": "He might deserve the start ngl"
+    },
+    {
+      "chat_id": "151",
+      "name": "+14158674587",
+      "age_hours": 2543.3,
+      "snippet": "Hey Adam, Jwalin here. Got your number from Sangati. Would love to talk more had a blast honestly co"
+    },
+    {
+      "chat_id": "48",
+      "name": "+16305440214",
+      "age_hours": 2342.3,
+      "snippet": "Pull up fam I need a teammate"
+    },
+    {
+      "chat_id": "44",
+      "name": "+12028410236",
+      "age_hours": 2353.1,
+      "snippet": "Hey Jwalin"
+    },
+    {
+      "chat_id": "74",
+      "name": "+16129688343",
+      "age_hours": 2400.5,
+      "snippet": "Maybe if u pretend u have a limp like u sprained ur ankle"
+    },
+    {
+      "chat_id": "99",
+      "name": "+13474157389",
+      "age_hours": 2424.9,
+      "snippet": "Jwalin"
+    },
+    {
+      "chat_id": "53",
+      "name": "+19047807659",
+      "age_hours": 2724.3,
+      "snippet": "Hey Jayson sorry was busy,   Is the next step scheduling an"
+    },
+    {
+      "chat_id": "106",
+      "name": "+16503141932",
+      "age_hours": 3274.3,
+      "snippet": "Yes"
+    },
+    {
+      "chat_id": "135",
+      "name": "+15105090426, +15103382232",
+      "age_hours": 3731.8,
+      "snippet": "Who down for board games + make pizza"
+    },
+    {
+      "chat_id": "47",
+      "name": "+14084643141",
+      "age_hours": 5067.9,
+      "snippet": "Rip ur interview"
+    },
+    {
+      "chat_id": "168",
+      "name": "+14803477659",
+      "age_hours": 5092.6,
+      "snippet": "Cuz I pulled up his art"
+    },
+    {
+      "chat_id": "37",
+      "name": "+16509543233, +15105797012",
+      "age_hours": 5193.5,
+      "snippet": "And not crashing"
+    }
+  ],
+  "excluded_noise_sample": [
+    {
+      "chat_id": "113",
+      "name": "+12098650918",
+      "reason": "automated_snippet",
+      "snippet": "(attachment)Hello! We are contacting you from Research-Polls again! You were rec"
+    },
+    {
+      "chat_id": "128",
+      "name": "Verizon",
+      "reason": "automated_sender",
+      "snippet": "\ufffe"
+    },
+    {
+      "chat_id": "160",
+      "name": "77029",
+      "reason": "automated_snippet",
+      "snippet": "Thank you for your Taco Bell order! Get it at the drive-thru and track it at htt"
+    },
+    {
+      "chat_id": "13",
+      "name": "+14156542047",
+      "reason": "tapback_reaction",
+      "snippet": "Reacted \ud83d\udcaa to \u201cBetter be ready to learn about something food"
+    },
+    {
+      "chat_id": "67",
+      "name": "+17204963920",
+      "reason": "tapback_reaction",
+      "snippet": "Emphasized \u201cU wanna become a full time artist \u201d"
+    },
+    {
+      "chat_id": "18",
+      "name": "32665",
+      "reason": "short_code_sender",
+      "snippet": "Tap to reset your Instagram password: https://ig.me/33UgMZEQ"
+    },
+    {
+      "chat_id": "25",
+      "name": "+12343388049",
+      "reason": "stale_unresolved",
+      "snippet": "(attachment)"
+    },
+    {
+      "chat_id": "108",
+      "name": "+19848884194",
+      "reason": "stale_unresolved",
+      "snippet": "Did tou stick around?"
+    },
+    {
+      "chat_id": "107",
+      "name": "+14704243573",
+      "reason": "stale_unresolved",
+      "snippet": "yo"
+    },
+    {
+      "chat_id": "116",
+      "name": "57685",
+      "reason": "automated_snippet",
+      "snippet": "PayByPhone parking  Plate:7ZQW549  Location:415014  Expiry:4"
+    },
+    {
+      "chat_id": "43",
+      "name": "+14156038804",
+      "reason": "stale_unresolved",
+      "snippet": "Sean Thorne"
+    },
+    {
+      "chat_id": "154",
+      "name": "+19455456279",
+      "reason": "stale_unresolved",
+      "snippet": "(attachment)"
+    },
+    {
+      "chat_id": "110",
+      "name": "+14163151900",
+      "reason": "stale_unresolved",
+      "snippet": "(attachment)-\n(attachment)"
+    },
+    {
+      "chat_id": "126",
+      "name": "+14694034480",
+      "reason": "stale_unresolved",
+      "snippet": "i can meet u in fremont"
+    },
+    {
+      "chat_id": "28",
+      "name": "+14162769316",
+      "reason": "stale_unresolved",
+      "snippet": "(attachment)-\n(attachment)"
+    },
+    {
+      "chat_id": "140",
+      "name": "+639105539067",
+      "reason": "stale_unresolved",
+      "snippet": "Greetings from Amazon\u2019s Recruiting Department. This is Sophi"
+    },
+    {
+      "chat_id": "33",
+      "name": "+18772764891",
+      "reason": "stale_unresolved",
+      "snippet": "What are your thoughts about Donald Trump and California iss"
+    },
+    {
+      "chat_id": "134",
+      "name": "+14692963807",
+      "reason": "stale_unresolved",
+      "snippet": "Greg Abbott says he cares about you \u2014 but look around.\r\n\r\nHe"
+    },
+    {
+      "chat_id": "24",
+      "name": "+17204963920, +14158674587",
+      "reason": "stale_unresolved",
+      "snippet": "OMG love the masters directions"
+    },
+    {
+      "chat_id": "39",
+      "name": "96056",
+      "reason": "automated_snippet",
+      "snippet": "New message in Hack on OpenClaw w/ Codex.\n\nTop Prize (Best O"
+    },
+    {
+      "chat_id": "149",
+      "name": "+18773244726",
+      "reason": "stale_unresolved",
+      "snippet": "What do you think about Donald Trump and California issues?"
+    },
+    {
+      "chat_id": "166",
+      "name": "United Airlines",
+      "reason": "automated_snippet",
+      "snippet": "Your United verification code is 709648. This code will expi"
+    },
+    {
+      "chat_id": "132",
+      "name": "+12134237935",
+      "reason": "stale_unresolved",
+      "snippet": "What do you think about Donald Trump and California issues?"
+    },
+    {
+      "chat_id": "42",
+      "name": "+16823690366",
+      "reason": "stale_unresolved",
+      "snippet": "We're on a mission to raise the minimum wage in TX. Join us"
+    },
+    {
+      "chat_id": "100",
+      "name": "+13034444444",
+      "reason": "stale_unresolved",
+      "snippet": "Hello Mr. Shah,\nMy name is Brittany and I work with Richard"
+    }
+  ]
+}

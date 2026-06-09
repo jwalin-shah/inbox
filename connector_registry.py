@@ -8,6 +8,7 @@ of this module.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from contextlib import suppress
@@ -22,6 +23,28 @@ CONNECTOR_ALL_SOURCE = "connectors"
 
 
 @dataclass(frozen=True)
+class CredentialReference:
+    id: str
+    label: str
+    kind: str
+    encrypted_ref: str
+    required: bool = True
+    scopes: tuple[str, ...] = ()
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class ConnectorAccountScope:
+    id: str
+    label: str
+    subject_ref: str
+    read_scopes: tuple[str, ...] = ()
+    write_scopes: tuple[str, ...] = ()
+    credential_refs: tuple[CredentialReference, ...] = ()
+    notes: str = ""
+
+
+@dataclass(frozen=True)
 class ConnectorDefinition:
     id: str
     label: str
@@ -31,8 +54,82 @@ class ConnectorDefinition:
     auth_command: tuple[str, ...] = ()
     search_command: tuple[str, ...] = ()
     sync_command: tuple[str, ...] = ()
+    required_env: tuple[str, ...] = ()
+    required_permissions: tuple[str, ...] = ()
+    remediation: tuple[str, ...] = ()
+    accounts: tuple[ConnectorAccountScope, ...] = ()
     write_capable: bool = False
     notes: str = ""
+
+
+APPROVAL_REQUIRED_ACTIONS: tuple[dict[str, str], ...] = (
+    {
+        "action": "send",
+        "approval_class": "external_write",
+        "policy": "approval_required",
+        "executor": "outside_connector_registry",
+    },
+    {
+        "action": "delete",
+        "approval_class": "external_destructive",
+        "policy": "approval_required",
+        "executor": "outside_connector_registry",
+    },
+    {
+        "action": "calendar_write",
+        "approval_class": "external_write",
+        "policy": "approval_required",
+        "executor": "outside_connector_registry",
+    },
+    {
+        "action": "sync_execute",
+        "approval_class": "external_write",
+        "policy": "approval_required",
+        "executor": "inbox.connectors.sync",
+    },
+)
+
+
+def _credential_pattern() -> dict[str, Any]:
+    return {
+        "mode": "encrypted_reference_only",
+        "plaintext_material_allowed": False,
+        "allowed_reference_schemes": ["infisical://", "keychain://", "file://"],
+        "required_envelope_fields": [
+            "connector_id",
+            "account_id",
+            "credential_ref",
+            "scopes",
+            "encrypted",
+        ],
+        "required_envelope_values": {"encrypted": True},
+    }
+
+
+def _credential_ref_to_dict(ref: CredentialReference) -> dict[str, Any]:
+    return {
+        "id": ref.id,
+        "label": ref.label,
+        "kind": ref.kind,
+        "encrypted_ref": ref.encrypted_ref,
+        "encrypted": True,
+        "required": ref.required,
+        "scopes": list(ref.scopes),
+        "notes": ref.notes,
+    }
+
+
+def _account_scope_to_dict(account: ConnectorAccountScope) -> dict[str, Any]:
+    return {
+        "id": account.id,
+        "label": account.label,
+        "subject_ref": account.subject_ref,
+        "read_scopes": list(account.read_scopes),
+        "write_scopes": list(account.write_scopes),
+        "credential_refs": [_credential_ref_to_dict(ref) for ref in account.credential_refs],
+        "notes": account.notes,
+        "write_policy": "write scopes are metadata only; provider writes require approval lease",
+    }
 
 
 CONNECTORS: tuple[ConnectorDefinition, ...] = (
@@ -42,7 +139,49 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         binary="gog",
         category="workspace",
         storage_paths=("~/Library/Application Support/gogcli",),
+        auth_command=("gog", "auth", "status", "--json"),
         search_command=("gog", "gmail", "search", "{query}", "--max", "{limit}", "--json"),
+        sync_command=("gog", "sync", "--dry-run", "--json"),
+        required_permissions=("Google OAuth scopes for Gmail, Calendar, Drive, Sheets, Docs, Tasks",),
+        accounts=(
+            ConnectorAccountScope(
+                id="google:workspace",
+                label="Google Workspace account",
+                subject_ref="gog authenticated account email",
+                read_scopes=(
+                    "gmail.read",
+                    "calendar.read",
+                    "drive.read",
+                    "sheets.read",
+                    "docs.read",
+                    "tasks.read",
+                ),
+                write_scopes=(
+                    "gmail.send",
+                    "gmail.modify",
+                    "calendar.write",
+                    "drive.write",
+                    "sheets.write",
+                    "docs.write",
+                    "tasks.write",
+                ),
+                credential_refs=(
+                    CredentialReference(
+                        id="gog_oauth_token",
+                        label="Google OAuth token envelope",
+                        kind="oauth_refresh_token",
+                        encrypted_ref="file://~/Library/Application Support/gogcli/tokens.enc",
+                        scopes=("gmail", "calendar", "drive", "sheets", "docs", "tasks"),
+                        notes="Registry stores the encrypted reference only; gog owns decryption.",
+                    ),
+                ),
+            ),
+        ),
+        remediation=(
+            "Install gog and ensure it is on PATH.",
+            "Run gog auth/login for the intended Google accounts.",
+            "Run gog auth status --json and gog sync --dry-run --json before live use.",
+        ),
         write_capable=True,
         notes="Gmail, Calendar, Drive, Docs, Sheets, and Contacts through Google OAuth.",
     ),
@@ -55,6 +194,30 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         auth_command=("wacli", "doctor", "--json"),
         search_command=("wacli", "messages", "search", "{query}", "--limit", "{limit}", "--json"),
         sync_command=("wacli", "sync", "--once"),
+        required_permissions=("WhatsApp local/browser session or configured export source",),
+        accounts=(
+            ConnectorAccountScope(
+                id="whatsapp:local",
+                label="WhatsApp local session",
+                subject_ref="wacli configured phone/session",
+                read_scopes=("whatsapp.messages.read",),
+                write_scopes=("whatsapp.messages.send",),
+                credential_refs=(
+                    CredentialReference(
+                        id="wacli_session",
+                        label="WhatsApp session envelope",
+                        kind="browser_or_export_session",
+                        encrypted_ref="file://~/.wacli/session.enc",
+                        scopes=("whatsapp.messages",),
+                    ),
+                ),
+            ),
+        ),
+        remediation=(
+            "Install wacli and ensure it is on PATH.",
+            "Run wacli doctor --json and address reported auth/session gaps.",
+            "Run POST /connectors/whatsapp/sync without execute first to review the sync command.",
+        ),
         write_capable=True,
         notes="Local WhatsApp history/search; sends must be confirmed separately.",
     ),
@@ -66,8 +229,76 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         storage_paths=("~/Library/Messages/chat.db",),
         auth_command=("imsg", "chats", "--limit", "1", "--json"),
         search_command=("imsg", "search", "{query}", "--limit", "{limit}", "--json"),
+        required_permissions=("Full Disk Access for ~/Library/Messages/chat.db",),
+        accounts=(
+            ConnectorAccountScope(
+                id="imessage:local",
+                label="Messages.app local account",
+                subject_ref="local macOS Messages identity",
+                read_scopes=("imessage.messages.read", "sms.messages.read"),
+                write_scopes=("imessage.messages.send", "sms.messages.send"),
+                credential_refs=(
+                    CredentialReference(
+                        id="macos_messages_access",
+                        label="macOS Messages access grant",
+                        kind="local_os_permission",
+                        encrypted_ref="keychain://local/automation/messages",
+                        scopes=("messages.full_disk_access", "messages.automation"),
+                        notes="Full Disk Access and Automation are OS grants; no plaintext secret is stored.",
+                    ),
+                ),
+            ),
+        ),
+        remediation=(
+            "Install imsg and ensure it is on PATH.",
+            "Grant Full Disk Access to the launcher process if chat.db is unreadable.",
+            "Run imsg chats --limit 1 --json to confirm read access.",
+        ),
         write_capable=True,
         notes="Reads Messages.app history; sending requires Automation permission and confirmation.",
+    ),
+    ConnectorDefinition(
+        id="linkedin",
+        label="LinkedIn",
+        binary="python3",
+        category="social",
+        storage_paths=(
+            "~/.openhuman/users/local/workspace/linkedin_data/linkedin_data.db",
+            "~/.openhuman-staging/users/local/workspace/linkedin_data/linkedin_data.db",
+        ),
+        auth_command=(
+            "python3",
+            "-c",
+            "from scripts import linkedin_web_scanner; print('{\"scanner_importable\":true}')",
+        ),
+        search_command=(),
+        sync_command=(),
+        required_env=("INBOX_ENABLE_LINKEDIN_SCRAPER",),
+        required_permissions=("Signed-in LinkedIn Messaging tab in the configured CDP browser",),
+        accounts=(
+            ConnectorAccountScope(
+                id="linkedin:browser",
+                label="LinkedIn browser session",
+                subject_ref="signed-in browser profile",
+                read_scopes=("linkedin.messages.read",),
+                credential_refs=(
+                    CredentialReference(
+                        id="linkedin_browser_profile",
+                        label="LinkedIn browser profile/session",
+                        kind="browser_session",
+                        encrypted_ref="keychain://local/browser/linkedin",
+                        scopes=("linkedin.messaging",),
+                        notes="Scanner is opt-in and reads from the configured local browser session.",
+                    ),
+                ),
+            ),
+        ),
+        remediation=(
+            "Use the LinkedIn data export path when possible.",
+            "For scanner use, open LinkedIn Messaging in the CDP browser and set INBOX_ENABLE_LINKEDIN_SCRAPER=1 only for that command.",
+            "Sync the resulting linkedin_data.db into the inbox index before relying on job outreach readiness.",
+        ),
+        notes="Local LinkedIn scanner/export backing store; disabled by default and read-only from Inbox.",
     ),
     ConnectorDefinition(
         id="discord",
@@ -78,6 +309,23 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         auth_command=("discrawl", "status", "--json"),
         search_command=("discrawl", "search", "{query}", "--limit", "{limit}", "--json"),
         sync_command=("discrawl", "sync"),
+        accounts=(
+            ConnectorAccountScope(
+                id="discord:bot_archive",
+                label="Discord archive account",
+                subject_ref="discrawl configured bot/application",
+                read_scopes=("discord.archive.read",),
+                credential_refs=(
+                    CredentialReference(
+                        id="discrawl_bot_token",
+                        label="Discord bot token envelope",
+                        kind="bot_token",
+                        encrypted_ref="infisical://inbox/connectors/discord/bot_token",
+                        scopes=("discord.archive",),
+                    ),
+                ),
+            ),
+        ),
         notes="Bot-token Discord archive/search. No user-token scraping.",
     ),
     ConnectorDefinition(
@@ -89,6 +337,24 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         auth_command=("birdclaw", "auth", "status", "--json"),
         search_command=("birdclaw", "search", "{query}", "--limit", "{limit}", "--json"),
         sync_command=("birdclaw", "sync"),
+        accounts=(
+            ConnectorAccountScope(
+                id="twitter:archive",
+                label="X/Twitter archive account",
+                subject_ref="birdclaw configured account",
+                read_scopes=("twitter.archive.read",),
+                write_scopes=("twitter.post", "twitter.delete"),
+                credential_refs=(
+                    CredentialReference(
+                        id="birdclaw_oauth_token",
+                        label="X/Twitter OAuth token envelope",
+                        kind="oauth_token",
+                        encrypted_ref="infisical://inbox/connectors/twitter/oauth_token",
+                        scopes=("twitter.archive", "twitter.write"),
+                    ),
+                ),
+            ),
+        ),
         write_capable=True,
         notes="Local archive/search; live reads/writes need explicit confirmation.",
     ),
@@ -142,6 +408,14 @@ def _storage_status(paths: tuple[str, ...]) -> list[dict[str, Any]]:
     return statuses
 
 
+def _env_status(names: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [{"name": name, "present": bool(os.environ.get(name))} for name in names]
+
+
+def _safe_command_preview(command: tuple[str, ...]) -> list[str]:
+    return list(command)
+
+
 def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
     binary_path = shutil.which(connector.binary)
     installed = binary_path is not None
@@ -160,6 +434,18 @@ def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
     elif installed:
         auth_state = "unknown"
 
+    storage = _storage_status(connector.storage_paths)
+    missing_env = [item["name"] for item in _env_status(connector.required_env) if not item["present"]]
+    missing_storage = [item["path"] for item in storage if not item["exists"]]
+    remediation = list(connector.remediation)
+    install_step = f"Install {connector.binary} and ensure it is on PATH."
+    if not installed and install_step not in remediation:
+        remediation.insert(0, install_step)
+    if missing_env:
+        remediation.append(f"Set required env for live scanner/auth use: {', '.join(missing_env)}.")
+    if missing_storage and connector.storage_paths:
+        remediation.append("Create or sync the backing local store before relying on search/readiness.")
+
     return {
         "id": connector.id,
         "label": connector.label,
@@ -171,9 +457,26 @@ def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
         "auth_exit_code": auth_exit_code,
         "auth_detail": auth_detail,
         "auth_error": auth_error,
-        "storage": _storage_status(connector.storage_paths),
+        "storage": storage,
+        "required_env": _env_status(connector.required_env),
+        "required_permissions": list(connector.required_permissions),
+        "commands": {
+            "auth": _safe_command_preview(connector.auth_command),
+            "search": _safe_command_preview(connector.search_command),
+            "sync": _safe_command_preview(connector.sync_command),
+        },
+        "accounts": [_account_scope_to_dict(account) for account in connector.accounts],
+        "credential_pattern": _credential_pattern(),
+        "action_policy": {
+            "read": {"policy": "allowed", "approval_required": False},
+            "search": {"policy": "allowed", "approval_required": False},
+            "mutations": list(APPROVAL_REQUIRED_ACTIONS),
+            "registry_executes_provider_writes": False,
+        },
+        "sync_ready": installed and bool(connector.sync_command),
         "supports_search": bool(connector.search_command),
         "supports_sync": bool(connector.sync_command),
+        "remediation": remediation,
         "write_capable": connector.write_capable,
         "write_policy": "external writes require explicit confirmation"
         if connector.write_capable
@@ -375,6 +678,18 @@ def connector_sync_plan(connector_id: str, *, execute: bool = False) -> dict[str
             "dry_run": True,
             "command": command,
             "write_policy": "sync reads remote/local source data into local storage only",
+            "approval_required_for_execute": True,
+        }
+    approval_lease = os.getenv("INBOX_APPROVAL_LEASE", "")
+    if not approval_lease:
+        return {
+            "ok": False,
+            "connector": connector.id,
+            "error": "approval_required",
+            "dry_run": True,
+            "command": command,
+            "approval_required_for_execute": True,
+            "write_policy": "live connector sync execution requires a per-action approval lease",
         }
     if shutil.which(connector.binary) is None:
         return {

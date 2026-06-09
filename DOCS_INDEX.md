@@ -7,6 +7,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 **New to inbox?**
 - **[README.md](README.md)** — Overview, features, quick start, key bindings
 - **[CLAUDE.md](CLAUDE.md)** — Detailed project context, architecture, all systems
+- **[docs/PERSONAL_DATA_GATEWAY_V0.md](docs/PERSONAL_DATA_GATEWAY_V0.md)** — Canonical local Inbox API/MCP gateway contract for personal data
 - **[CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md)** — Connector architecture direction, normalization plan, phased execution
 
 ## 🎯 Google Sheets (New!)
@@ -20,6 +21,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 
 **Building with the API?**
 - **[README.md](README.md#api-reference)** — Quick endpoint reference
+- **[docs/PERSONAL_DATA_GATEWAY_V0.md](docs/PERSONAL_DATA_GATEWAY_V0.md)** — Canonical gateway status, parity matrix, review-before-write, and dry-run workflow
 - **[CLAUDE.md](CLAUDE.md#api-endpoints-localhost9849)** — Full endpoint list (all systems)
 - System-specific docs:
   - Sheets: [SHEETS.md](SHEETS.md)
@@ -63,6 +65,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 | [README.md](README.md) | Project overview, quick start, features, key bindings |
 | [AGENTS.md](AGENTS.md) | Agent validation contract and platform dependency notes |
 | [CLAUDE.md](CLAUDE.md) | Complete project context, architecture, all endpoints, all systems |
+| [docs/PERSONAL_DATA_GATEWAY_V0.md](docs/PERSONAL_DATA_GATEWAY_V0.md) | Canonical personal-data gateway API/MCP parity and dry-run write proposal flow |
 | [docs/TESTING_FOR_AGENTS.md](docs/TESTING_FOR_AGENTS.md) | Safe deterministic validation loop and test marker guidance |
 | [CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md) | Connector strategy, phased implementation, source-of-truth rules |
 | [DOCS_INDEX.md](DOCS_INDEX.md) | This file — documentation navigation |

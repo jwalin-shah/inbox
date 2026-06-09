@@ -874,6 +874,28 @@ class TestTokenFileLocking:
         assert token["reason"] == "refresh_token_expired_or_revoked"
         assert "oauth_consent_screen_testing_mode_possible" in diagnostics["likely_causes"]
 
+    def test_google_auth_diagnostics_includes_data_connect_scope_matrix(
+        self, monkeypatch, tmp_path
+    ):
+        tokens_dir = tmp_path / "tokens"
+        tokens_dir.mkdir()
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(json.dumps({"installed": {"project_id": "test-project"}}))
+
+        monkeypatch.setattr(services, "TOKENS_DIR", tokens_dir)
+        monkeypatch.setattr(services, "CREDS_FILE", creds_file)
+
+        diagnostics = services.google_auth_diagnostics(check_refresh=False)
+
+        data_connect = diagnostics["data_connect"]
+        assert data_connect["gmail"]["native_service"] == "gmail:v1"
+        assert data_connect["contacts"] == {
+            "scopes": ["https://www.googleapis.com/auth/contacts.readonly"],
+            "native_service": "people:v1",
+            "readiness": "oauth_scope_reserved",
+        }
+        assert data_connect["tasks"]["native_service"] == "tasks:v1"
+
     def test_write_text_with_lock_preserves_valid_json_under_concurrent_writes(self, tmp_path):
         token_path = tmp_path / "acct.json"
         payloads = [

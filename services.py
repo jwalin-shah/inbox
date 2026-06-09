@@ -36,6 +36,7 @@ from loguru import logger
 
 import egress_audit
 from contacts import ContactBook
+from imessage_link_helpers import extract_x_links
 from service_models import (
     ATTACHMENT_PLACEHOLDER,
     CalendarEvent,
@@ -95,8 +96,52 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/contacts.readonly",
     "https://www.googleapis.com/auth/tasks",
 ]
+
+GOOGLE_DATA_CONNECT_PRODUCTS = {
+    "gmail": {
+        "scopes": [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.settings.basic",
+        ],
+        "native_service": "gmail:v1",
+        "readiness": "loaded_service_required",
+    },
+    "calendar": {
+        "scopes": ["https://www.googleapis.com/auth/calendar"],
+        "native_service": "calendar:v3",
+        "readiness": "loaded_service_required",
+    },
+    "drive": {
+        "scopes": ["https://www.googleapis.com/auth/drive"],
+        "native_service": "drive:v3",
+        "readiness": "loaded_service_required",
+    },
+    "sheets": {
+        "scopes": ["https://www.googleapis.com/auth/spreadsheets"],
+        "native_service": "sheets:v4",
+        "readiness": "loaded_service_required",
+    },
+    "docs": {
+        "scopes": ["https://www.googleapis.com/auth/documents"],
+        "native_service": "docs:v1",
+        "readiness": "loaded_service_required",
+    },
+    "contacts": {
+        "scopes": ["https://www.googleapis.com/auth/contacts.readonly"],
+        "native_service": "people:v1",
+        "readiness": "oauth_scope_reserved",
+    },
+    "tasks": {
+        "scopes": ["https://www.googleapis.com/auth/tasks"],
+        "native_service": "tasks:v1",
+        "readiness": "loaded_service_required",
+    },
+}
 
 SQLITE_LOCK_RETRIES = 2
 SQLITE_LOCK_RETRY_DELAY = 0.05
@@ -481,6 +526,7 @@ def google_auth_diagnostics(check_refresh: bool = False) -> dict[str, object]:
         "credentials": _credentials_file_status(),
         "tokens_dir": str(TOKENS_DIR),
         "check_refresh": check_refresh,
+        "data_connect": GOOGLE_DATA_CONNECT_PRODUCTS,
         "counts": counts,
         "likely_causes": likely_causes,
         "tokens": token_entries,
@@ -729,6 +775,275 @@ def imsg_thread(chat_id: str, limit: int = 50) -> list[Msg]:
         _load_thread,
         empty_result=[],
         chat_id=chat_id,
+        limit=limit,
+    )
+
+
+def imsg_messages(
+    *,
+    contact: str = "",
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    if not IMSG_DB.exists():
+        return []
+
+    def _apple_timestamp(value: datetime) -> int:
+        if value.tzinfo is not None:
+            unix_timestamp = value.timestamp()
+        else:
+            unix_timestamp = value.replace(tzinfo=UTC).timestamp()
+        return int((unix_timestamp - 978307200) * 1_000_000_000)
+
+    def _load_messages(conn: sqlite3.Connection) -> list[dict[str, object]]:
+        clauses = ["m.text IS NOT NULL"]
+        params: list[object] = []
+        contact_query = contact.strip()
+        if contact_query:
+            pattern = f"%{contact_query}%"
+            clauses.append(
+                """
+                (
+                    h.id LIKE ? COLLATE NOCASE
+                    OR c.display_name LIKE ? COLLATE NOCASE
+                    OR c.guid LIKE ? COLLATE NOCASE
+                    OR EXISTS (
+                        SELECT 1
+                        FROM chat_handle_join filter_chj
+                        JOIN handle filter_h ON filter_h.rowid = filter_chj.handle_id
+                        WHERE filter_chj.chat_id = c.rowid
+                          AND filter_h.id LIKE ? COLLATE NOCASE
+                    )
+                )
+                """
+            )
+            params.extend([pattern, pattern, pattern, pattern])
+        if start_date is not None:
+            clauses.append("m.date >= ?")
+            params.append(_apple_timestamp(start_date))
+        if end_date is not None:
+            clauses.append("m.date < ?")
+            params.append(_apple_timestamp(end_date))
+
+        params.append(max(1, min(limit, 1000)))
+        rows = conn.execute(
+            f"""
+            SELECT
+                m.rowid,
+                m.text,
+                m.is_from_me,
+                m.date / 1000000000.0 + 978307200 AS ts,
+                cmj.chat_id,
+                h.id AS sender_id,
+                c.display_name,
+                c.guid,
+                (
+                    SELECT GROUP_CONCAT(member_h.id, ', ')
+                    FROM chat_handle_join member_chj
+                    JOIN handle member_h ON member_h.rowid = member_chj.handle_id
+                    WHERE member_chj.chat_id = c.rowid
+                ) AS participants
+            FROM message m
+            JOIN chat_message_join cmj ON cmj.message_id = m.rowid
+            JOIN chat c ON c.rowid = cmj.chat_id
+            LEFT JOIN handle h ON h.rowid = m.handle_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY m.date DESC, m.rowid DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+
+        messages = []
+        for (
+            rowid,
+            text,
+            is_from_me,
+            ts,
+            chat_id,
+            sender_id,
+            display_name,
+            guid,
+            participants,
+        ) in rows:
+            body = _clean_body(text)
+            if not body:
+                continue
+            contact_name = (display_name or "").strip()
+            if not contact_name:
+                participant_ids = [item.strip() for item in (participants or "").split(",")]
+                contact_name = ", ".join(
+                    _contacts.resolve(item) or item for item in participant_ids if item
+                )
+            if not contact_name:
+                contact_name = (guid or "").split(";")[-1]
+            sender = (
+                "Me" if is_from_me else (_contacts.resolve(sender_id or "") or sender_id or "?")
+            )
+            messages.append(
+                {
+                    "message_id": str(rowid),
+                    "chat_id": str(chat_id),
+                    "contact": contact_name,
+                    "sender": sender,
+                    "body": body,
+                    "ts": datetime.fromtimestamp(ts, tz=UTC),
+                    "is_me": bool(is_from_me),
+                    "source": "imessage",
+                }
+            )
+        return messages
+
+    return _run_sqlite_read(
+        IMSG_DB,
+        "imsg_messages",
+        _load_messages,
+        empty_result=[],
+        contact=contact,
+        limit=limit,
+    )
+
+
+def imsg_links(
+    *,
+    link_type: str = "x",
+    contact: str = "",
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    if link_type != "x":
+        raise ValueError(f"unsupported link query: {link_type!r}")
+    if not IMSG_DB.exists():
+        return []
+
+    def _apple_timestamp(value: datetime) -> int:
+        if value.tzinfo is not None:
+            unix_timestamp = value.timestamp()
+        else:
+            unix_timestamp = value.replace(tzinfo=UTC).timestamp()
+        return int((unix_timestamp - 978307200) * 1_000_000_000)
+
+    scan_limit = max(limit * 5, 500)
+
+    def _load_links(conn: sqlite3.Connection) -> list[dict[str, object]]:
+        clauses = [
+            "m.text IS NOT NULL",
+            "(m.text LIKE '%twitter.com%' OR m.text LIKE '%x.com/%' OR m.text LIKE '%x.com?%')",
+        ]
+        params: list[object] = []
+        contact_query = contact.strip()
+        if contact_query:
+            pattern = f"%{contact_query}%"
+            clauses.append(
+                """
+                (
+                    h.id LIKE ? COLLATE NOCASE
+                    OR c.display_name LIKE ? COLLATE NOCASE
+                    OR c.guid LIKE ? COLLATE NOCASE
+                    OR EXISTS (
+                        SELECT 1
+                        FROM chat_handle_join filter_chj
+                        JOIN handle filter_h ON filter_h.rowid = filter_chj.handle_id
+                        WHERE filter_chj.chat_id = c.rowid
+                          AND filter_h.id LIKE ? COLLATE NOCASE
+                    )
+                )
+                """
+            )
+            params.extend([pattern, pattern, pattern, pattern])
+        if start_date is not None:
+            clauses.append("m.date >= ?")
+            params.append(_apple_timestamp(start_date))
+        if end_date is not None:
+            clauses.append("m.date < ?")
+            params.append(_apple_timestamp(end_date))
+
+        params.append(scan_limit)
+        rows = conn.execute(
+            f"""
+            SELECT
+                m.rowid,
+                m.text,
+                m.is_from_me,
+                m.date / 1000000000.0 + 978307200 AS ts,
+                cmj.chat_id,
+                h.id AS sender_id,
+                c.display_name,
+                c.guid,
+                (
+                    SELECT GROUP_CONCAT(member_h.id, ', ')
+                    FROM chat_handle_join member_chj
+                    JOIN handle member_h ON member_h.rowid = member_chj.handle_id
+                    WHERE member_chj.chat_id = c.rowid
+                ) AS participants
+            FROM message m
+            JOIN chat_message_join cmj ON cmj.message_id = m.rowid
+            JOIN chat c ON c.rowid = cmj.chat_id
+            LEFT JOIN handle h ON h.rowid = m.handle_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY m.date DESC, m.rowid DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+
+        results: list[dict[str, object]] = []
+        for (
+            rowid,
+            text,
+            is_from_me,
+            ts,
+            chat_id,
+            sender_id,
+            display_name,
+            guid,
+            participants,
+        ) in rows:
+            body = _clean_body(text)
+            if not body:
+                continue
+            urls = extract_x_links(body)
+            if not urls:
+                continue
+            contact_name = (display_name or "").strip()
+            if not contact_name:
+                participant_ids = [item.strip() for item in (participants or "").split(",")]
+                contact_name = ", ".join(
+                    _contacts.resolve(item) or item for item in participant_ids if item
+                )
+            if not contact_name:
+                contact_name = (guid or "").split(";")[-1]
+            sender = (
+                "Me" if is_from_me else (_contacts.resolve(sender_id or "") or sender_id or "?")
+            )
+            ts_dt = datetime.fromtimestamp(ts, tz=UTC)
+            for url in urls:
+                results.append(
+                    {
+                        "url": url,
+                        "message_id": str(rowid),
+                        "chat_id": str(chat_id),
+                        "contact": contact_name,
+                        "sender": sender,
+                        "body": body,
+                        "ts": ts_dt,
+                        "is_me": bool(is_from_me),
+                        "source": "imessage",
+                    }
+                )
+                if len(results) >= limit:
+                    return results
+        return results
+
+    return _run_sqlite_read(
+        IMSG_DB,
+        "imsg_links",
+        _load_links,
+        empty_result=[],
+        link_type=link_type,
+        contact=contact,
         limit=limit,
     )
 
@@ -1491,6 +1806,24 @@ def gmail_search(
             label=label,
         )
         return []
+
+
+def gmail_inbox_counts(service) -> dict[str, Any]:
+    """Return Gmail inbox metadata counts without reading message bodies."""
+    profile = service.users().getProfile(userId="me").execute()
+    inbox_resp = (
+        service.users().messages().list(userId="me", labelIds=["INBOX"], maxResults=1).execute()
+    )
+    unread_resp = (
+        service.users().messages().list(userId="me", q="in:inbox is:unread", maxResults=1).execute()
+    )
+    return {
+        "profile_email": profile.get("emailAddress", ""),
+        "messages_total": int(profile.get("messagesTotal") or 0),
+        "threads_total": int(profile.get("threadsTotal") or 0),
+        "inbox_result_size_estimate": int(inbox_resp.get("resultSizeEstimate") or 0),
+        "unread_inbox_result_size_estimate": int(unread_resp.get("resultSizeEstimate") or 0),
+    }
 
 
 def gmail_batch_modify(

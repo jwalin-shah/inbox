@@ -217,6 +217,19 @@ MUTATING_METHOD_EXCEPTION_POLICY = {
     ("POST", "/calendar/free-slots"): ApprovalExceptionPolicy("pure_read", True, "calendar availability calculation"),
     ("POST", "/calendar/freebusy"): ApprovalExceptionPolicy("external_read_sync", True, "calendar free/busy provider read; no provider write"),
     ("POST", "/connectors/search"): ApprovalExceptionPolicy("pure_read", True, "connector metadata search"),
+    ("POST", "/gateway/dry-run/ahmed-office-location-calendar-update"): ApprovalExceptionPolicy(
+        "pure_read", True, "iMessage/calendar read dry-run that returns a proposal without provider write"
+    ),
+    ("POST", "/gateway/read-proof"): ApprovalExceptionPolicy(
+        "external_read_sync",
+        True,
+        "Gmail/Calendar/Tasks read-only proof via provider list/read helpers; no provider write",
+    ),
+    ("POST", "/gateway/gmail-readiness"): ApprovalExceptionPolicy(
+        "external_read_sync",
+        True,
+        "Multi-Gmail profile/inbox-count metadata read dry-run; no provider write",
+    ),
     ("POST", "/dictation/start"): ApprovalExceptionPolicy("local_audio_capture", True, "local dictation listener; no provider write"),
     ("POST", "/dictation/stop"): ApprovalExceptionPolicy("local_audio_capture", True, "local dictation listener; no provider write"),
     ("DELETE", "/contacts/favorites/{contact_id}"): ApprovalExceptionPolicy(
@@ -386,8 +399,9 @@ def test_connector_sync_exception_stays_default_dry_run():
 
 @pytest.mark.parametrize("execute_value", [1, 0, "true", "false", "yes", "no", "1", "0"])
 def test_connector_sync_request_rejects_coercible_execute_values(execute_value):
-    import inbox_server
     from pydantic import ValidationError
+
+    import inbox_server
 
     with pytest.raises(ValidationError):
         inbox_server.ConnectorSyncRequest(execute=execute_value)
@@ -643,6 +657,22 @@ def test_missing_lease_denies_gmail_send_before_provider_call(approval_client):
     assert data["approval_class"] == "external_write"
     assert data["can_execute"] is False
     assert data["reason"] == "missing_per_action_approval_lease"
+    mock_send.assert_not_called()
+
+
+def test_missing_lease_denies_imessage_send_before_provider_call(approval_client):
+    with patch("inbox_server.imsg_send") as mock_send:
+        resp = approval_client.post(
+            "/imessage/send",
+            params={"contact_id": "+1234567890", "text": "hello"},
+        )
+
+    assert resp.status_code == 403
+    data = resp.json()
+    assert data["approval_class"] == "external_write"
+    assert data["can_execute"] is False
+    assert data["reason"] == "missing_per_action_approval_lease"
+    assert data["executor"] == "inbox.messages.send"
     mock_send.assert_not_called()
 
 

@@ -166,3 +166,26 @@ async def test_readonly_mcp_excludes_mutating_registry_tools(tmp_path, monkeypat
 
     assert {"read_daily_note", "get_memory", "list_open_commitments"} <= readonly_tool_names
     assert readonly_tool_names.isdisjoint(mutating_tool_names)
+
+
+@pytest.mark.anyio
+async def test_readonly_mcp_includes_gateway_calendar_and_connector_parity_tools(
+    tmp_path, monkeypatch
+):
+    readonly_mcp = _load_readonly_mcp(monkeypatch, tmp_path)
+
+    readonly_tool_names = {tool.name for tool in await readonly_mcp.mcp.list_tools()}
+
+    assert {
+        "get_personal_data_gateway_status",
+        "prove_personal_data_gateway_reads",
+        "dry_run_ahmed_office_calendar_update",
+        "list_calendar_events",
+        "get_calendar_event",
+        "search_calendar_events",
+        "get_connectors_status",
+        "search_connectors",
+        "plan_connector_sync",
+    } <= readonly_tool_names
+    assert "create_calendar_event" not in readonly_tool_names
+    assert "update_calendar_event" not in readonly_tool_names
