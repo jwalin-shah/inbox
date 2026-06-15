@@ -1,7 +1,3 @@
-from difflib import SequenceMatcher
-
-
-def _fuzzy_name_score(name_a: str, name_b: str) -> float:
-    a = name_a.lower().strip()
-    b = name_b.lower().strip()
-    return SequenceMatcher(None, a, b).ratio()
+def _normalize_email(email: str) -> str:
+    """Lowercase and strip an email so equality comparison is whitespace/case-insensitive."""
+    return email.strip().lower()
