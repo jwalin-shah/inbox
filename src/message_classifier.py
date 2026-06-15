@@ -1,8 +1,21 @@
-def _normalize(msg: str) -> str:
-    """Lowercase and strip surrounding whitespace from a message.
+import re
 
-    Used as a preprocessing step so downstream keyword/regex checks
-    are case-insensitive and ignore leading/trailing whitespace such
-    as spaces, tabs, and newlines.
+_PROMOTIONAL_PATTERN = re.compile(
+    r"\d+\s*%\s*off"           # e.g. "50% off", "20 % off"
+    r"|\bpercent[\s-]+off\b"   # "percent off" or "percent-off"
+    r"|\bsale\b"               # sale
+    r"|\bdiscount\w*\b"        # discount, discounts, discounted
+    r"|\boffer\w*\b"           # offer, offers, offered
+    r"|\bdeal\w*\b",           # deal, deals
+    re.IGNORECASE,
+)
+
+
+def _is_promotional(msg: str) -> bool:
+    """Return True when *msg* looks like marketing/promotional content.
+
+    Heuristics: percent-off patterns, sale, discount, offer, deal.
     """
-    return msg.lower().strip()
+    if not isinstance(msg, str) or not msg:
+        return False
+    return bool(_PROMOTIONAL_PATTERN.search(msg))
