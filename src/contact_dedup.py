@@ -1,19 +1,17 @@
-"""Contact deduplication helpers."""
-
-from __future__ import annotations
+from dataclasses import dataclass, field
 
 
-def _emails_match(entry_a: dict, entry_b: dict) -> bool:
-    """Return True iff the two entries share at least one normalized email address.
+@dataclass
+class MergedContact:
+    """Holds the deduplicated result: canonical name, merged email set,
+    preserved phone list, and source provenance."""
 
-    Emails are normalized by stripping surrounding whitespace and lowercasing
-    for case-insensitive comparison. Entries may omit the ``emails`` key or
-    supply a non-iterable value; missing or empty email lists never match.
-    """
-    emails_a = entry_a.get("emails") or []
-    emails_b = entry_b.get("emails") or []
+    name: str
+    emails: set[str] = field(default_factory=set)
+    phones: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
 
-    set_a = {str(email).strip().lower() for email in emails_a if email}
-    set_b = {str(email).strip().lower() for email in emails_b if email}
-
-    return bool(set_a & set_b)
+    def __post_init__(self) -> None:
+        # Normalize emails to a set to enforce "merged email set" semantics.
+        if not isinstance(self.emails, set):
+            self.emails = set(self.emails)
