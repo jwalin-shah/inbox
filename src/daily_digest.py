@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from datetime import date
 from typing import List
 
 
@@ -7,10 +6,8 @@ from typing import List
 class DigestSection:
     contact: str
     count: int
-    excerpt: str
+    content: str
 
 
-@dataclass
-class Digest:
-    today: date
-    sections: List[DigestSection]
+def sort_sections_by_priority(sections: List[DigestSection]) -> List[DigestSection]:
+    return sorted(sections, key=lambda s: (-s.count, s.contact))
