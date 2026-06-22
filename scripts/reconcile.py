@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only cross-channel reconciliation via connector search."""
+"""Read-only cross-channel reconciliation via connector search.
+
+Connector CLIs: gog, imsg, wacli.
+"""
 
 from __future__ import annotations
 
