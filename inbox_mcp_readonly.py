@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 import ambient_notes  # kept for test-suite access via module attribute
-from inbox_mcp_factory import build_mcp
+from inbox_mcp_factory import build_mcp, read_daily_note
 from mcp_gateway import make_health_handler, make_mcp_app
 
 DEFAULT_HTTP_PORT = 8001

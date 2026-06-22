@@ -43,6 +43,18 @@ def _require_confirmation(confirm: bool, action: str) -> None:
         )
 
 
+async def read_daily_note(date: str = "") -> dict:
+    """Read today's daily note or a specific YYYY-MM-DD note if present."""
+    path = (
+        ambient_notes._today_file()
+        if not date
+        else ambient_notes.DAILY_DIR / f"{date}.md"
+    )
+    if not path.exists():
+        return {"ok": False, "path": str(path), "content": ""}
+    return {"ok": True, "path": str(path), "content": path.read_text(encoding="utf-8")}
+
+
 def build_mcp(
     *,
     readonly: bool = False,
