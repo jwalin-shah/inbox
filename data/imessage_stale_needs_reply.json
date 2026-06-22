@@ -1,0 +1,1301 @@
+{
+  "schema": "inbox.imessage_stale_needs_reply.v0",
+  "generated_at": "2026-06-05T16:19:08",
+  "queue_item": "190d857e35",
+  "method": "read_only_local_imessage_sqlite_via_services",
+  "summary": {
+    "contacts_scanned": 170,
+    "stale_named_needs_reply_14d": 6,
+    "stale_unresolved_needs_reply_14d": 60,
+    "recent_actionable_needs_reply": 5,
+    "waiting_on_others": 22,
+    "excluded_noise": 77,
+    "stale_threshold_days": 14,
+    "index_health_note": "healthy=False stale=True"
+  },
+  "stale_named_needs_reply_14d": [
+    {
+      "chat_id": "49",
+      "name": "The Ochos",
+      "display_name": "The Ochos",
+      "members": [
+        "Kishan Brambhatt",
+        "Siddarth Pandian",
+        "Ram",
+        "nilli",
+        "Danalila\u2728",
+        "Kirti Shekhawat",
+        "hari.bhamidipati97@gmail.com"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-06-25T20:36:11",
+      "age_hours": 8275.7,
+      "age_label": "344d",
+      "snippet": "Oooopsss how did that happennnn",
+      "name_resolved": true,
+      "evidence_thread": "GET /messages/imessage/49",
+      "urgency": 1
+    },
+    {
+      "chat_id": "40",
+      "name": "5 SHAHS",
+      "display_name": "5 SHAHS",
+      "members": [
+        "Mihir Shah",
+        "+17204963920",
+        "Krusha Shah",
+        "Soham Shah"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-06-29T21:10:41",
+      "age_hours": 8179.1,
+      "age_label": "340d",
+      "snippet": "thank you thank you",
+      "name_resolved": true,
+      "evidence_thread": "GET /messages/imessage/40",
+      "urgency": 1
+    },
+    {
+      "chat_id": "19",
+      "name": "Rutu and Younger but For Real",
+      "display_name": "Rutu and Younger but For Real",
+      "members": [
+        "Mihir Shah",
+        "Yash Tanna",
+        "Disha",
+        "Nirali",
+        "Rutu",
+        "+14084603962",
+        "Naisha",
+        "Divyesh",
+        "Vivek"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-07-19T21:05:23",
+      "age_hours": 7699.2,
+      "age_label": "320d",
+      "snippet": "Heyyyy!",
+      "name_resolved": true,
+      "evidence_thread": "GET /messages/imessage/19",
+      "urgency": 1
+    },
+    {
+      "chat_id": "81",
+      "name": "Rooftop Pool 8/13",
+      "display_name": "Rooftop Pool 8/13",
+      "members": [
+        "Disha",
+        "Naisha",
+        "+14084603962",
+        "Priyal",
+        "Runi Tanna",
+        "+14084642614"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-08-12T16:10:21",
+      "age_hours": 7128.1,
+      "age_label": "297d",
+      "snippet": "after all these years and I still can\u2019t understand amion",
+      "name_resolved": true,
+      "evidence_thread": "GET /messages/imessage/81",
+      "urgency": 1
+    },
+    {
+      "chat_id": "127",
+      "name": "quj",
+      "display_name": "quj",
+      "members": [
+        "Kishan Brambhatt",
+        "Shrey Shah",
+        "Rishiraj Taylor",
+        "Het Patel",
+        "Ishan Patel",
+        "vishakh",
+        "Meethre",
+        "Darsh",
+        "vivek"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-08-23T16:06:32",
+      "age_hours": 6864.2,
+      "age_label": "286d",
+      "snippet": "\ud83d\ude0d\ud83d\ude0d",
+      "name_resolved": true,
+      "evidence_thread": "GET /messages/imessage/127",
+      "urgency": 1
+    },
+    {
+      "chat_id": "162",
+      "name": "Rutu and Younger but For Real",
+      "display_name": "Rutu and Younger but For Real",
+      "members": [
+        "Mihir Shah",
+        "Disha",
+        "Naisha",
+        "+14084603962",
+        "Vivek",
+        "Divyesh",
+        "Yash Tanna",
+        "Aarohi",
+        "Rutu",
+        "Nirali"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-12-21T15:27:15",
+      "age_hours": 3984.9,
+      "age_label": "166d",
+      "snippet": "Hey! If y\u2019all r back for break we should meet up for lunch or dinner or somethin",
+      "name_resolved": true,
+      "evidence_thread": "GET /messages/imessage/162",
+      "urgency": 1
+    }
+  ],
+  "stale_unresolved_needs_reply_14d": [
+    {
+      "chat_id": "62",
+      "name": "+16503913948, Mihir Shah",
+      "display_name": "",
+      "members": [
+        "+16503913948",
+        "Mihir Shah"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2023-07-17T16:34:44",
+      "age_hours": 25295.7,
+      "age_label": "1053d",
+      "snippet": "8:30",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/62",
+      "urgency": 1
+    },
+    {
+      "chat_id": "133",
+      "name": "+14086368367",
+      "display_name": "",
+      "members": [
+        "+14086368367"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-06-18T08:36:44",
+      "age_hours": 8455.7,
+      "age_label": "352d",
+      "snippet": "Where r u going",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/133",
+      "urgency": 1
+    },
+    {
+      "chat_id": "41",
+      "name": "+18883566618",
+      "display_name": "",
+      "members": [
+        "+18883566618"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-06-20T10:51:24",
+      "age_hours": 8405.5,
+      "age_label": "350d",
+      "snippet": "Your appointment with Mariela Costello on Friday, June 20th starts at 11:00 am (",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/41",
+      "urgency": 1
+    },
+    {
+      "chat_id": "101",
+      "name": "+15104587112",
+      "display_name": "",
+      "members": [
+        "+15104587112"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-01T13:03:27",
+      "age_hours": 8139.3,
+      "age_label": "339d",
+      "snippet": "Been a minute",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/101",
+      "urgency": 1
+    },
+    {
+      "chat_id": "59",
+      "name": "+13134829042",
+      "display_name": "",
+      "members": [
+        "+13134829042"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-02T07:20:16",
+      "age_hours": 8121.0,
+      "age_label": "338d",
+      "snippet": "Please confirm a time that works best for TODAY and I will send over confirmatio",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/59",
+      "urgency": 1
+    },
+    {
+      "chat_id": "61",
+      "name": "+14082146368",
+      "display_name": "",
+      "members": [
+        "+14082146368"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-02T20:28:27",
+      "age_hours": 8107.8,
+      "age_label": "337d",
+      "snippet": "Hello, you have a visit with Crossover San Tomas (Santa Clara, CA) on Jul 3 at 9",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/61",
+      "urgency": 1
+    },
+    {
+      "chat_id": "85",
+      "name": "+15105797012",
+      "display_name": "",
+      "members": [
+        "+15105797012"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-07T23:20:25",
+      "age_hours": 7985.0,
+      "age_label": "332d",
+      "snippet": "Ya lmk what the referral thing looks like",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/85",
+      "urgency": 1
+    },
+    {
+      "chat_id": "122",
+      "name": "Krusha Shah, Soham Shah",
+      "display_name": "",
+      "members": [
+        "Krusha Shah",
+        "Soham Shah"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-07-09T09:19:40",
+      "age_hours": 7951.0,
+      "age_label": "331d",
+      "snippet": "Whoops, forgot to look, I\u2019ll check",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/122",
+      "urgency": 1
+    },
+    {
+      "chat_id": "105",
+      "name": "+18335070438",
+      "display_name": "",
+      "members": [
+        "+18335070438"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-09T18:53:51",
+      "age_hours": 7941.4,
+      "age_label": "330d",
+      "snippet": "Hi Jwalin, thanks for your interest in our Client Care Coordinator opportunity! ",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/105",
+      "urgency": 1
+    },
+    {
+      "chat_id": "70",
+      "name": "+18446758585",
+      "display_name": "",
+      "members": [
+        "+18446758585"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-09T19:02:42",
+      "age_hours": 7941.3,
+      "age_label": "330d",
+      "snippet": "Hi Jwalin,\n\nThank you for your interest in the Client Care Coordinator position!",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/70",
+      "urgency": 1
+    },
+    {
+      "chat_id": "111",
+      "name": "+15107513036",
+      "display_name": "",
+      "members": [
+        "+15107513036"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-16T12:51:35",
+      "age_hours": 7779.5,
+      "age_label": "324d",
+      "snippet": "Hello Jwalin,   It's Maria Lopez from Premier Nissan of Fremont.   Thanks for ta",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/111",
+      "urgency": 1
+    },
+    {
+      "chat_id": "32",
+      "name": "+19473334435",
+      "display_name": "",
+      "members": [
+        "+19473334435"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-16T20:24:56",
+      "age_hours": 7771.9,
+      "age_label": "323d",
+      "snippet": "Hi Jwalin,\n\nThanks for reaching out to CA Electrical Group 24/7 through Angi! We",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/32",
+      "urgency": 1
+    },
+    {
+      "chat_id": "84",
+      "name": "+19196481316",
+      "display_name": "",
+      "members": [
+        "+19196481316"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-16T20:24:24",
+      "age_hours": 7771.9,
+      "age_label": "323d",
+      "snippet": "Hi Jwalin, this is Dalcon Electric reaching out about your electrical request on",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/84",
+      "urgency": 1
+    },
+    {
+      "chat_id": "34",
+      "name": "+14083859166",
+      "display_name": "",
+      "members": [
+        "+14083859166"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-16T20:24:08",
+      "age_hours": 7771.9,
+      "age_label": "323d",
+      "snippet": "Hi Jwalin, this is Dalcon Electric reaching out about your electrical request on",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/34",
+      "urgency": 1
+    },
+    {
+      "chat_id": "60",
+      "name": "+16693383147",
+      "display_name": "",
+      "members": [
+        "+16693383147"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-16T20:43:54",
+      "age_hours": 7771.6,
+      "age_label": "323d",
+      "snippet": "Good news, your work has been booked!\n\nDate: Jul 18, 2025\nWhere: 41352 Kathlean ",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/60",
+      "urgency": 1
+    },
+    {
+      "chat_id": "92",
+      "name": "+18885150326",
+      "display_name": "",
+      "members": [
+        "+18885150326"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-17T08:31:47",
+      "age_hours": 7759.8,
+      "age_label": "323d",
+      "snippet": "If you no longer wish to receive text messages from us, reply with \"STOP\" to thi",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/92",
+      "urgency": 1
+    },
+    {
+      "chat_id": "158",
+      "name": "+16693417053",
+      "display_name": "",
+      "members": [
+        "+16693417053"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-17T14:05:34",
+      "age_hours": 7754.2,
+      "age_label": "323d",
+      "snippet": "We are the Fremont Mazda store/team Volkswagen store",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/158",
+      "urgency": 1
+    },
+    {
+      "chat_id": "124",
+      "name": "+18627011696",
+      "display_name": "",
+      "members": [
+        "+18627011696"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-18T09:03:25",
+      "age_hours": 7735.3,
+      "age_label": "322d",
+      "snippet": "Your OTP is 036513. It\u2019s valid for 10 minutes. Don\u2019t share this code.",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/124",
+      "urgency": 1
+    },
+    {
+      "chat_id": "36",
+      "name": "+17322856925",
+      "display_name": "",
+      "members": [
+        "+17322856925"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-18T09:06:57",
+      "age_hours": 7735.2,
+      "age_label": "322d",
+      "snippet": "Dear Jwalin,\nI hope this message finds you well. Regarding the Executive Assista",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/36",
+      "urgency": 1
+    },
+    {
+      "chat_id": "22",
+      "name": "+18335941888",
+      "display_name": "",
+      "members": [
+        "+18335941888"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-18T19:06:04",
+      "age_hours": 7725.2,
+      "age_label": "321d",
+      "snippet": "[Duet] Hey jwalin ! You've got new likes waiting for you! See who's interested a",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/22",
+      "urgency": 1
+    },
+    {
+      "chat_id": "155",
+      "name": "+15082812567",
+      "display_name": "",
+      "members": [
+        "+15082812567"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-19T10:09:55",
+      "age_hours": 7710.2,
+      "age_label": "321d",
+      "snippet": "Dear Jwalin, Thank you for starting the prescreening process with virtual recrui",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/155",
+      "urgency": 1
+    },
+    {
+      "chat_id": "139",
+      "name": "+18889107369",
+      "display_name": "",
+      "members": [
+        "+18889107369"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-20T08:42:34",
+      "age_hours": 7687.6,
+      "age_label": "320d",
+      "snippet": "Hi Jwalin, this is Liz reaching out with an outside sales opportunity that might",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/139",
+      "urgency": 1
+    },
+    {
+      "chat_id": "129",
+      "name": "Radhika Shah",
+      "display_name": "",
+      "members": [
+        "Radhika Shah"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-07-20T19:49:40",
+      "age_hours": 7676.5,
+      "age_label": "319d",
+      "snippet": "LMAOOOOOOOOOO",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/129",
+      "urgency": 1
+    },
+    {
+      "chat_id": "115",
+      "name": "+639475484920",
+      "display_name": "",
+      "members": [
+        "+639475484920"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-08-06T12:30:11",
+      "age_hours": 7275.8,
+      "age_label": "303d",
+      "snippet": "California State Department of Vehicles(DMV) Final Notice: Enforcement Penalties",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/115",
+      "urgency": 1
+    },
+    {
+      "chat_id": "152",
+      "name": "Brian Honea, Nate Ultimate",
+      "display_name": "",
+      "members": [
+        "Brian Honea",
+        "Nate Ultimate"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-08-08T12:40:46",
+      "age_hours": 7227.6,
+      "age_label": "301d",
+      "snippet": "Down",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/152",
+      "urgency": 1
+    },
+    {
+      "chat_id": "87",
+      "name": "halimks014@yahoo.com",
+      "display_name": "",
+      "members": [
+        "halimks014@yahoo.com"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-08-12T09:15:50",
+      "age_hours": 7135.1,
+      "age_label": "297d",
+      "snippet": "Hi, I'm a recruiter at Kelly Services (US) , my name is Amara. Your background a",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/87",
+      "urgency": 1
+    },
+    {
+      "chat_id": "56",
+      "name": "Mihir Shah, +15109621035",
+      "display_name": "",
+      "members": [
+        "Mihir Shah",
+        "+15109621035"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-09-15T23:17:00",
+      "age_hours": 6305.0,
+      "age_label": "262d",
+      "snippet": "hey i\u2019ve been wanting to do the palace of fine arts escape room for a while so w",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/56",
+      "urgency": 1
+    },
+    {
+      "chat_id": "31",
+      "name": "Mihir Shah, +17204963920, Krusha Shah",
+      "display_name": "",
+      "members": [
+        "Mihir Shah",
+        "+17204963920",
+        "Krusha Shah"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-09-28T16:47:55",
+      "age_hours": 5999.5,
+      "age_label": "249d",
+      "snippet": "entrance?",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/31",
+      "urgency": 1
+    },
+    {
+      "chat_id": "143",
+      "name": "Mihir Shah, +15103382232, Yash Tanna",
+      "display_name": "",
+      "members": [
+        "Mihir Shah",
+        "+15103382232",
+        "Yash Tanna"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-11-04T09:37:38",
+      "age_hours": 5118.7,
+      "age_label": "213d",
+      "snippet": "Im down as well ive been meaning to go",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/143",
+      "urgency": 1
+    },
+    {
+      "chat_id": "51",
+      "name": "+19414470901",
+      "display_name": "",
+      "members": [
+        "+19414470901"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-11-27T06:01:59",
+      "age_hours": 4570.3,
+      "age_label": "190d",
+      "snippet": "Hi, this is Cassidy  from Amazon Recruiting.\n\nWe came across your profile and th",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/51",
+      "urgency": 1
+    },
+    {
+      "chat_id": "157",
+      "name": "+14158150649",
+      "display_name": "",
+      "members": [
+        "+14158150649"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-12-09T15:25:40",
+      "age_hours": 4272.9,
+      "age_label": "178d",
+      "snippet": "Hey Jawlin,\nMake than 4:15 please",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/157",
+      "urgency": 1
+    },
+    {
+      "chat_id": "75",
+      "name": "+15106760922, +15103382232, +15105090426",
+      "display_name": "",
+      "members": [
+        "+15106760922",
+        "+15103382232",
+        "+15105090426"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-12-25T22:06:42",
+      "age_hours": 3882.2,
+      "age_label": "161d",
+      "snippet": "^^^",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/75",
+      "urgency": 1
+    },
+    {
+      "chat_id": "76",
+      "name": "Rachit Pareek, +15105090426, +15103382232",
+      "display_name": "",
+      "members": [
+        "Rachit Pareek",
+        "+15105090426",
+        "+15103382232"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2025-12-26T15:48:19",
+      "age_hours": 3864.5,
+      "age_label": "161d",
+      "snippet": "It\u2019s packed",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/76",
+      "urgency": 1
+    },
+    {
+      "chat_id": "57",
+      "name": "+16505397073",
+      "display_name": "",
+      "members": [
+        "+16505397073"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2025-12-29T22:24:43",
+      "age_hours": 3785.9,
+      "age_label": "157d",
+      "snippet": "Hey Jwalin,\n\nQuick update on your 10 applications:\n\n**Just submitted (answers dr",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/57",
+      "urgency": 1
+    },
+    {
+      "chat_id": "90",
+      "name": "+15105797012, Rachit Pareek, +15105090426 +1",
+      "display_name": "",
+      "members": [
+        "+15105797012",
+        "Rachit Pareek",
+        "+15105090426",
+        "+15103382232"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2026-01-03T22:10:45",
+      "age_hours": 3666.1,
+      "age_label": "152d",
+      "snippet": "Wassup mf",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/90",
+      "urgency": 1
+    },
+    {
+      "chat_id": "54",
+      "name": "+18573715030",
+      "display_name": "",
+      "members": [
+        "+18573715030"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-01-04T19:31:39",
+      "age_hours": 3644.8,
+      "age_label": "151d",
+      "snippet": "Hey, it's Dini from Sitch! I can't set you up unless you finish telling me what ",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/54",
+      "urgency": 1
+    },
+    {
+      "chat_id": "23",
+      "name": "7727, +13802785940",
+      "display_name": "",
+      "members": [
+        "7727",
+        "+13802785940"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2026-01-05T10:43:22",
+      "age_hours": 3629.6,
+      "age_label": "151d",
+      "snippet": "Hello, I'm a recruiter from Randstad. We are currently hiring for a remote posit",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/23",
+      "urgency": 1
+    },
+    {
+      "chat_id": "50",
+      "name": "7727, +17702319737, +16784096220 +8",
+      "display_name": "",
+      "members": [
+        "7727",
+        "+17702319737",
+        "+16784096220",
+        "+19123918716",
+        "+19542759205",
+        "+18589478486",
+        "+18324467441",
+        "+19405776548",
+        "+14704694270",
+        "+18138171331",
+        "+18067031898"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2026-01-05T12:16:10",
+      "age_hours": 3628.0,
+      "age_label": "151d",
+      "snippet": "Hi \ud83d\udc4b, I'm Sophia from the TikTok hiring team.\n\nWant to earn extra income with fl",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/50",
+      "urgency": 1
+    },
+    {
+      "chat_id": "136",
+      "name": "+17203177925",
+      "display_name": "",
+      "members": [
+        "+17203177925"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-01-17T12:01:02",
+      "age_hours": 3340.3,
+      "age_label": "139d",
+      "snippet": "Hello Jwalin, this is Chris with Mintz Law Firm responding to an online inquiry ",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/136",
+      "urgency": 1
+    },
+    {
+      "chat_id": "66",
+      "name": "+17206424007",
+      "display_name": "",
+      "members": [
+        "+17206424007"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-01-18T08:57:43",
+      "age_hours": 3319.4,
+      "age_label": "138d",
+      "snippet": "Good morning Jwalin,\n\nThis is Alejandra with an injury firm, seems you submitted",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/66",
+      "urgency": 1
+    },
+    {
+      "chat_id": "165",
+      "name": "+17202369555",
+      "display_name": "",
+      "members": [
+        "+17202369555"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-01-19T13:06:57",
+      "age_hours": 3291.2,
+      "age_label": "137d",
+      "snippet": "Hello, I hope this message finds you well. My name is Renee, and I am reaching o",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/165",
+      "urgency": 1
+    },
+    {
+      "chat_id": "94",
+      "name": "Mihir Shah, +17204963920, Krusha Shah +1",
+      "display_name": "",
+      "members": [
+        "Mihir Shah",
+        "+17204963920",
+        "Krusha Shah",
+        "Soham Shah"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2026-01-28T15:17:41",
+      "age_hours": 3073.0,
+      "age_label": "128d",
+      "snippet": "Oh wow that\u2019s a lot of shifts",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/94",
+      "urgency": 1
+    },
+    {
+      "chat_id": "148",
+      "name": "+17207969700",
+      "display_name": "",
+      "members": [
+        "+17207969700"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-01-30T11:15:52",
+      "age_hours": 3029.1,
+      "age_label": "126d",
+      "snippet": "Dear Jwalin,\n\nI hope this message finds you well. This is Aizar from Ramos Law. ",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/148",
+      "urgency": 1
+    },
+    {
+      "chat_id": "64",
+      "name": "+13035293265",
+      "display_name": "",
+      "members": [
+        "+13035293265"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-01-30T11:15:01",
+      "age_hours": 3029.1,
+      "age_label": "126d",
+      "snippet": "Thanks for contacting Cheney Galluzzi & Howard. Our team is reviewing your matte",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/64",
+      "urgency": 1
+    },
+    {
+      "chat_id": "88",
+      "name": "+12132578283",
+      "display_name": "",
+      "members": [
+        "+12132578283"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-01-31T13:58:39",
+      "age_hours": 3002.3,
+      "age_label": "125d",
+      "snippet": "Hey Jwalin, Thanks for applying to GL Team of CA - Benefits Rep Position. May we",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/88",
+      "urgency": 1
+    },
+    {
+      "chat_id": "161",
+      "name": "+17207789740",
+      "display_name": "",
+      "members": [
+        "+17207789740"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-02T12:29:28",
+      "age_hours": 2955.8,
+      "age_label": "123d",
+      "snippet": "Hello Jwalin, thanks for contacting Cheney Galluzzi & Howard. Please give us a c",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/161",
+      "urgency": 1
+    },
+    {
+      "chat_id": "100",
+      "name": "+13034444444",
+      "display_name": "",
+      "members": [
+        "+13034444444"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-03T12:59:02",
+      "age_hours": 2931.3,
+      "age_label": "122d",
+      "snippet": "Hello Mr. Shah,\nMy name is Brittany and I work with Richard Casey at Fuicelli & ",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/100",
+      "urgency": 1
+    },
+    {
+      "chat_id": "42",
+      "name": "+16823690366",
+      "display_name": "",
+      "members": [
+        "+16823690366"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-12T12:15:23",
+      "age_hours": 2716.1,
+      "age_label": "113d",
+      "snippet": "We're on a mission to raise the minimum wage in TX. Join us as a Voting Ambassad",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/42",
+      "urgency": 1
+    },
+    {
+      "chat_id": "132",
+      "name": "+12134237935",
+      "display_name": "",
+      "members": [
+        "+12134237935"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-13T10:11:09",
+      "age_hours": 2694.1,
+      "age_label": "112d",
+      "snippet": "What do you think about Donald Trump and California issues?\n\nus-survey.site/kjDT",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/132",
+      "urgency": 1
+    },
+    {
+      "chat_id": "149",
+      "name": "+18773244726",
+      "display_name": "",
+      "members": [
+        "+18773244726"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-17T17:28:36",
+      "age_hours": 2590.8,
+      "age_label": "107d",
+      "snippet": "What do you think about Donald Trump and California issues? pubopresearch.com/l/",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/149",
+      "urgency": 1
+    },
+    {
+      "chat_id": "24",
+      "name": "+17204963920, Adam Chan",
+      "display_name": "",
+      "members": [
+        "+17204963920",
+        "Adam Chan"
+      ],
+      "is_group": true,
+      "unread": 0,
+      "last_ts": "2026-02-20T10:49:57",
+      "age_hours": 2525.5,
+      "age_label": "105d",
+      "snippet": "OMG love the masters directions",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/24",
+      "urgency": 1
+    },
+    {
+      "chat_id": "134",
+      "name": "+14692963807",
+      "display_name": "",
+      "members": [
+        "+14692963807"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-20T12:50:29",
+      "age_hours": 2523.5,
+      "age_label": "105d",
+      "snippet": "Greg Abbott says he cares about you \u2014 but look around.\r\n\r\nHealthcare costs are r",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/134",
+      "urgency": 1
+    },
+    {
+      "chat_id": "33",
+      "name": "+18772764891",
+      "display_name": "",
+      "members": [
+        "+18772764891"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-20T13:11:34",
+      "age_hours": 2523.1,
+      "age_label": "105d",
+      "snippet": "What are your thoughts about Donald Trump and California issues? Let us know her",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/33",
+      "urgency": 1
+    },
+    {
+      "chat_id": "140",
+      "name": "+639105539067",
+      "display_name": "",
+      "members": [
+        "+639105539067"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-21T10:26:34",
+      "age_hours": 2501.9,
+      "age_label": "104d",
+      "snippet": "Greetings from Amazon\u2019s Recruiting Department. This is Sophia.\n\nAfter reviewing ",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/140",
+      "urgency": 1
+    },
+    {
+      "chat_id": "28",
+      "name": "+14162769316",
+      "display_name": "",
+      "members": [
+        "+14162769316"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-22T12:14:13",
+      "age_hours": 2476.1,
+      "age_label": "103d",
+      "snippet": "(attachment)-\n(attachment)",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/28",
+      "urgency": 1
+    },
+    {
+      "chat_id": "126",
+      "name": "Zach Tang",
+      "display_name": "",
+      "members": [
+        "Zach Tang"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-22T23:55:40",
+      "age_hours": 2464.4,
+      "age_label": "102d",
+      "snippet": "i can meet u in fremont",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/126",
+      "urgency": 1
+    },
+    {
+      "chat_id": "110",
+      "name": "+14163151900",
+      "display_name": "",
+      "members": [
+        "+14163151900"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-23T10:43:29",
+      "age_hours": 2453.6,
+      "age_label": "102d",
+      "snippet": "(attachment)-\n(attachment)",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/110",
+      "urgency": 1
+    },
+    {
+      "chat_id": "43",
+      "name": "+14156038804",
+      "display_name": "",
+      "members": [
+        "+14156038804"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-23T15:26:57",
+      "age_hours": 2448.9,
+      "age_label": "102d",
+      "snippet": "Sean Thorne",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/43",
+      "urgency": 1
+    },
+    {
+      "chat_id": "107",
+      "name": "Harsha Karanth",
+      "display_name": "",
+      "members": [
+        "Harsha Karanth"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-26T19:39:26",
+      "age_hours": 2372.7,
+      "age_label": "98d",
+      "snippet": "yo",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/107",
+      "urgency": 1
+    },
+    {
+      "chat_id": "108",
+      "name": "+19848884194",
+      "display_name": "",
+      "members": [
+        "+19848884194"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-02-28T22:24:15",
+      "age_hours": 2321.9,
+      "age_label": "96d",
+      "snippet": "Did tou stick around?",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/108",
+      "urgency": 1
+    }
+  ],
+  "recent_actionable_needs_reply": [
+    {
+      "chat_id": "16",
+      "name": "Mihir Shah",
+      "display_name": "",
+      "members": [
+        "Mihir Shah"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-06-04T13:28:06",
+      "age_hours": 26.9,
+      "age_label": "1d",
+      "snippet": "no i\u2019m fearful",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/16",
+      "urgency": 1
+    },
+    {
+      "chat_id": "46",
+      "name": "+14089089659",
+      "display_name": "",
+      "members": [
+        "+14089089659"
+      ],
+      "is_group": false,
+      "unread": 0,
+      "last_ts": "2026-06-04T21:03:16",
+      "age_hours": 19.3,
+      "age_label": "19h",
+      "snippet": "Give the other agent this exact message:\n\n  The file is OpenSSL `enc` encrypted,",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/46",
+      "urgency": 1
+    },
+    {
+      "chat_id": "178",
+      "name": "Divyesh",
+      "display_name": "",
+      "members": [
+        "Divyesh"
+      ],
+      "is_group": false,
+      "unread": 1,
+      "last_ts": "2026-06-04T21:32:39",
+      "age_hours": 18.8,
+      "age_label": "18h",
+      "snippet": "i think 15% off",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/178",
+      "urgency": 1
+    },
+    {
+      "chat_id": "8",
+      "name": "family1",
+      "display_name": "family1",
+      "members": [
+        "+16503913948",
+        "Mihir Shah",
+        "+14086368367"
+      ],
+      "is_group": true,
+      "unread": 1,
+      "last_ts": "2026-06-04T22:55:21",
+      "age_hours": 17.4,
+      "age_label": "17h",
+      "snippet": "whole",
+      "name_resolved": true,
+      "evidence_thread": "GET /messages/imessage/8",
+      "urgency": 1
+    },
+    {
+      "chat_id": "177",
+      "name": "Nandini Venkatesh, +17204963920",
+      "display_name": "",
+      "members": [
+        "Nandini Venkatesh",
+        "+17204963920"
+      ],
+      "is_group": true,
+      "unread": 1,
+      "last_ts": "2026-06-05T11:21:11",
+      "age_hours": 5.0,
+      "age_label": "4h",
+      "snippet": "But I appreciate it",
+      "name_resolved": false,
+      "evidence_thread": "GET /messages/imessage/177",
+      "urgency": 1
+    }
+  ]
+}

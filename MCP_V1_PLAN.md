@@ -11,10 +11,13 @@ connections and policy in this repo instead of inside any single assistant.
 ChatGPT or another MCP client
     -> public mcp_server.py (/mcp)
     -> private inbox_server.py (localhost only)
-    -> Gmail, iMessage, Apple Notes, Apple Reminders
+    -> Gmail, Calendar, Drive/Docs/Sheets, iMessage, Apple Notes, Apple Reminders, Tasks, local connector CLIs
 ```
 
-Calendar stays on the built-in ChatGPT Google connector for now.
+Personal data access is canonical through the local Inbox API/MCP gateway. Do
+not rely on built-in Gmail, Calendar, or Drive tools for normal operation when
+Inbox can read or propose the same workflow locally. See
+`docs/PERSONAL_DATA_GATEWAY_V0.md`.
 
 ## Security Model
 

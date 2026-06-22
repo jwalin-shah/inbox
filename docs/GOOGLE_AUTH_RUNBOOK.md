@@ -39,6 +39,17 @@ curl -H "Authorization: Bearer $INBOX_SERVER_TOKEN" \
 The endpoint is redacted: it reports token filenames, scopes, expiry, and
 refresh status, but not access tokens, refresh tokens, or user message data.
 
+To prove multi-Gmail readiness without mutations after reauth/restart:
+
+```bash
+curl -s -X POST http://127.0.0.1:9849/gateway/gmail-readiness \
+  -H "Authorization: Bearer $INBOX_SERVER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"accounts":["jwalinshah13@gmail.com","jshah1331@gmail.com"]}'
+```
+
+This reads Gmail profile and inbox/unread count metadata only.
+
 ## Common Causes
 
 - `refresh_token_expired_or_revoked`: Google rejected the refresh grant. The

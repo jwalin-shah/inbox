@@ -160,6 +160,50 @@ def test_capability_inventory_dispatches_to_readonly_route():
     }
 
 
+def test_personal_data_gateway_read_proof_dispatches_to_readonly_body_route():
+    handlers = _handlers()
+
+    result = asyncio.run(
+        handlers["prove_personal_data_gateway_reads"](
+            account="me@example.com",
+            gmail_limit=2,
+            calendar_limit=3,
+            task_limit=4,
+        )
+    )
+
+    assert result == {
+        "method": "POST",
+        "path": "/gateway/read-proof",
+        "params": None,
+        "json": {
+            "account": "me@example.com",
+            "gmail_limit": 2,
+            "calendar_limit": 3,
+            "task_limit": 4,
+        },
+    }
+
+
+def test_multi_gmail_readiness_dispatches_to_readonly_body_route():
+    handlers = _handlers()
+
+    result = asyncio.run(
+        handlers["prove_multi_gmail_readiness"](
+            accounts=["jwalinshah13@gmail.com", "jshah1331@gmail.com"],
+        )
+    )
+
+    assert result == {
+        "method": "POST",
+        "path": "/gateway/gmail-readiness",
+        "params": None,
+        "json": {
+            "accounts": ["jwalinshah13@gmail.com", "jshah1331@gmail.com"],
+        },
+    }
+
+
 def test_index_view_dispatches_to_named_index_route():
     handlers = _handlers()
 

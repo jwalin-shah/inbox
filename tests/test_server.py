@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,72 @@ from services import (
     Spreadsheet,
     ThreadSummary,
 )
+
+
+class _FakeGmailReadinessRequest:
+    def __init__(self, response):
+        self._response = response
+
+    def execute(self):
+        return self._response
+
+
+class _FakeGmailReadinessMessages:
+    def __init__(self, inbox_count: int, unread_count: int):
+        self.inbox_count = inbox_count
+        self.unread_count = unread_count
+        self.list_calls: list[dict] = []
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        if kwargs.get("q") == "in:inbox is:unread":
+            return _FakeGmailReadinessRequest({"resultSizeEstimate": self.unread_count})
+        return _FakeGmailReadinessRequest({"resultSizeEstimate": self.inbox_count})
+
+
+class _FakeGmailReadinessUsers:
+    def __init__(
+        self,
+        email: str,
+        messages_total: int,
+        threads_total: int,
+        inbox_count: int,
+        unread_count: int,
+    ):
+        self.messages_resource = _FakeGmailReadinessMessages(inbox_count, unread_count)
+        self.profile = {
+            "emailAddress": email,
+            "messagesTotal": messages_total,
+            "threadsTotal": threads_total,
+        }
+
+    def getProfile(self, userId: str):
+        return _FakeGmailReadinessRequest(self.profile)
+
+    def messages(self):
+        return self.messages_resource
+
+
+class _FakeGmailReadinessService:
+    def __init__(
+        self,
+        email: str,
+        messages_total: int,
+        threads_total: int,
+        inbox_count: int,
+        unread_count: int,
+    ):
+        self.users_resource = _FakeGmailReadinessUsers(
+            email,
+            messages_total,
+            threads_total,
+            inbox_count,
+            unread_count,
+        )
+
+    def users(self):
+        return self.users_resource
+
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -119,10 +186,30 @@ class TestHealth:
 
         db_path = tmp_path / "messages.sqlite"
         db_path.write_bytes(b"not a database")
-        inbox_server.state.gmail_services = {"a@gmail.com": MagicMock()}
+        accounts = ["a@gmail.com", "b@gmail.com", "c@gmail.com"]
+        inbox_server.state.gmail_services = {account: MagicMock() for account in accounts}
         inbox_server.state.cal_services = {"a@gmail.com": MagicMock()}
         with (
             patch("services._github_token", return_value="ghp_xxx"),
+            patch(
+                "inbox_server.google_auth_diagnostics",
+                return_value={
+                    "tokens": [
+                        {
+                            "email_hint": "token-only@gmail.com",
+                            "missing_scopes": [],
+                            "reason": "",
+                        }
+                    ],
+                    "data_connect": {
+                        "contacts": {
+                            "scopes": ["https://www.googleapis.com/auth/contacts.readonly"],
+                            "native_service": "people:v1",
+                            "readiness": "oauth_scope_reserved",
+                        }
+                    },
+                },
+            ),
             patch("inbox_server.IMSG_DB", db_path),
             patch("inbox_server.NOTES_DB", tmp_path / "missing-notes.sqlite"),
             patch("inbox_server.REMINDERS_DIR", tmp_path / "missing-reminders"),
@@ -136,10 +223,18 @@ class TestHealth:
         assert data["status"] == "degraded"
         assert data["api"]["auth_required"] is False
         providers = {provider["provider"]: provider for provider in data["providers"]}
-        assert providers["google_gmail"]["accounts"] == ["a@gmail.com"]
+        assert providers["google_gmail"]["accounts"] == accounts
+        assert providers["google_sheets"]["accounts"] == ["token-only@gmail.com"]
+        assert providers["google_sheets"]["blockers"] == [
+            "oauth_token_present_but_service_not_loaded"
+        ]
+        assert providers["google_contacts"]["accounts"] == ["token-only@gmail.com"]
+        assert providers["google_contacts"]["writable"] is False
         assert providers["github"]["configured"] is True
         assert providers["imessage"]["configured"] is True
         assert providers["imessage"]["readable"] is False
+        assert providers["job_outreach"]["provider"] == "job_outreach"
+        assert "linkedin_not_readable" in providers["job_outreach"]["blockers"]
         assert "ghp_xxx" not in resp.text
         assert "token" not in providers["github"]["notes"].lower()
 
@@ -192,6 +287,314 @@ class TestConnectorEndpoints:
         assert resp.status_code == 200
         assert resp.json()["total"] == 1
         mock_search.assert_called_once_with("hello", sources=["whatsapp"], limit=3)
+
+    def test_gateway_status_includes_parity_and_secret_name_gaps(self, client):
+        with (
+            patch(
+                "inbox_server._provider_readiness",
+                return_value=MagicMock(
+                    status="degraded",
+                    recommendations=["fix google auth"],
+                    api={"auth_required": False},
+                    providers=[],
+                ),
+            ),
+            patch(
+                "inbox_server.connectors_status",
+                return_value={
+                    "connectors": [
+                        {
+                            "id": "imessage",
+                            "binary": "imsg",
+                            "installed": False,
+                            "auth_state": "not_installed",
+                            "remediation": ["Install imsg and ensure it is on PATH."],
+                        }
+                    ],
+                    "summary": {"total": 1},
+                },
+            ),
+            patch("inbox_server.shutil.which", return_value=None),
+        ):
+            resp = client.get("/gateway/status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema_version"] == "inbox.personal_data_gateway.v0"
+        assert data["canonical_gateway"] == "inbox_server"
+        assert "built-in Gmail/Calendar/Drive" in data["built_in_tool_policy"]
+        matrix = {row["capability"]: row for row in data["parity_matrix"]}
+        assert matrix["personal_data_gateway_read_proof"]["mcp_tools"] == [
+            "prove_personal_data_gateway_reads"
+        ]
+        assert matrix["calendar_create_update"]["mutation_policy"].startswith("review_before_write")
+        assert matrix["gmail_multi_account_search_triage"]["canonical"] is True
+        assert data["missing_connector_diagnostics"][0]["id"] == "imessage"
+        assert data["infisical"]["secret_names_only"] is True
+        assert "INBOX_GOOGLE_OAUTH_CLIENT_JSON" in data["infisical"]["expected_secret_names"]
+
+    def test_gateway_read_proof_reads_gmail_calendar_and_tasks_without_mutation(self, client):
+        import inbox_server
+
+        gmail_svc = MagicMock()
+        cal_svc = MagicMock()
+        tasks_svc = MagicMock()
+        inbox_server.state.gmail_services = {"me@example.com": gmail_svc}
+        inbox_server.state.cal_services = {"me@example.com": cal_svc}
+        inbox_server.state.tasks_services = {"me@example.com": tasks_svc}
+
+        with (
+            patch(
+                "inbox_server.gmail_search",
+                return_value=[
+                    Contact(
+                        id="m1",
+                        name="Recruiter",
+                        source="gmail",
+                        snippet="Following up",
+                        thread_id="t1",
+                        gmail_account="me@example.com",
+                    )
+                ],
+            ) as mock_gmail_search,
+            patch(
+                "inbox_server.calendar_events",
+                return_value=[
+                    CalendarEvent(
+                        summary="Interview",
+                        start=datetime(2026, 6, 5, 17, 0, tzinfo=UTC),
+                        end=datetime(2026, 6, 5, 17, 30, tzinfo=UTC),
+                        account="me@example.com",
+                        event_id="evt1",
+                        calendar_id="primary",
+                    )
+                ],
+            ) as mock_calendar_events,
+            patch(
+                "inbox_server.tasks_list",
+                return_value=[
+                    GoogleTask(
+                        id="task1",
+                        title="Send follow-up",
+                        status="needsAction",
+                        list_id="@default",
+                        list_title="My Tasks",
+                    )
+                ],
+            ) as mock_tasks_list,
+            patch("inbox_server.gmail_send") as mock_gmail_send,
+            patch("inbox_server.calendar_create_event") as mock_calendar_create,
+            patch("inbox_server.calendar_update_event") as mock_calendar_update,
+            patch("inbox_server.task_create") as mock_task_create,
+        ):
+            resp = client.post(
+                "/gateway/read-proof",
+                json={"account": "me@example.com", "gmail_limit": 3, "task_limit": 4},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema_version"] == "inbox.personal_data_gateway.read_proof.v0"
+        assert data["ok"] is True
+        assert data["read_only"] is True
+        assert data["mutation_applied"] is False
+        assert data["blockers"] == []
+        assert data["sources"]["gmail"]["accounts"] == ["me@example.com"]
+        assert data["sources"]["gmail"]["items"][0]["gmail_account"] == "me@example.com"
+        assert data["sources"]["calendar"]["items"][0]["account"] == "me@example.com"
+        assert data["sources"]["tasks"]["items"][0]["account"] == "me@example.com"
+        mock_gmail_search.assert_called_once_with(gmail_svc, "me@example.com", "in:inbox", 3)
+        mock_calendar_events.assert_called_once()
+        assert mock_calendar_events.call_args.args[0] == {"me@example.com": cal_svc}
+        mock_tasks_list.assert_called_once_with(tasks_svc, "@default", False, 4)
+        mock_gmail_send.assert_not_called()
+        mock_calendar_create.assert_not_called()
+        mock_calendar_update.assert_not_called()
+        mock_task_create.assert_not_called()
+
+    def test_gateway_read_proof_reports_missing_read_accounts_as_blockers(self, client):
+        resp = client.post("/gateway/read-proof", json={"account": "missing@example.com"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["read_only"] is True
+        assert data["blockers"] == [
+            "gmail_read_failed",
+            "calendar_read_failed",
+            "tasks_read_failed",
+        ]
+        assert data["sources"]["gmail"]["errors"][0]["error"] == "gmail_account_not_loaded"
+        assert data["sources"]["calendar"]["errors"][0]["error"] == "calendar_account_not_loaded"
+        assert data["sources"]["tasks"]["errors"][0]["error"] == "tasks_account_not_loaded"
+
+    def test_gateway_read_proof_does_not_fallback_when_requested_account_missing(self, client):
+        import inbox_server
+
+        inbox_server.state.gmail_services = {"loaded@example.com": MagicMock()}
+        inbox_server.state.cal_services = {"loaded@example.com": MagicMock()}
+        inbox_server.state.tasks_services = {"loaded@example.com": MagicMock()}
+
+        with (
+            patch("inbox_server.gmail_search") as mock_gmail_search,
+            patch("inbox_server.calendar_events") as mock_calendar_events,
+            patch("inbox_server.tasks_list") as mock_tasks_list,
+        ):
+            resp = client.post("/gateway/read-proof", json={"account": "missing@example.com"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["sources"]["gmail"]["accounts"] == []
+        assert data["sources"]["calendar"]["accounts"] == []
+        assert data["sources"]["tasks"]["accounts"] == []
+        assert data["sources"]["gmail"]["errors"][0]["error"] == "gmail_account_not_loaded"
+        assert data["sources"]["calendar"]["errors"][0]["error"] == "calendar_account_not_loaded"
+        assert data["sources"]["tasks"]["errors"][0]["error"] == "tasks_account_not_loaded"
+        mock_gmail_search.assert_not_called()
+        mock_calendar_events.assert_not_called()
+        mock_tasks_list.assert_not_called()
+
+    def test_gateway_gmail_readiness_lists_required_accounts_and_counts(self, client):
+        import inbox_server
+
+        first = _FakeGmailReadinessService(
+            "jwalinshah13@gmail.com",
+            messages_total=100,
+            threads_total=50,
+            inbox_count=12,
+            unread_count=3,
+        )
+        second = _FakeGmailReadinessService(
+            "jshah1331@gmail.com",
+            messages_total=200,
+            threads_total=80,
+            inbox_count=20,
+            unread_count=4,
+        )
+        inbox_server.state.gmail_services = {
+            "jwalinshah13@gmail.com": first,
+            "jshah1331@gmail.com": second,
+        }
+
+        with (
+            patch("inbox_server.gmail_send") as mock_gmail_send,
+            patch("inbox_server.gmail_delete") as mock_gmail_delete,
+            patch("inbox_server.gmail_batch_modify") as mock_gmail_batch_modify,
+        ):
+            resp = client.post("/gateway/gmail-readiness", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema_version"] == "inbox.multi_gmail_readiness.v0"
+        assert data["ok"] is True
+        assert data["dry_run"] is True
+        assert data["read_only"] is True
+        assert data["mutation_applied"] is False
+        assert data["required_accounts"] == [
+            "jwalinshah13@gmail.com",
+            "jshah1331@gmail.com",
+        ]
+        by_account = {row["account"]: row for row in data["accounts"]}
+        assert by_account["jwalinshah13@gmail.com"]["readable"] is True
+        assert by_account["jwalinshah13@gmail.com"]["counts"] == {
+            "messages_total": 100,
+            "threads_total": 50,
+            "inbox_result_size_estimate": 12,
+            "unread_inbox_result_size_estimate": 3,
+        }
+        assert by_account["jshah1331@gmail.com"]["counts"]["unread_inbox_result_size_estimate"] == 4
+        first_calls = first.users_resource.messages_resource.list_calls
+        assert first_calls == [
+            {"userId": "me", "labelIds": ["INBOX"], "maxResults": 1},
+            {"userId": "me", "q": "in:inbox is:unread", "maxResults": 1},
+        ]
+        assert data["data_connect"]["token_diagnostics_redacted"] is True
+        mock_gmail_send.assert_not_called()
+        mock_gmail_delete.assert_not_called()
+        mock_gmail_batch_modify.assert_not_called()
+
+    def test_gateway_gmail_readiness_reports_missing_required_account(self, client):
+        import inbox_server
+
+        inbox_server.state.gmail_services = {
+            "jwalinshah13@gmail.com": _FakeGmailReadinessService(
+                "jwalinshah13@gmail.com",
+                messages_total=100,
+                threads_total=50,
+                inbox_count=12,
+                unread_count=3,
+            )
+        }
+
+        resp = client.post("/gateway/gmail-readiness", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["missing_loaded_accounts"] == ["jshah1331@gmail.com"]
+        assert data["blockers"] == ["gmail_account_not_loaded:jshah1331@gmail.com"]
+        by_account = {row["account"]: row for row in data["accounts"]}
+        assert by_account["jshah1331@gmail.com"]["errors"] == ["gmail_account_not_loaded"]
+
+    def test_ahmed_office_location_calendar_update_is_dry_run(self, client):
+        import inbox_server
+
+        event = CalendarEvent(
+            summary="Meet Ahmed",
+            start=datetime(2026, 6, 5, 10, 0, tzinfo=UTC),
+            end=datetime(2026, 6, 5, 10, 30, tzinfo=UTC),
+            account="me@example.com",
+            event_id="b9quemrk7mua74qfv1b707rik0",
+            calendar_id="primary",
+        )
+        inbox_server.state.cal_services = {"me@example.com": MagicMock()}
+        with (
+            patch(
+                "inbox_server.search_connectors",
+                return_value={
+                    "query": "Ahmed office location",
+                    "total": 1,
+                    "results": [
+                        {
+                            "source": "imessage",
+                            "id": "m1",
+                            "title": "Ahmed",
+                            "snippet": "Ahmed office location: 123 Market Street Suite 400",
+                            "timestamp": "2026-06-04T10:00:00",
+                            "metadata": {
+                                "text": "Ahmed office location: 123 Market Street Suite 400"
+                            },
+                        }
+                    ],
+                    "errors": [],
+                },
+            ) as mock_search,
+            patch("inbox_server.calendar_get_event", return_value=event) as mock_get_event,
+            patch("inbox_server.calendar_update_event") as mock_update_event,
+        ):
+            resp = client.post(
+                "/gateway/dry-run/ahmed-office-location-calendar-update",
+                json={"account": "me@example.com"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dry_run"] is True
+        assert data["mutation_applied"] is False
+        assert data["evidence"]["office_location"] == "123 Market Street Suite 400"
+        assert data["proposed_update"] == {
+            "method": "PUT",
+            "path": "/calendar/events/b9quemrk7mua74qfv1b707rik0",
+            "query": {"calendar_id": "primary", "account": "me@example.com"},
+            "body": {"location": "123 Market Street Suite 400"},
+            "requires_approval_lease": True,
+            "would_apply": False,
+        }
+        assert data["blockers"] == []
+        mock_search.assert_called_once_with("Ahmed office location", sources=["imessage"], limit=10)
+        mock_get_event.assert_called_once()
+        mock_update_event.assert_not_called()
 
     def test_search_endpoint_can_include_explicit_connector_source(self, client):
         with (
@@ -860,7 +1263,162 @@ class TestConversations:
 # ── Messages ────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def imessage_db(tmp_path):
+    import services
+
+    db_path = tmp_path / "chat.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE chat (
+                rowid INTEGER PRIMARY KEY,
+                guid TEXT,
+                display_name TEXT
+            );
+            CREATE TABLE handle (
+                rowid INTEGER PRIMARY KEY,
+                id TEXT
+            );
+            CREATE TABLE chat_handle_join (
+                chat_id INTEGER,
+                handle_id INTEGER
+            );
+            CREATE TABLE message (
+                rowid INTEGER PRIMARY KEY,
+                text TEXT,
+                is_from_me INTEGER,
+                date INTEGER,
+                handle_id INTEGER
+            );
+            CREATE TABLE chat_message_join (
+                chat_id INTEGER,
+                message_id INTEGER
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO chat(rowid, guid, display_name) VALUES (?, ?, ?)",
+            [
+                (1, "iMessage;-;+15550000001", "Alice"),
+                (2, "iMessage;-;+15550000002", "Bob"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO handle(rowid, id) VALUES (?, ?)",
+            [(1, "+15550000001"), (2, "+15550000002")],
+        )
+        conn.executemany(
+            "INSERT INTO chat_handle_join(chat_id, handle_id) VALUES (?, ?)",
+            [(1, 1), (2, 2)],
+        )
+
+        def apple_ns(value: datetime) -> int:
+            return int((value.replace(tzinfo=UTC).timestamp() - 978307200) * 1_000_000_000)
+
+        conn.executemany(
+            """
+            INSERT INTO message(rowid, text, is_from_me, date, handle_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (1, "Happy new year", 0, apple_ns(datetime(2025, 1, 1, 9)), 1),
+                (2, "Thanks Alice", 1, apple_ns(datetime(2025, 1, 1, 10)), None),
+                (3, "Lunch tomorrow?", 0, apple_ns(datetime(2025, 1, 2, 12)), 2),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO chat_message_join(chat_id, message_id) VALUES (?, ?)",
+            [(1, 1), (1, 2), (2, 3)],
+        )
+
+    services.close_sqlite_connections()
+    with patch("services.IMSG_DB", db_path):
+        yield db_path
+    services.close_sqlite_connections()
+
+
 class TestMessages:
+    def test_imessage_endpoint_reads_messages(self, client, imessage_db):
+        resp = client.get("/imessage")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [message["body"] for message in data] == [
+            "Lunch tomorrow?",
+            "Thanks Alice",
+            "Happy new year",
+        ]
+        assert data[0]["chat_id"] == "2"
+        assert data[0]["contact"] == "Bob"
+        assert data[1]["sender"] == "Me"
+        assert data[1]["source"] == "imessage"
+
+    def test_imessage_endpoint_filters_by_contact(self, client, imessage_db):
+        resp = client.get("/imessage", params={"contact": "+15550000001"})
+
+        assert resp.status_code == 200
+        assert [message["body"] for message in resp.json()] == [
+            "Thanks Alice",
+            "Happy new year",
+        ]
+
+    def test_imessage_endpoint_filters_by_date(self, client, imessage_db):
+        resp = client.get("/imessage", params={"date": "2025-01-01"})
+
+        assert resp.status_code == 200
+        assert [message["body"] for message in resp.json()] == [
+            "Thanks Alice",
+            "Happy new year",
+        ]
+
+    def test_imessage_endpoint_rejects_invalid_date_range(self, client):
+        resp = client.get(
+            "/imessage",
+            params={"start_date": "2025-01-03", "end_date": "2025-01-01"},
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "start_date must be before end_date"
+
+    def test_imessage_links_extracts_x_urls(self, client, imessage_db):
+        import services
+
+        with sqlite3.connect(imessage_db) as conn:
+            apple_ns = int(
+                (datetime(2025, 1, 3, 12, tzinfo=UTC).timestamp() - 978307200)
+                * 1_000_000_000
+            )
+            conn.execute(
+                """
+                INSERT INTO message(rowid, text, is_from_me, date, handle_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    4,
+                    "Read this https://x.com/neural_avb/status/2063144667756310741",
+                    1,
+                    apple_ns,
+                    None,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO chat_message_join(chat_id, message_id) VALUES (?, ?)",
+                (1, 4),
+            )
+            conn.commit()
+        services.close_sqlite_connections()
+
+        resp = client.get("/imessage/links", params={"q": "x", "limit": 10})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["url"] == "https://x.com/neural_avb/status/2063144667756310741"
+        assert data[0]["sender"] == "Me"
+        assert data[0]["source"] == "imessage"
+        assert "neural_avb" in data[0]["body"]
+
     @patch("inbox_server.imsg_thread")
     def test_get_imessage_thread(self, mock_thread, populated_client):
         mock_thread.return_value = [

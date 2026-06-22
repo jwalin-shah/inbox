@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -24,6 +25,41 @@ DEFAULT_ALLOWED_HOSTS = frozenset(
     }
 )
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+_ALLOWED_CACHE_LOCK = threading.RLock()
+_ALLOWED_CACHE: set[str] | None = None
+
+
+def _normalize_host(host: str) -> str:
+    """Canonicalise a hostname for matching.
+
+    - Lowercases
+    - Strips trailing dot
+    - Strips port suffix
+    - Strips IPv6 brackets (e.g. ``[::1]`` → ``::1``)
+    """
+    host = host.strip().lower()
+    host = host.rstrip(".")
+    # Strip IPv6 brackets
+    if host.startswith("[") and "]" in host:
+        host = host[1:].split("]", 1)[0]
+    # Strip port — only when it's a numeric suffix (not IPv6 colons)
+    if host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
+        host = host.rsplit(":", 1)[0]
+    return host
+
+
+def _is_local_host(host: str) -> bool:
+    """Return True when *host* is a loopback address."""
+    return _normalize_host(host) in _LOOPBACK_HOSTS
+
+
+def _reset_allowed_hosts_cache() -> None:
+    """Invalidate the cached allowlist so the next call re-reads the env."""
+    global _ALLOWED_CACHE
+    with _ALLOWED_CACHE_LOCK:
+        _ALLOWED_CACHE = None
+
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -34,14 +70,29 @@ def local_only_enabled() -> bool:
 
 
 def allowed_hosts() -> set[str]:
-    raw = os.getenv(ALLOWLIST_ENV, "").strip()
-    if not raw:
-        return set(DEFAULT_ALLOWED_HOSTS)
-    return {host.strip().lower() for host in raw.split(",") if host.strip()}
+    global _ALLOWED_CACHE
+    cached = _ALLOWED_CACHE
+    if cached is not None:
+        return cached
+    with _ALLOWED_CACHE_LOCK:
+        if _ALLOWED_CACHE is not None:
+            return _ALLOWED_CACHE
+        raw = os.getenv(ALLOWLIST_ENV, "").strip()
+        if not raw:
+            result = set(DEFAULT_ALLOWED_HOSTS)
+        else:
+            result = {host.strip().lower() for host in raw.split(",") if host.strip()}
+        _ALLOWED_CACHE = result
+        return result
 
 
 def host_allowed(host: str) -> bool:
-    host = host.lower()
+    host = _normalize_host(host)
+    if not host:
+        return False
+    # Local-only mode: only loopback addresses are allowed.
+    if local_only_enabled():
+        return _is_local_host(host)
     return any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts())
 
 
