@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 from contacts import ContactBook  # noqa: E402
 from message_index_store import DEFAULT_INDEX_DB  # noqa: E402
 from services import IMSG_DB, _openhuman_linkedin_db_path, google_auth_all  # noqa: E402
+from src.contact_dedup import MergedContact  # noqa: E402
 
 SCHEMA = "inbox.contact_relationships.v1"
 CHANNELS = ("gmail", "imessage", "linkedin", "github")
@@ -217,6 +218,24 @@ class RelationshipBook:
             sent=sent,
             context=context,
         )
+
+    def to_merged_contacts(self) -> list[MergedContact]:
+        """Export unified contacts as ``MergedContact`` objects.
+
+        One ``MergedContact`` per ``RelationshipBook`` entry, carrying
+        the merged name, email identifiers, phone identifiers, and
+        the list of channels where the contact was observed.
+        """
+        result: list[MergedContact] = []
+        for contact in self.contacts.values():
+            mc = MergedContact(
+                name=contact.name,
+                emails={i for i in contact.identifiers if "@" in i},
+                phones=[i for i in contact.identifiers if "@" not in i],
+                sources=list(contact.channels),
+            )
+            result.append(mc)
+        return result
 
 
 def _source_status(available: bool, detail: str, interactions: int = 0) -> dict[str, Any]:

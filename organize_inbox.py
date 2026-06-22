@@ -11,6 +11,8 @@ Only applies labels to matching emails.
 import sys
 
 from services import gmail_batch_modify, gmail_labels, gmail_search, google_auth_all
+from src.message_classifier import is_promotional
+from src.message_classifier import is_promotional
 
 # Label name → search query mapping
 LABEL_QUERIES = {

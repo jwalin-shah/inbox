@@ -11,7 +11,7 @@ _PROMOTIONAL_PATTERN = re.compile(
 )
 
 
-def _is_promotional(msg: str) -> bool:
+def is_promotional(msg: str) -> bool:
     """Return True when *msg* looks like marketing/promotional content.
 
     Heuristics: percent-off patterns, sale, discount, offer, deal.
