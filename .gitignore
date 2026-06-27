@@ -49,6 +49,10 @@ htmlcov/
 # llm-tldr cache
 .tldr/
 
+# Aider cache
+.aider*
+
+
 # Claude Code & local MCP memory
 .claude/
 
