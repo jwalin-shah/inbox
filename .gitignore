@@ -65,3 +65,8 @@ batch/.batch-state.lock
 
 # Hook-generated temp files
 CLAUDE.md.new
+
+# CocoIndex Code local state (keep app.py and settings.yml)
+.cocoindex_code/cocoindex.db/
+.cocoindex_code/target_sqlite.db
+.cocoindex_code/__pycache__/
