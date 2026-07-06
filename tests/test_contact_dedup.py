@@ -45,3 +45,10 @@ def test_merged_contact_add_email_ignores_non_email():
 def test_merged_contact_phones_list():
     mc = MergedContact(name="Frank", phones=["+1-555-0100", "+1-555-0101"])
     assert mc.phones == ["+1-555-0100", "+1-555-0101"]
+
+
+def test_merged_contact_normalizes_emails_from_list():
+    """__post_init__ converts a list of emails into a set."""
+    mc = MergedContact(name="Grace", emails=["grace@example.com", "grace@work.com"])
+    assert isinstance(mc.emails, set)
+    assert mc.emails == {"grace@example.com", "grace@work.com"}
