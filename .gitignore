@@ -70,3 +70,5 @@ CLAUDE.md.new
 .cocoindex_code/cocoindex.db/
 .cocoindex_code/target_sqlite.db
 .cocoindex_code/__pycache__/
+.headroom/
+coverage.json
