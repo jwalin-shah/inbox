@@ -968,3 +968,627 @@ def test_rebuild_all_threads_preserves_global_repair_path(tmp_path):
     assert rebuilt == 1
     rows = _thread_rows(store)
     assert list(rows) == [("gmail", "acct@example.com", "gmail-thread")]
+
+
+# ---------------------------------------------------------------------------
+# Utility functions — falsy input paths
+# ---------------------------------------------------------------------------
+
+
+def test_iso_from_ms_returns_now_for_falsy_input():
+    assert "T" in message_sync._iso_from_ms(0)
+    assert "T" in message_sync._iso_from_ms(None)
+    assert "T" in message_sync._iso_from_ms("")
+
+
+def test_iso_from_apple_seconds_returns_now_for_falsy_input():
+    assert "T" in message_sync._iso_from_apple_seconds(0)
+    assert "T" in message_sync._iso_from_apple_seconds(None)
+    assert "T" in message_sync._iso_from_apple_seconds(0.0)
+
+
+def test_iso_from_apple_seconds_returns_iso_for_truthy_value():
+    # Non-zero value exercises the timestamp conversion path (line 45)
+    result = message_sync._iso_from_apple_seconds(1700000000.0)
+    assert "T" in result
+    assert result == "2023-11-14T22:13:20+00:00"
+
+
+def test_iso_from_unix_seconds_returns_now_for_falsy_input():
+    assert "T" in message_sync._iso_from_unix_seconds(0)
+    assert "T" in message_sync._iso_from_unix_seconds(None)
+    assert "T" in message_sync._iso_from_unix_seconds("")
+
+
+def test_iso_from_ms_returns_proper_iso_for_positive_value():
+    result = message_sync._iso_from_ms(1700000000000)
+    assert result == "2023-11-14T22:13:20+00:00"
+
+
+def test_gmail_recipients_returns_empty_when_no_to_header():
+    assert message_sync._gmail_recipients({}) == []
+    assert message_sync._gmail_recipients({"From": "A <a@x.com>"}) == []
+
+
+def test_gmail_recipients_returns_empty_when_to_header_empty():
+    assert message_sync._gmail_recipients({"To": ""}) == []
+
+
+# ---------------------------------------------------------------------------
+# Helper error paths — AttributeError handling
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_gmail_profile_history_id_returns_empty_on_attribute_error():
+    class NoUsersService:
+        pass  # no users() at all
+
+    assert message_sync._fetch_gmail_profile_history_id(NoUsersService()) == ""
+
+
+def test_gmail_history_api_returns_none_on_attribute_error():
+    class NoHistoryService:
+        def users(self):
+            class NoHistoryUsers:
+                pass  # no history() method
+
+            return NoHistoryUsers()
+
+    assert message_sync._gmail_history_api(NoHistoryService()) is None
+
+
+# ---------------------------------------------------------------------------
+# Gmail bootstrap — empty-messages break path (line 236)
+# ---------------------------------------------------------------------------
+
+
+def test_sync_gmail_bootstrap_breaks_on_empty_messages(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    service = _FakeGmailService(
+        list_payloads={
+            "__first__": {"messages": []},
+        },
+        full_messages={},
+        profile_payload={"historyId": "9000"},
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    stats = message_sync.sync_gmail_bootstrap(store)
+    assert stats == {"acct@example.com": 0}
+
+    state = store.get_sync_state("gmail", "acct@example.com")
+    assert state is not None
+    assert state["checkpoint_type"] == message_sync.GMAIL_HISTORY_CURSOR
+    assert state["checkpoint_value"] == "9000"
+
+
+# ---------------------------------------------------------------------------
+# Gmail incremental history — dedup + error paths
+# ---------------------------------------------------------------------------
+
+
+def test_sync_gmail_incremental_history_dedup_skips_duplicate_message_ids(
+    tmp_path, monkeypatch
+):
+    """Line 332: dedup across history pages — same message ID in two pages."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.set_sync_state(
+        source="gmail",
+        account="acct@example.com",
+        checkpoint_type=message_sync.GMAIL_HISTORY_CURSOR,
+        checkpoint_value="9000",
+        status="idle",
+        metadata={
+            "cursor_mode": "history",
+            "history_id": "9000",
+            "timestamp_checkpoint_ms": "100",
+        },
+    )
+    # Same message ID appears in two separate history pages
+    service = _FakeGmailService(
+        list_payloads={},
+        full_messages={
+            "m1": _gmail_message("m1", 200, labels=["INBOX", "UNREAD"]),
+        },
+        history_payloads={
+            "__first__": {
+                "historyId": "9001",
+                "history": [
+                    {
+                        "messagesAdded": [
+                            {"message": {"id": "m1"}},
+                        ],
+                    }
+                ],
+                "nextPageToken": "page-2",
+            },
+            "page-2": {
+                "historyId": "9001",
+                "history": [
+                    {
+                        "labelsRemoved": [
+                            {"message": {"id": "m1"}, "labelIds": ["UNREAD"]}
+                        ],
+                    }
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    stats = message_sync.sync_gmail_incremental(store)
+    assert stats == {"acct@example.com": 1}
+
+
+def test_sync_gmail_incremental_history_records_error_and_raises(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.set_sync_state(
+        source="gmail",
+        account="acct@example.com",
+        checkpoint_type=message_sync.GMAIL_HISTORY_CURSOR,
+        checkpoint_value="9000",
+        status="idle",
+        metadata={
+            "cursor_mode": "history",
+            "history_id": "9000",
+            "timestamp_checkpoint_ms": "100",
+        },
+    )
+    service = _FakeGmailService(
+        list_payloads={},
+        full_messages={
+            "m1": RuntimeError("fetch failed"),
+        },
+        history_payloads={
+            "__first__": {
+                "historyId": "9001",
+                "history": [
+                    {
+                        "messagesAdded": [
+                            {"message": {"id": "m1"}},
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    with pytest.raises(RuntimeError, match="fetch failed"):
+        message_sync.sync_gmail_incremental(store)
+
+    errored = store.get_sync_state("gmail", "acct@example.com")
+    assert errored is not None
+    assert errored["status"] == "error"
+    assert "fetch failed" in errored["last_error"]
+
+
+# ---------------------------------------------------------------------------
+# Gmail incremental timestamp — empty-messages + error paths
+# ---------------------------------------------------------------------------
+
+
+def test_sync_gmail_incremental_timestamp_breaks_on_empty_messages(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.set_sync_state(
+        source="gmail",
+        account="acct@example.com",
+        checkpoint_type=message_sync.GMAIL_TIMESTAMP_CURSOR,
+        checkpoint_value="100",
+        status="idle",
+        metadata={},
+    )
+    service = _FakeGmailService(
+        list_payloads={
+            "__first__": {"messages": []},
+        },
+        full_messages={},
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    stats = message_sync.sync_gmail_incremental(store)
+    # Falls back to timestamp mode because no history cursor
+    assert stats == {"acct@example.com": 0}
+
+
+def test_sync_gmail_incremental_timestamp_records_error_and_raises(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.set_sync_state(
+        source="gmail",
+        account="acct@example.com",
+        checkpoint_type=message_sync.GMAIL_TIMESTAMP_CURSOR,
+        checkpoint_value="100",
+        status="idle",
+        metadata={},
+    )
+    service = _FakeGmailService(
+        list_payloads={
+            "__first__": RuntimeError("api error"),
+        },
+        full_messages={},
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    with pytest.raises(RuntimeError, match="api error"):
+        message_sync.sync_gmail_incremental(store)
+
+    errored = store.get_sync_state("gmail", "acct@example.com")
+    assert errored is not None
+    assert errored["status"] == "error"
+    assert "api error" in errored["last_error"]
+
+
+# ---------------------------------------------------------------------------
+# iMessage sync — non-empty body path (exercises _imessage_item)
+# ---------------------------------------------------------------------------
+
+
+def test_sync_imessage_incremental_with_non_empty_body_upserts_item(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    monkeypatch.setattr(
+        message_sync,
+        "_imessage_messages_after",
+        lambda _last_rowid: [
+            {
+                "message_rowid": 1,
+                "text": "Hello from iMessage",
+                "ts": 0,
+                "is_from_me": 1,
+                "sender_id": None,
+                "chat_id": 42,
+            },
+        ],
+    )
+
+    stats = message_sync.sync_imessage_incremental(store)
+    assert stats == {"local": 1}
+
+    state = store.get_sync_state("imessage", "local")
+    assert state is not None
+    assert state["checkpoint_value"] == "1"
+    assert state["metadata"]["messages_processed"] == 1
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT sender, kind FROM items WHERE external_id = '1'"
+        ).fetchone()
+    assert row["sender"] == "Me"
+    assert row["kind"] == "imessage"
+
+
+def test_sync_imessage_incremental_with_multiple_items_counts_correctly(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    monkeypatch.setattr(
+        message_sync,
+        "_imessage_messages_after",
+        lambda _last_rowid: [
+            {
+                "message_rowid": 1,
+                "text": "First msg",
+                "ts": 0,
+                "is_from_me": 0,
+                "sender_id": "+15551234567",
+                "chat_id": 42,
+            },
+            {
+                "message_rowid": 2,
+                "text": "Second msg",
+                "ts": 0,
+                "is_from_me": 1,
+                "sender_id": None,
+                "chat_id": 42,
+            },
+        ],
+    )
+
+    stats = message_sync.sync_imessage_incremental(store)
+    assert stats == {"local": 2}
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT sender, external_id FROM items ORDER BY external_id").fetchall()
+    assert rows[0]["sender"] == "+15551234567"
+    assert rows[0]["external_id"] == "1"
+    assert rows[1]["sender"] == "Me"
+    assert rows[1]["external_id"] == "2"
+
+
+def test_sync_imessage_incremental_fires_progress_update(tmp_path, monkeypatch):
+    """Lines 540-549: progress update when count % IMESSAGE_PROGRESS_EVERY == 0."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    monkeypatch.setattr(message_sync, "IMESSAGE_PROGRESS_EVERY", 2)
+
+    monkeypatch.setattr(
+        message_sync,
+        "_imessage_messages_after",
+        lambda _last_rowid: [
+            {
+                "message_rowid": i,
+                "text": f"msg {i}",
+                "ts": 0,
+                "is_from_me": 1,
+                "sender_id": None,
+                "chat_id": 42,
+            }
+            for i in range(1, 5)  # 4 messages, progress at 2 and 4
+        ],
+    )
+
+    stats = message_sync.sync_imessage_incremental(store)
+    assert stats == {"local": 4}
+
+    state = store.get_sync_state("imessage", "local")
+    assert state is not None
+    assert state["checkpoint_value"] == "4"
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp incremental — checkpoint-skip + empty-body paths
+# ---------------------------------------------------------------------------
+
+
+def test_sync_whatsapp_incremental_skips_already_synced_messages(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    db_path = tmp_path / "openhuman" / "workspace" / "whatsapp_data" / "whatsapp_data.db"
+    _create_openhuman_whatsapp_db(db_path)
+    monkeypatch.setattr(message_sync, "_openhuman_whatsapp_db_path", lambda: db_path)
+
+    # Bootstrap first
+    first = message_sync.sync_whatsapp_bootstrap(store)
+    assert first == {"acct-1": 2}
+
+    # Incremental should skip all (timestamps at or below checkpoint)
+    second = message_sync.sync_whatsapp_incremental(store)
+    assert second == {}
+
+
+def test_sync_whatsapp_incremental_skips_empty_body_messages(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    db_path = tmp_path / "openhuman" / "workspace" / "whatsapp_data" / "whatsapp_data.db"
+    _create_openhuman_whatsapp_db(db_path)
+
+    # Add a new message with empty body after the initial data
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO wa_messages
+        (account_id, chat_id, message_id, sender, from_me, body, timestamp, message_type, source, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("acct-1", "chat-1@c.us", "m3", "Alice", 0, "", 1_700_000_200, "chat", "cdp-indexeddb", 1),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(message_sync, "_openhuman_whatsapp_db_path", lambda: db_path)
+
+    first = message_sync.sync_whatsapp_bootstrap(store)
+    assert first == {"acct-1": 2}
+
+    # Incremental should skip m3 because body is empty
+    second = message_sync.sync_whatsapp_incremental(store)
+    assert second == {}
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn incremental — empty-body path
+# ---------------------------------------------------------------------------
+
+
+def test_sync_linkedin_incremental_skips_empty_body_messages(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    db_path = tmp_path / "openhuman" / "workspace" / "linkedin_data" / "linkedin_data.db"
+    _create_openhuman_linkedin_db(db_path)
+
+    # Add a new message with empty body
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO li_messages
+        (account_id, thread_id, message_id, sender, sender_profile_url, from_me, body, timestamp, source_url, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("acct-li", "thread-1", "m3", "Alice Recruiter",
+         "https://www.linkedin.com/in/alice/", 0, "",
+         1_700_000_200,
+         "https://www.linkedin.com/messaging/thread/thread-1/", 1),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(message_sync, "_openhuman_linkedin_db_path", lambda: db_path)
+
+    first = message_sync.sync_linkedin_bootstrap(store)
+    assert first == {"acct-li": 2}
+
+    # Incremental should skip m3 because body is empty
+    second = message_sync.sync_linkedin_incremental(store)
+    assert second == {}
+
+
+# ---------------------------------------------------------------------------
+# OpenHuman DB — no-database paths
+# ---------------------------------------------------------------------------
+
+
+def test_openhuman_whatsapp_rows_returns_empty_when_no_db(monkeypatch):
+    monkeypatch.setattr(message_sync, "_openhuman_whatsapp_db_path", lambda: None)
+    rows = message_sync._openhuman_whatsapp_rows()
+    assert rows == []
+
+
+def test_openhuman_linkedin_rows_returns_empty_when_no_db(monkeypatch):
+    monkeypatch.setattr(message_sync, "_openhuman_linkedin_db_path", lambda: None)
+    rows = message_sync._openhuman_linkedin_rows()
+    assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# Progress-update paths — WhatsApp + LinkedIn
+# ---------------------------------------------------------------------------
+
+
+def test_sync_whatsapp_bootstrap_progress_update_fires_at_progress_interval(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    db_path = tmp_path / "openhuman" / "workspace" / "whatsapp_data" / "whatsapp_data.db"
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE wa_chats (
+            account_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '', is_group INTEGER NOT NULL DEFAULT 0,
+            last_message_ts INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, chat_id)
+        );
+        CREATE TABLE wa_messages (
+            account_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+            message_id TEXT NOT NULL, sender TEXT NOT NULL DEFAULT '',
+            sender_jid TEXT, from_me INTEGER NOT NULL DEFAULT 0,
+            body TEXT NOT NULL DEFAULT '', timestamp INTEGER NOT NULL DEFAULT 0,
+            message_type TEXT, source TEXT NOT NULL DEFAULT '',
+            ingested_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, chat_id, message_id)
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO wa_chats VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("acct-1", "chat-1@c.us", "Alice", 0, 1_700_000_100, 2, 1_700_000_100),
+    )
+    # Insert enough messages to trigger at least one progress update (WHATSAPP_PROGRESS_EVERY=250)
+    for i in range(251):
+        conn.execute(
+            "INSERT INTO wa_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("acct-1", "chat-1@c.us", f"m{i}", "Alice", None, 0, f"body{i}",
+             int(1_700_000_000 + i), "chat", "cdp-indexeddb", 1),
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(message_sync, "_openhuman_whatsapp_db_path", lambda: db_path)
+    stats = message_sync.sync_whatsapp_bootstrap(store)
+    assert stats == {"acct-1": 251}
+
+
+def test_sync_linkedin_bootstrap_progress_update_fires_at_progress_interval(
+    tmp_path, monkeypatch
+):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    db_path = tmp_path / "openhuman" / "workspace" / "linkedin_data" / "linkedin_data.db"
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE li_threads (
+            account_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            profile_url TEXT NOT NULL DEFAULT '',
+            last_message_ts INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, thread_id)
+        );
+        CREATE TABLE li_messages (
+            account_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+            message_id TEXT NOT NULL, sender TEXT NOT NULL DEFAULT '',
+            sender_profile_url TEXT, from_me INTEGER NOT NULL DEFAULT 0,
+            body TEXT NOT NULL DEFAULT '', timestamp INTEGER NOT NULL DEFAULT 0,
+            source_url TEXT, ingested_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (account_id, thread_id, message_id)
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO li_threads VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("acct-li", "thread-1", "Alice Recruiter",
+         "https://www.linkedin.com/in/alice/", 1_700_000_100, 2, 1_700_000_100),
+    )
+    # Insert enough messages to trigger at least one progress update (LINKEDIN_PROGRESS_EVERY=250)
+    for i in range(251):
+        conn.execute(
+            "INSERT INTO li_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("acct-li", "thread-1", f"m{i}", "", None, 1, f"body{i}",
+             int(1_700_000_000 + i),
+             "https://www.linkedin.com/messaging/thread/thread-1/", 1),
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(message_sync, "_openhuman_linkedin_db_path", lambda: db_path)
+    stats = message_sync.sync_linkedin_bootstrap(store)
+    assert stats == {"acct-li": 251}
+
+
+# ---------------------------------------------------------------------------
+# Direct tests for smoke_contract + build_parser (subprocess tests only
+# exercise these indirectly through CLI args)
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_contract_returns_expected_shape():
+    result = message_sync.smoke_contract()
+    assert result["ok"] is True
+    assert result["entrypoint"] == "message_sync.py"
+    assert set(result["modes"]) == {"bootstrap", "incremental", "rebuild", "summary"}
+
+
+def test_build_parser_smoke_flag():
+    parser = message_sync.build_parser()
+    args = parser.parse_args(["--smoke"])
+    assert args.smoke is True
+    assert args.mode is None
+
+
+def test_build_parser_mode_argument():
+    parser = message_sync.build_parser()
+    args = parser.parse_args(["bootstrap"])
+    assert args.mode == "bootstrap"
+    assert not args.smoke
+
+
+def test_build_parser_invalid_mode_raises():
+    parser = message_sync.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["bogus"])
