@@ -78,3 +78,39 @@ def test_agent_testing_docs_define_safe_commands_and_opt_in_warnings():
     assert "uv run ruff check ." in docs
     assert "uv run pyright" in docs
     assert "Do not run live-write tests unless explicitly instructed" in docs
+
+
+def test_test_data_dir_defaults_to_tempdir_when_not_configured(monkeypatch):
+    monkeypatch.delenv("INBOX_TEST_DATA_DIR", raising=False)
+
+    from inbox_test_mode import test_data_dir
+
+    result = test_data_dir()
+    assert result.name == "inbox-test-data"
+    assert "inbox-test-data" in str(result)
+
+
+def test_test_now_returns_none_when_not_in_test_mode(monkeypatch):
+    monkeypatch.delenv("INBOX_TEST_MODE", raising=False)
+
+    from inbox_test_mode import test_now
+
+    assert test_now() is None
+
+
+def test_test_now_returns_env_value_when_test_mode_active(monkeypatch):
+    monkeypatch.setenv("INBOX_TEST_MODE", "1")
+    monkeypatch.setenv("INBOX_TEST_NOW", "2026-07-06T12:00:00")
+
+    from inbox_test_mode import test_now
+
+    assert test_now() == "2026-07-06T12:00:00"
+
+
+def test_test_now_returns_none_when_env_empty_in_test_mode(monkeypatch):
+    monkeypatch.setenv("INBOX_TEST_MODE", "1")
+    monkeypatch.delenv("INBOX_TEST_NOW", raising=False)
+
+    from inbox_test_mode import test_now
+
+    assert test_now() is None
