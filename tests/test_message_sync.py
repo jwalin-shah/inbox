@@ -1592,3 +1592,418 @@ def test_build_parser_invalid_mode_raises():
     parser = message_sync.build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["bogus"])
+
+
+# ---------------------------------------------------------------------------
+# _create_imessage_db — helper for _imessage_messages_after tests
+# ---------------------------------------------------------------------------
+
+
+def _create_imessage_db(db_path: Path) -> None:
+    """Create a minimal iMessage chat.db for testing _imessage_messages_after."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE message (
+            rowid INTEGER PRIMARY KEY,
+            text TEXT,
+            is_from_me INTEGER NOT NULL DEFAULT 0,
+            date INTEGER NOT NULL DEFAULT 0,
+            handle_id INTEGER
+        );
+        CREATE TABLE chat_message_join (
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL
+        );
+        CREATE TABLE handle (
+            rowid INTEGER PRIMARY KEY,
+            id TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO message (rowid, text, is_from_me, date, handle_id) VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, "Hello from Alice", 0, 700000000000000000, 1),
+            (2, "Reply to Alice", 1, 700000001000000000, None),
+            (3, None, 0, 700000002000000000, 1),  # NULL text — still returned by query
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
+        [(42, 1), (42, 2), (42, 3)],
+    )
+    conn.execute("INSERT INTO handle (rowid, id) VALUES (1, '+15551234567')")
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# _imessage_messages_after — lines 471-488
+# ---------------------------------------------------------------------------
+
+
+def test_imessage_messages_after_db_not_exists(monkeypatch):
+    """When IMSG_DB doesn't exist, returns empty list (lines 472-473)."""
+    monkeypatch.setattr(message_sync, "IMSG_DB", Path("/nonexistent/chat.db"))
+    result = message_sync._imessage_messages_after()
+    assert result == []
+
+
+def test_imessage_messages_after_no_filter(tmp_path, monkeypatch):
+    """Temp iMessage DB with no last_rowid — returns messages with non-NULL text."""
+    db_path = tmp_path / "chat.db"
+    _create_imessage_db(db_path)
+    monkeypatch.setattr(message_sync, "IMSG_DB", db_path)
+
+    result = message_sync._imessage_messages_after()
+    # Row 3 has NULL text → excluded by WHERE m.text IS NOT NULL
+    assert len(result) == 2
+    assert result[0]["text"] == "Hello from Alice"
+    assert result[0]["message_rowid"] == 1
+    assert result[0]["chat_id"] == 42
+    assert result[0]["is_from_me"] == 0
+    assert result[0]["sender_id"] == "+15551234567"
+    # Row 2: is_from_me=1, sender_id is None (handle_id is NULL → LEFT JOIN returns NULL)
+    assert result[1]["text"] == "Reply to Alice"
+    assert result[1]["message_rowid"] == 2
+    assert result[1]["is_from_me"] == 1
+    assert result[1]["sender_id"] is None
+
+
+def test_imessage_messages_after_with_last_rowid(tmp_path, monkeypatch):
+    """Temp iMessage DB with last_rowid=1 — returns only messages with rowid > 1 AND non-NULL text."""
+    db_path = tmp_path / "chat.db"
+    _create_imessage_db(db_path)
+    monkeypatch.setattr(message_sync, "IMSG_DB", db_path)
+
+    result = message_sync._imessage_messages_after(last_rowid=1)
+    # Row 2 has text, Row 3 has NULL text → only row 2 returned
+    assert len(result) == 1
+    assert result[0]["message_rowid"] == 2
+    assert result[0]["text"] == "Reply to Alice"
+
+
+def test_imessage_messages_after_no_matches(tmp_path, monkeypatch):
+    """DB exists but no messages after a large last_rowid — returns empty list."""
+    db_path = tmp_path / "chat.db"
+    _create_imessage_db(db_path)
+    monkeypatch.setattr(message_sync, "IMSG_DB", db_path)
+
+    result = message_sync._imessage_messages_after(last_rowid=999)
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
+# _sync_imessage_from_local_store exception handling — lines 547-549
+# ---------------------------------------------------------------------------
+
+
+def test_sync_imessage_from_local_store_records_error_and_raises(
+    tmp_path, monkeypatch
+):
+    """When _imessage_messages_after raises, record_sync_error is called and exception propagates."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    monkeypatch.setattr(
+        message_sync,
+        "_imessage_messages_after",
+        lambda _: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        message_sync.sync_imessage_incremental(store)
+
+    # Verify error was recorded via sync state
+    state = store.get_sync_state("imessage", "local")
+    assert state is not None
+    assert state.get("last_error") == "disk full"
+    assert state["status"] == "error"
+
+
+def test_sync_imessage_bootstrap_records_error_and_raises(
+    tmp_path, monkeypatch
+):
+    """Same as above but via the bootstrap (full_sync=True) path."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    monkeypatch.setattr(
+        message_sync,
+        "_imessage_messages_after",
+        lambda _: (_ for _ in ()).throw(OSError("permission denied")),
+    )
+
+    with pytest.raises(OSError, match="permission denied"):
+        message_sync.sync_imessage_bootstrap(store)
+
+    state = store.get_sync_state("imessage", "local")
+    assert state is not None
+    assert state.get("last_error") == "permission denied"
+    assert state["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# bootstrap() — lines 834-852
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_calls_all_four_syncs(tmp_path, monkeypatch):
+    """bootstrap() invokes gmail, imessage, whatsapp, and linkedin bootstrap."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    monkeypatch.setattr(
+        message_sync, "sync_gmail_bootstrap", lambda s: {"acct@x.com": 3}
+    )
+    monkeypatch.setattr(
+        message_sync, "sync_imessage_bootstrap", lambda s: {"local": 10}
+    )
+    monkeypatch.setattr(
+        message_sync, "sync_whatsapp_bootstrap", lambda s: {"wa-acct": 5}
+    )
+    monkeypatch.setattr(
+        message_sync, "sync_linkedin_bootstrap", lambda s: {"li-acct": 2}
+    )
+
+    # accept any rebuild_changed_threads call without error
+    monkeypatch.setattr(message_sync, "rebuild_changed_threads", lambda s, scopes: None)
+
+    result = message_sync.bootstrap(store)
+
+    assert result == {
+        "gmail": {"acct@x.com": 3},
+        "imessage": {"local": 10},
+        "whatsapp": {"wa-acct": 5},
+        "linkedin": {"li-acct": 2},
+    }
+
+
+def test_bootstrap_skips_empty_scopes(tmp_path, monkeypatch):
+    """rebuild_changed_threads only receives sources with non-zero counts."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    monkeypatch.setattr(message_sync, "sync_gmail_bootstrap", lambda s: {})
+    monkeypatch.setattr(message_sync, "sync_imessage_bootstrap", lambda s: {"local": 1})
+    monkeypatch.setattr(message_sync, "sync_whatsapp_bootstrap", lambda s: {})
+    monkeypatch.setattr(
+        message_sync, "sync_linkedin_bootstrap", lambda s: {"li-acct": 3}
+    )
+
+    captured_scopes: list[set] = []
+
+    def _fake_rebuild(store, scopes):
+        captured_scopes.append(scopes)
+
+    monkeypatch.setattr(message_sync, "rebuild_changed_threads", _fake_rebuild)
+
+    result = message_sync.bootstrap(store)
+
+    assert result["gmail"] == {}
+    assert result["whatsapp"] == {}
+    assert len(captured_scopes) == 1
+    combined = captured_scopes[0]
+    assert ("imessage", "local") in combined
+    assert ("linkedin", "li-acct") in combined
+    assert ("gmail", "acct@x.com") not in combined
+
+
+def test_bootstrap_rebuilds_all_sources_combined(tmp_path, monkeypatch):
+    """When all sources return items, rebuild_changed_threads sees all scopes."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    monkeypatch.setattr(
+        message_sync, "sync_gmail_bootstrap", lambda s: {"g1": 1, "g2": 2}
+    )
+    monkeypatch.setattr(
+        message_sync, "sync_imessage_bootstrap", lambda s: {"local": 1}
+    )
+    monkeypatch.setattr(
+        message_sync, "sync_whatsapp_bootstrap", lambda s: {"w1": 1}
+    )
+    monkeypatch.setattr(
+        message_sync, "sync_linkedin_bootstrap", lambda s: {}
+    )
+
+    captured_scopes: list[set] = []
+    monkeypatch.setattr(
+        message_sync,
+        "rebuild_changed_threads",
+        lambda s, scopes: captured_scopes.append(scopes),
+    )
+
+    message_sync.bootstrap(store)
+
+    assert len(captured_scopes) == 1
+    combined = captured_scopes[0]
+    assert combined == {
+        ("gmail", "g1"),
+        ("gmail", "g2"),
+        ("imessage", "local"),
+        ("whatsapp", "w1"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# print_summary — lines 876-878
+# ---------------------------------------------------------------------------
+
+
+def test_print_summary_with_threads(tmp_path, capsys):
+    """print_summary prints ordered rows from the store."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _indexed_item(
+            source="gmail",
+            account="acct@x.com",
+            external_id="m1",
+            thread_id="t1",
+            created_at="2026-07-01T10:00:00+00:00",
+            subject="Team lunch",
+        )
+    )
+    store.upsert_item(
+        _indexed_item(
+            source="imessage",
+            account="local",
+            external_id="m2",
+            thread_id="t2",
+            created_at="2026-07-01T11:00:00+00:00",
+            subject="Hey",
+        )
+    )
+    store.rebuild_threads()
+
+    message_sync.print_summary(store, limit=10)
+    out = capsys.readouterr().out
+    assert out != ""
+    # Output contains source labels
+    assert "gmail" in out or "imessage" in out
+
+
+def test_print_summary_no_threads(tmp_path, capsys):
+    """print_summary with empty store prints nothing."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    message_sync.print_summary(store, limit=10)
+    out = capsys.readouterr().out
+    # No threads → loop body never executes → no output
+    assert out == ""
+
+
+# ---------------------------------------------------------------------------
+# main() — lines 907-927
+# ---------------------------------------------------------------------------
+
+
+def test_main_smoke_flag(capsys):
+    """--smoke prints smoke contract JSON and returns 0."""
+    rc = message_sync.main(["--smoke"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    data = json.loads(out)
+    assert data["ok"] is True
+
+
+def test_main_bootstrap_mode(tmp_path, monkeypatch, capsys):
+    """main with 'bootstrap' mode calls bootstrap and prints result."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    monkeypatch.setattr(
+        message_sync, "MessageIndexStore", lambda db_path: store
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "bootstrap",
+        lambda s: {"gmail": {}, "imessage": {"local": 5}, "whatsapp": {}, "linkedin": {}},
+    )
+    monkeypatch.setattr(message_sync, "rebuild_changed_threads", lambda s, sc: None)
+
+    rc = message_sync.main(["bootstrap"])
+    assert rc == 0
+    assert "local" in capsys.readouterr().out
+
+
+def test_main_incremental_mode(tmp_path, monkeypatch, capsys):
+    """main with 'incremental' mode calls incremental and prints result."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    monkeypatch.setattr(
+        message_sync, "MessageIndexStore", lambda db_path: store
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "incremental",
+        lambda s: {"gmail": {"acct@x.com": 1}, "imessage": {}, "whatsapp": {}, "linkedin": {}},
+    )
+    monkeypatch.setattr(message_sync, "rebuild_changed_threads", lambda s, sc: None)
+
+    rc = message_sync.main(["incremental"])
+    assert rc == 0
+    assert "acct@x.com" in capsys.readouterr().out
+
+
+def test_main_rebuild_mode(tmp_path, monkeypatch, capsys):
+    """main with 'rebuild' mode calls rebuild_all_threads and prints result."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    monkeypatch.setattr(
+        message_sync, "MessageIndexStore", lambda db_path: store
+    )
+    monkeypatch.setattr(message_sync, "rebuild_all_threads", lambda s: 7)
+
+    rc = message_sync.main(["rebuild"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert "7" in out
+
+
+def test_main_summary_mode(tmp_path, monkeypatch, capsys):
+    """main with 'summary' mode calls print_summary."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    monkeypatch.setattr(
+        message_sync, "MessageIndexStore", lambda db_path: store
+    )
+    monkeypatch.setattr(message_sync, "print_summary", lambda s, limit: None)
+
+    rc = message_sync.main(["summary"])
+    assert rc == 0
+
+
+def test_main_missing_mode_without_smoke(tmp_path, monkeypatch, capsys):
+    """main exits with error when no mode is given without --smoke."""
+    with pytest.raises(SystemExit) as exc_info:
+        message_sync.main([])
+    assert exc_info.value.code != 0
+    captured = capsys.readouterr()
+    assert "mode is required" in captured.err.lower() or "error" in captured.err.lower()
+
+
+def test_main_custom_db_path(tmp_path, monkeypatch, capsys):
+    """--db flag is passed to MessageIndexStore."""
+    db_path = tmp_path / "custom.sqlite3"
+    captured_db: list[Path | None] = []
+
+    class _CapturingStore:
+        def __init__(self, p):
+            captured_db.append(p)
+
+    monkeypatch.setattr(message_sync, "MessageIndexStore", _CapturingStore)
+    monkeypatch.setattr(message_sync, "print_summary", lambda s, limit: None)
+
+    message_sync.main(["--db", str(db_path), "summary"])
+    assert len(captured_db) == 1
+    assert captured_db[0] == db_path
+
+
+def test_main_custom_limit(tmp_path, monkeypatch):
+    """--limit flag is passed to print_summary."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    monkeypatch.setattr(
+        message_sync, "MessageIndexStore", lambda db_path: store
+    )
+
+    captured_limit: list[int] = []
+
+    def _fake_summary(s, limit):
+        captured_limit.append(limit)
+
+    monkeypatch.setattr(message_sync, "print_summary", _fake_summary)
+
+    message_sync.main(["--limit", "42", "summary"])
+    assert captured_limit == [42]
