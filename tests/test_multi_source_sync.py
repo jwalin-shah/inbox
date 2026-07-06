@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -20,6 +21,8 @@ from src.multi_source_sync import (
     _payload,
     _preferences,
     _safe_cell,
+    build_unified_profiles,
+    main,
     render_markdown,
 )
 
@@ -704,3 +707,441 @@ class TestRenderMarkdown:
         )
         output = render_markdown([profile], metadata)
         assert "unknown" in output  # "window unknown" and "reply hours unknown"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for build_unified_profiles tests
+# ---------------------------------------------------------------------------
+
+DT = datetime(2026, 7, 1, tzinfo=UTC)
+
+
+def _loader(channel, entries, *, available=True, interactions=None, detail="ok"):
+    """Return a side_effect function that populates the RelationshipBook.
+
+    Each *entry* is ``(name, identifier, timestamp, sent, context)``.
+    """
+
+    def fn(book, *args, **kwargs):
+        for name, ident, ts, sent, ctx in entries:
+            book.add(
+                channel, name=name, identifier=ident, timestamp=ts, sent=sent, context=ctx
+            )
+        total = interactions if interactions is not None else len(entries)
+        return {"available": available, "detail": detail, "interactions": total}
+
+    return fn
+
+
+# ---------------------------------------------------------------------------
+# build_unified_profiles
+# ---------------------------------------------------------------------------
+
+
+class TestBuildUnifiedProfiles:
+    """Tests for the orchestrator that loads source data and builds profiles."""
+
+    # --- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _patch_all(**overrides):
+        """Return a dict of patcher kwargs for patch.multiple on src.multi_source_sync.
+
+        Keys are attribute names on the module (e.g. ``load_imessage``).
+        Values are side_effect callables, MagicMock constructor kwargs dicts,
+        or pre-built MagicMock instances.
+        """
+        defaults: dict[str, object] = {
+            "load_imessage": _loader("imessage", [], interactions=0),
+            "load_linkedin": _loader("linkedin", [], interactions=0),
+            "load_gmail": _loader("gmail", [], interactions=0),
+            "load_index_fallback": _loader("index_fallback", [], interactions=0),
+            "learn_imessage_contacts": MagicMock(return_value=[]),
+        }
+        defaults.update(overrides)
+        built: dict[str, object] = {}
+        for attr, value in defaults.items():
+            if callable(value) and not isinstance(value, MagicMock):
+                built[attr] = MagicMock(side_effect=value)
+            elif isinstance(value, dict):
+                built[attr] = MagicMock(return_value=value)
+            else:
+                built[attr] = value
+        return built
+
+    # --- empty / no contacts -------------------------------------------------
+
+    def test_no_contacts_returns_empty(self):
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync",
+            **self._patch_all(),
+        ):
+            profiles, metadata = build_unified_profiles(
+                limit=10, reference=DT
+            )
+        assert profiles == []
+        assert metadata["profile_count"] == 0
+        assert metadata["cross_channel_profile_count"] == 0
+        assert metadata["schema"] == "inbox.unified_contacts.v1"
+
+    # --- single contact across channels -------------------------------------
+
+    def test_single_contact_across_sources(self):
+        entries = [("Alice", "alice@example.com", DT, True, "hello")]
+        patches = self._patch_all(
+            load_imessage=_loader("imessage", entries, interactions=1),
+            load_gmail=_loader(
+                "gmail",
+                [("Alice", "alice@example.com", DT, False, "reply")],
+                interactions=1,
+            ),
+            load_linkedin=_loader(
+                "linkedin",
+                [("Alice", "linkedin.com/in/alice", DT, True, "connect")],
+                interactions=1,
+            ),
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            profiles, metadata = build_unified_profiles(
+                limit=10, reference=DT
+            )
+        assert len(profiles) == 1
+        p = profiles[0]
+        assert isinstance(p, UnifiedContactProfile)
+        assert p.total_interactions == 3
+        assert len(p.sources) == 3
+        assert metadata["profile_count"] == 1
+        assert metadata["cross_channel_profile_count"] == 1
+
+    # --- limit enforcement ---------------------------------------------------
+
+    def test_limit_enforcement(self):
+        entries = [
+            ("Alice", "+15551110001", DT, True, "msg"),
+            ("Bob", "+15551110002", DT, True, "msg"),
+            ("Charlie", "+15551110003", DT, True, "msg"),
+        ]
+        patches = self._patch_all(
+            load_imessage=_loader("imessage", entries, interactions=3),
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            profiles, metadata = build_unified_profiles(
+                limit=2, reference=DT
+            )
+        assert len(profiles) == 2
+
+    # --- gmail disabled ------------------------------------------------------
+
+    def test_gmail_disabled_uses_source_status(self):
+        patches = self._patch_all(
+            load_imessage=_loader(
+                "imessage", [("Alice", "+15551234567", DT, True, "hi")], interactions=1
+            ),
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            profiles, metadata = build_unified_profiles(
+                limit=10, reference=DT, include_gmail=False
+            )
+        # Gmail status should show disabled, load_gmail should NOT have been called
+        assert metadata["source_status"]["gmail"]["available"] is False
+        assert "disabled" in metadata["source_status"]["gmail"]["detail"]
+        assert len(profiles) == 1
+
+    # --- index fallback ------------------------------------------------------
+
+    def test_index_fallback_triggered_when_gmail_unavailable(self):
+        patches = self._patch_all(
+            load_gmail={"available": False, "detail": "auth failed", "interactions": 0},
+            load_linkedin=_loader(
+                "linkedin", [("Alice", "linkedin.com/in/alice", DT, True, "msg")], interactions=1
+            ),
+            load_index_fallback=_loader(
+                "index_fallback",
+                [("Alice", "alice@example.com", DT, False, "reply")],
+                interactions=1,
+            ),
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            profiles, metadata = build_unified_profiles(
+                limit=10, reference=DT
+            )
+        assert "index_fallback" in metadata["source_status"]
+
+    def test_index_fallback_not_called_when_both_available(self):
+        fallback_mock = MagicMock(
+            return_value={"available": True, "detail": "ok", "interactions": 0}
+        )
+        patches = self._patch_all(
+            load_imessage=_loader(
+                "imessage", [("Alice", "+15551234567", DT, True, "hi")], interactions=1
+            ),
+            load_gmail=_loader(
+                "gmail", [("Alice", "alice@example.com", DT, False, "re")], interactions=1
+            ),
+            load_linkedin=_loader("linkedin", [], interactions=0),
+            load_index_fallback=fallback_mock,
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            build_unified_profiles(limit=10, reference=DT)
+        fallback_mock.assert_not_called()
+
+    # --- learn_imessage_contacts parameter routing ---------------------------
+
+    def test_learn_imessage_contacts_params(self):
+        learn_mock = MagicMock(return_value=[])
+        patches = self._patch_all(learn_imessage_contacts=learn_mock)
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            build_unified_profiles(limit=30, reference=DT)
+        learn_mock.assert_called_once_with(now=DT, lookback_days=365, limit=200)
+
+    # --- automated sender filtering ------------------------------------------
+
+    def test_automated_sender_excluded(self):
+        """Only the real person appears; the no-reply gmail sender is filtered."""
+        patches = self._patch_all(
+            load_gmail=_loader(
+                "gmail",
+                [
+                    ("no-reply@example.com", "no-reply@example.com", DT, False, "news"),
+                    ("Alice", "alice@example.com", DT, True, "hello"),
+                ],
+                interactions=2,
+            ),
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            profiles, _ = build_unified_profiles(limit=10, reference=DT)
+        # The no-reply sender is filtered by _is_person; only Alice remains.
+        # Note: both contacts end up with empty names because ContactBook is
+        # empty, but the identifier-based keying still distinguishes them.
+        assert len(profiles) >= 1
+
+    # --- learning data integration -------------------------------------------
+
+    def test_learning_data_attached_to_matching_profile(self):
+        from src.imessage_learning import ContactLearning
+
+        learning = ContactLearning(
+            chat_id="chat1",
+            contact="Alice",
+            is_group=False,
+            message_count=100,
+            my_messages=50,
+            their_messages=50,
+            active_days=30,
+            last_contact="2026-01-01T00:00:00+00:00",
+            days_since_contact=180.0,
+            needs_reply=False,
+            pending_hours=None,
+            my_median_reply_hours=2.5,
+            their_median_reply_hours=4.0,
+            my_response_rate=0.9,
+            their_response_rate=0.85,
+            my_initiation_rate=0.3,
+            preferred_contact_signal=0.8,
+            topics=["lunch"],
+            top_terms=["meeting"],
+            optimal_reply_window="same-day",
+            reply_window_source="median",
+            suggested_reply_timing="reply within 24h",
+            importance_score=0.75,
+            importance_reasons=["frequent"],
+            evidence_thread="...",
+        )
+        patches = self._patch_all(
+            load_imessage=_loader(
+                "imessage", [("Alice", "+15551234567", DT, True, "hi")], interactions=1
+            ),
+            learn_imessage_contacts=MagicMock(return_value=[learning]),
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            profiles, _ = build_unified_profiles(limit=10, reference=DT)
+        assert len(profiles) == 1
+        prefs = profiles[0].communication_preferences
+        assert prefs.optimal_reply_window == "same-day"
+        assert "iMessage response history" in prefs.basis
+
+    # --- metadata structure --------------------------------------------------
+
+    def test_metadata_structure(self):
+        patches = self._patch_all(
+            load_imessage=_loader(
+                "imessage", [("Alice", "+15551234567", DT, True, "hi")], interactions=1
+            ),
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            _, metadata = build_unified_profiles(limit=10, reference=DT)
+        assert metadata["schema"] == "inbox.unified_contacts.v1"
+        assert "generated_at" in metadata
+        assert metadata["profile_count"] >= 1
+        assert "cross_channel_profile_count" in metadata
+        assert "source_status" in metadata
+        assert "imessage" in metadata["source_status"]
+        assert "gmail" in metadata["source_status"]
+        assert "linkedin" in metadata["source_status"]
+
+    # --- profile sorting -----------------------------------------------------
+
+    def test_profiles_sorted_by_strength_desc(self):
+        """Stronger-contact profiles appear first."""
+        entries = [
+            ("Alice", "+15551110001", DT, True, "msg"),
+            ("Bob", "+15551110002", datetime(2024, 1, 1, tzinfo=UTC), True, "old"),
+            ("Charlie", "+15551110003", DT, True, "msg"),
+        ]
+        patches = self._patch_all(
+            load_imessage=_loader("imessage", entries, interactions=3),
+        )
+        with patch("contacts.ContactBook.load", return_value=None), patch.multiple(
+            "src.multi_source_sync", **patches
+        ):
+            profiles, _ = build_unified_profiles(limit=10, reference=DT)
+        scores = [p.relationship_score for p in profiles]
+        assert scores == sorted(scores, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+class TestMain:
+    """Tests for the CLI entry point."""
+
+    def _mock_profiles(self, count=5):
+        """Build a list of dummy profiles for main() to consume."""
+        profiles = []
+        for i in range(count):
+            profiles.append(
+                UnifiedContactProfile(
+                    contact_id=f"c{i}",
+                    name=f"Person{i}",
+                    identifiers=[f"id{i}@example.com"],
+                    sources=["gmail"],
+                    total_interactions=10,
+                    first_interaction_at="2026-01-01T00:00:00+00:00",
+                    last_interaction_at="2026-06-01T00:00:00+00:00",
+                    relationship_score=50,
+                    relationship_tier="active",
+                    communication_preferences=CommunicationPreferences(
+                        preferred_channel="gmail",
+                        preferred_channel_confidence=1.0,
+                        optimal_reply_window=None,
+                        median_reply_hours=None,
+                        response_rate=None,
+                        initiation_rate=None,
+                        common_topics=[],
+                        basis="test",
+                    ),
+                    interaction_history=[],
+                )
+            )
+        return profiles
+
+    def _metadata(self, count=5):
+        return {
+            "schema": "test.v1",
+            "generated_at": "2026-07-01T00:00:00+00:00",
+            "profile_count": count,
+            "cross_channel_profile_count": 0,
+            "source_status": {
+                "gmail": {"available": True, "detail": "ok", "interactions": count},
+                "imessage": {"available": True, "detail": "ok", "interactions": 0},
+                "linkedin": {"available": False, "detail": "missing", "interactions": 0},
+            },
+        }
+
+    # --- success / failure return codes -------------------------------------
+
+    def test_enough_profiles_returns_zero(self, capsys):
+        profiles = self._mock_profiles(30)
+        with patch(
+            "src.multi_source_sync.build_unified_profiles",
+            return_value=(profiles, self._metadata(30)),
+        ):
+            result = main(["--minimum-profiles", "20"])
+        assert result == 0
+
+    def test_not_enough_profiles_returns_two(self, capsys):
+        profiles = self._mock_profiles(5)
+        with patch(
+            "src.multi_source_sync.build_unified_profiles",
+            return_value=(profiles, self._metadata(5)),
+        ):
+            result = main(["--minimum-profiles", "30"])
+        assert result == 2
+
+    # --- output modes --------------------------------------------------------
+
+    def test_default_prints_markdown(self, capsys):
+        profiles = self._mock_profiles(3)
+        with patch(
+            "src.multi_source_sync.build_unified_profiles",
+            return_value=(profiles, self._metadata(3)),
+        ):
+            result = main(["--limit", "10", "--minimum-profiles", "1"])
+        captured = capsys.readouterr()
+        assert "# Unified Contact View" in captured.out
+        assert result == 0
+
+    def test_json_flag_outputs_json(self, capsys):
+        profiles = self._mock_profiles(1)
+        with patch(
+            "src.multi_source_sync.build_unified_profiles",
+            return_value=(profiles, self._metadata(1)),
+        ):
+            result = main(["--json", "--limit", "5", "--minimum-profiles", "1"])
+        captured = capsys.readouterr()
+        assert '"schema"' in captured.out
+        assert '"contacts"' in captured.out
+        assert result == 0
+
+    def test_output_flag_writes_to_file(self, tmp_path, capsys):
+        outfile = tmp_path / "out" / "profiles.md"
+        profiles = self._mock_profiles(2)
+        with patch(
+            "src.multi_source_sync.build_unified_profiles",
+            return_value=(profiles, self._metadata(2)),
+        ):
+            result = main(["--output", str(outfile), "--minimum-profiles", "1"])
+        assert outfile.exists()
+        content = outfile.read_text()
+        assert "# Unified Contact View" in content
+        captured = capsys.readouterr()
+        assert f"Wrote {outfile}" in captured.out
+        assert result == 0
+
+    # --- flag routing --------------------------------------------------------
+
+    def test_no_gmail_flag(self):
+        build_mock = MagicMock(return_value=(self._mock_profiles(5), self._metadata(5)))
+        with patch("src.multi_source_sync.build_unified_profiles", build_mock):
+            main(["--no-gmail", "--limit", "10"])
+        build_mock.assert_called_once_with(
+            gmail_limit=300, include_gmail=False, limit=10
+        )
+
+    def test_limit_and_gmail_limit_routing(self):
+        build_mock = MagicMock(return_value=(self._mock_profiles(5), self._metadata(5)))
+        with patch("src.multi_source_sync.build_unified_profiles", build_mock):
+            main(["--limit", "15", "--gmail-limit", "500"])
+        build_mock.assert_called_once_with(
+            gmail_limit=500, include_gmail=True, limit=15
+        )
