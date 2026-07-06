@@ -148,3 +148,132 @@ class TestReadDailyNote:
 
         (tmp_vault / "daily").mkdir(parents=True, exist_ok=True)
         assert ambient_notes.read_daily_note("1999-01-01") is None
+
+
+class TestGetRecentCaptures:
+    def test_empty_when_no_daily_file(self, tmp_vault):
+        import ambient_notes
+
+        # _today_file() uses datetime.date.today() — no file exists
+        captures = ambient_notes.get_recent_captures()
+        assert captures == []
+
+    def test_parses_timestamped_sections(self, tmp_vault):
+        import datetime
+
+        import ambient_notes
+
+        daily = tmp_vault / "daily"
+        daily.mkdir(parents=True, exist_ok=True)
+        today_file = daily / f"{datetime.date.today()}.md"
+        today_file.write_text(
+            "# 2026-01-01\n\n"
+            "## 09:15\n"
+            "Morning standup notes\n\n"
+            "## 14:30\n"
+            "Afternoon review\n\n"
+        )
+
+        captures = ambient_notes.get_recent_captures()
+        assert len(captures) == 2
+        # list(reversed(captures))[-limit:] returns newest first
+        assert captures[0]["timestamp"] == "14:30"
+        assert captures[0]["summary"] == "Afternoon review"
+        assert captures[1]["timestamp"] == "09:15"
+        assert captures[1]["summary"] == "Morning standup notes"
+
+    def test_strips_markdown_from_summary(self, tmp_vault):
+        import datetime
+
+        import ambient_notes
+
+        daily = tmp_vault / "daily"
+        daily.mkdir(parents=True, exist_ok=True)
+        today_file = daily / f"{datetime.date.today()}.md"
+        today_file.write_text(
+            "# 2026-01-01\n\n"
+            "## 10:00\n"
+            "**Important** [link] `code` *italic* #tag ## header !image\n\n"
+        )
+
+        captures = ambient_notes.get_recent_captures()
+        assert len(captures) == 1
+        # All markdown formatting stripped
+        assert "Important" in captures[0]["summary"]
+        assert "link" in captures[0]["summary"]
+        assert "code" in captures[0]["summary"]
+        assert "italic" in captures[0]["summary"]
+        assert "tag" in captures[0]["summary"]
+        assert "header" in captures[0]["summary"]
+        assert "image" in captures[0]["summary"]
+        # Verify no markdown chars remain
+        for char in ["**", "[", "]", "`", "*", "#", "!"]:
+            assert char not in captures[0]["summary"]
+
+    def test_filters_empty_summary_after_stripping(self, tmp_vault):
+        import datetime
+
+        import ambient_notes
+
+        daily = tmp_vault / "daily"
+        daily.mkdir(parents=True, exist_ok=True)
+        today_file = daily / f"{datetime.date.today()}.md"
+        today_file.write_text(
+            "# 2026-01-01\n\n"
+            "## 10:00\n"
+            "**Important** meeting notes\n\n"
+            "## 11:00\n"
+            "### \n\n"  # Only formatting chars → empty after strip
+            "## 12:00\n"
+            "Lunch break\n\n"
+        )
+
+        captures = ambient_notes.get_recent_captures()
+        # The "### " section should be filtered out — only-formatting summary
+        assert len(captures) == 2
+        summaries = {c["summary"] for c in captures}
+        assert "Important meeting notes" in summaries
+        assert "Lunch break" in summaries
+
+    def test_respects_limit_parameter(self, tmp_vault):
+        import datetime
+
+        import ambient_notes
+
+        daily = tmp_vault / "daily"
+        daily.mkdir(parents=True, exist_ok=True)
+        today_file = daily / f"{datetime.date.today()}.md"
+
+        sections = ""
+        for i in range(10):
+            sections += f"## {i + 10:02d}:00\nSection {i + 1}\n\n"
+        today_file.write_text(f"# 2026-01-01\n\n{sections}")
+
+        captures = ambient_notes.get_recent_captures(limit=3)
+        assert len(captures) == 3
+        # list(reversed(captures))[-limit:] → newest first, limit=3 keeps
+        # the last 3 of the reversed list: [s3, s2, s1]
+        assert captures[0]["summary"] == "Section 3"
+        assert captures[1]["summary"] == "Section 2"
+        assert captures[2]["summary"] == "Section 1"
+
+    def test_reverse_chronological_order(self, tmp_vault):
+        import datetime
+
+        import ambient_notes
+
+        daily = tmp_vault / "daily"
+        daily.mkdir(parents=True, exist_ok=True)
+        today_file = daily / f"{datetime.date.today()}.md"
+        today_file.write_text(
+            "# 2026-01-01\n\n"
+            "## 08:00\nFirst thing\n\n"
+            "## 10:00\nSecond thing\n\n"
+            "## 15:00\nThird thing\n\n"
+        )
+
+        captures = ambient_notes.get_recent_captures(limit=10)
+        # list(reversed(captures))[-limit:] returns newest first
+        assert captures[0]["timestamp"] == "15:00"
+        assert captures[1]["timestamp"] == "10:00"
+        assert captures[2]["timestamp"] == "08:00"
