@@ -63,6 +63,15 @@ def test_public_auth_middleware_rejects_missing_or_invalid_token(monkeypatch):
     assert valid.status_code == 200
 
 
+def test_public_auth_middleware_allows_when_no_token_configured(monkeypatch):
+    """When no INBOX_MCP_TOKEN is set, auth is disabled — all requests pass."""
+    monkeypatch.delenv("INBOX_MCP_TOKEN", raising=False)
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/secure")
+    assert resp.status_code == 200
+
+
 def test_make_memory_store_uses_configured_path(tmp_path, monkeypatch):
     target = tmp_path / "mem.db"
     monkeypatch.setenv(MEMORY_DB_ENV, str(target))
