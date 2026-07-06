@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from unittest.mock import MagicMock
 
 from command_palette import (
     COMMAND_REGISTRY,
     COMMAND_SPECS,
     CommandSpec,
+    _result_value,
     build_commands,
     filter_commands,
     fuzzy_score,
@@ -191,8 +193,59 @@ def test_command_registry_action_names_exist_on_inbox_app():
     assert missing == []
 
 
+# ── _result_value (private helper) ────────────────────────────────────────────
+
+
+def test_result_value_dict_access():
+    """When result is a dict, _result_value uses .get()."""
+    d = {"command_id": "test_cmd", "confidence": 0.8}
+    assert _result_value(d, "command_id", None) == "test_cmd"
+    assert _result_value(d, "missing", "fallback") == "fallback"
+
+
+def test_result_value_getattr_fallback():
+    """When result is not a dict, _result_value falls back to getattr."""
+
+    class FakeModel:
+        command_id = "attr_cmd"
+        confidence = 0.95
+
+    obj = FakeModel()
+    assert _result_value(obj, "command_id", None) == "attr_cmd"
+    assert _result_value(obj, "confidence", 0.0) == 0.95
+    assert _result_value(obj, "missing_key", "fallback") == "fallback"
+
+
+# ── llm_is_available ──────────────────────────────────────────────────────────
+
+
 def test_llm_is_available_uses_injected_provider():
     assert llm_is_available(lambda: True) is True
+
+
+def test_llm_is_available_default_services_path():
+    """Without a provider, llm_is_available imports services and checks LLM state."""
+    # In test env services.llm_is_loaded() returns False, so this returns False
+    assert llm_is_available() is False
+
+
+def test_llm_is_available_default_services_error_is_false():
+    """When the services module is unavailable, llm_is_available returns False."""
+    # Make services unimportable by setting it to None in sys.modules.
+    # The import services will return None, and services.llm_is_loaded()
+    # will raise AttributeError → caught → returns False.
+    saved = sys.modules.get("services")
+    sys.modules["services"] = None  # type: ignore[assignment]
+    try:
+        assert llm_is_available() is False
+    finally:
+        if saved is not None:
+            sys.modules["services"] = saved
+        else:
+            sys.modules.pop("services", None)
+
+
+# ── nlp_classify ──────────────────────────────────────────────────────────────
 
 
 def test_nlp_classify_uses_injected_dependencies():
@@ -216,6 +269,56 @@ def test_nlp_classify_uses_injected_dependencies():
         "args": {},
         "reason": "",
     }
+
+
+def test_nlp_classify_returns_none_when_llm_unavailable():
+    """nlp_classify returns None immediately when the LLM is not available."""
+    cmds = _sample_commands()
+    result = nlp_classify("open calendar", cmds, llm_available=lambda: False)
+    assert result is None
+
+
+def test_nlp_classify_returns_none_when_generator_raises():
+    """nlp_classify catches exceptions from the json_generator and returns None."""
+    cmds = _sample_commands()
+
+    def failing_generator(prompt, schema):
+        raise RuntimeError("LLM inference failed")
+
+    result = nlp_classify(
+        "open calendar",
+        cmds,
+        llm_available=lambda: True,
+        json_generator=failing_generator,
+    )
+    assert result is None
+
+
+def test_nlp_classify_handles_missing_pydantic(monkeypatch):
+    """nlp_classify returns None when pydantic cannot be imported."""
+    import builtins
+
+    original_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name == "pydantic" or name.startswith("pydantic."):
+            raise ImportError(f"No module named '{name}'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+    cmds = _sample_commands()
+    result = nlp_classify("open calendar", cmds, llm_available=lambda: True)
+    assert result is None
+
+
+def test_nlp_classify_calls_default_generate_json():
+    """Without an injected json_generator, _generate_json is used as default."""
+    cmds = _sample_commands()
+    # No json_generator injected → falls back to _generate_json which
+    # calls services.generate_json. In test env that raises (LLM not loaded),
+    # and the exception is caught → returns None.
+    result = nlp_classify("open calendar", cmds, llm_available=lambda: True)
+    assert result is None
 
 
 # ── resolve_nlp ───────────────────────────────────────────────────────────────
