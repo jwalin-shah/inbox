@@ -1,6 +1,8 @@
 import asyncio
 import inspect
 
+import pytest
+
 from tools_registry import TOOLS, register_all
 
 INDEX_TOOL_NAMES = {
@@ -251,6 +253,33 @@ def test_chat_path_params_are_encoded_and_limit_remains_query_value():
     assert result["path"] == "/messages/imessage/chat%2Fwith%20spaces%23frag%3Fx%3D1"
     assert result["params"] == {"limit": 25}
     assert result["json"] is None
+
+
+def test_confirm_gated_tool_raises_when_confirm_not_true():
+    """Calling a confirm-gated tool without confirm=True must raise ValueError."""
+    handlers = _handlers()
+
+    with pytest.raises(ValueError, match="requires explicit confirmation"):
+        asyncio.run(
+            handlers["send_imessage"](
+                conv_id="chat/with spaces",
+                text="hello / raw",
+            )
+        )
+
+
+def test_confirm_gated_tool_raises_when_confirm_explicitly_false():
+    """Calling a confirm-gated tool with confirm=False must raise ValueError."""
+    handlers = _handlers()
+
+    with pytest.raises(ValueError, match="requires explicit confirmation"):
+        asyncio.run(
+            handlers["send_imessage"](
+                conv_id="chat/with spaces",
+                text="hello / raw",
+                confirm=False,
+            )
+        )
 
 
 def test_body_params_are_not_url_encoded():
