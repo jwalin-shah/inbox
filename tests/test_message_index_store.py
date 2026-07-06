@@ -1,3 +1,5 @@
+import sqlite3
+
 from message_index_store import IndexedItem, MessageIndexStore
 
 
@@ -471,3 +473,256 @@ def test_set_sync_state_is_idempotent(tmp_path):
     assert len(states) == 1
     assert states[0]["checkpoint_value"] == "12345"
     assert states[0]["metadata"] == metadata
+
+
+# ── index_counts ──────────────────────────────────────────────────────────────
+
+
+def test_index_counts_returns_item_and_thread_counts(tmp_path):
+    """index_counts() returns accurate counts of items and threads."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="m1",
+            thread_id="t1",
+            sender="Alice",
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="m2",
+            thread_id="t2",
+            sender="Bob",
+        )
+    )
+    store.rebuild_threads()
+
+    counts = store.index_counts()
+
+    assert counts == {"items": 2, "threads": 2}
+
+
+def test_index_counts_on_empty_store(tmp_path):
+    """index_counts() returns zeros for an empty store."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    counts = store.index_counts()
+    assert counts == {"items": 0, "threads": 0}
+
+
+# ── _migrate_schema ──────────────────────────────────────────────────────────
+
+
+def test_migrate_schema_adds_missing_columns_to_existing_sync_state(tmp_path):
+    """_migrate_schema adds status, last_run_started_at, and metadata_json columns
+    to a pre-existing sync_state table that lacks them."""
+    db_path = tmp_path / "index.sqlite3"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        """
+        CREATE TABLE sync_state (
+            source TEXT NOT NULL,
+            account TEXT NOT NULL,
+            checkpoint_type TEXT NOT NULL,
+            checkpoint_value TEXT NOT NULL DEFAULT '',
+            last_success_at TEXT NOT NULL DEFAULT '',
+            last_full_sync_at TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (source, account)
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening the store should trigger _migrate_schema to add all three columns
+    store = MessageIndexStore(db_path)
+
+    with store._connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sync_state)")}
+    assert "status" in columns
+    assert "last_run_started_at" in columns
+    assert "metadata_json" in columns
+
+
+# ── rebuild_threads: empty-group deletion branches ───────────────────────────
+
+
+def test_rebuild_threads_empty_scoped_deletes_source_and_account_threads(tmp_path):
+    """When no items match the source+account filter, grouped is empty and the
+    elif source-and-account branch deletes threads for that scope (line 552-553)."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    # Add imessage items only — no gmail/x items exist
+    store.upsert_item(
+        _item(
+            source="imessage",
+            account="local",
+            external_id="i1",
+            thread_id="chat-1",
+            sender="Alice",
+        )
+    )
+    store.rebuild_threads()  # builds 1 thread for imessage
+
+    # Rebuild with a gmail scope that has no items — triggers empty-group path
+    rebuilt = store.rebuild_threads(source="gmail", account="x@example.com")
+
+    assert rebuilt == 0
+
+
+def test_rebuild_threads_empty_scoped_deletes_source_only_threads(tmp_path):
+    """When no items match the source-only filter, the elif source branch runs
+    DELETE FROM threads WHERE source = ? (line 556-557)."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _item(
+            source="imessage",
+            account="local",
+            external_id="i1",
+            thread_id="chat-1",
+            sender="Alice",
+        )
+    )
+    store.rebuild_threads()
+
+    rebuilt = store.rebuild_threads(source="gmail")
+
+    assert rebuilt == 0
+
+
+def test_rebuild_threads_empty_scoped_deletes_account_only_threads(tmp_path):
+    """When no items match the account-only filter, the elif account branch runs
+    DELETE FROM threads WHERE account = ? (line 558-559)."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="i1",
+            thread_id="chat-1",
+            sender="Alice",
+        )
+    )
+    store.rebuild_threads()
+
+    rebuilt = store.rebuild_threads(account="nonexistent")
+
+    assert rebuilt == 0
+
+
+def test_rebuild_threads_empty_scoped_deletes_all_threads(tmp_path):
+    """When the items table is empty and no filter is specified, grouped is empty
+    and the else branch runs DELETE FROM threads (line 560-561)."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    # No items added at all
+
+    rebuilt = store.rebuild_threads()
+
+    assert rebuilt == 0
+
+
+# ── list_threads: needs_reply filter ─────────────────────────────────────────
+
+
+def test_list_threads_filters_by_needs_reply_true(tmp_path):
+    """list_threads(needs_reply=True) returns only threads where needs_reply=1,
+    exercising the needs_reply predicate branch (lines 587-588)."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    # Thread that generates needs_reply=1 (Me sent, then external sender replied)
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="r1-me",
+            thread_id="reply-thread",
+            sender="Me",
+            subject="Hello",
+            created_at="2026-04-18T00:00:00+00:00",
+            is_read=1,
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="r1-them",
+            thread_id="reply-thread",
+            sender="Recruiter",
+            subject="Re: Hello",
+            body="Can you follow up?",
+            created_at="2026-04-18T01:00:00+00:00",
+            is_read=0,
+        )
+    )
+    # Thread that generates needs_reply=0 (automated sender)
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="a1",
+            thread_id="auto-thread",
+            sender="no-reply@newsletter.com",
+            subject="Weekly digest",
+            created_at="2026-04-18T02:00:00+00:00",
+            is_read=0,
+        )
+    )
+    store.rebuild_threads()
+
+    reply_rows = store.list_threads(limit=10, needs_reply=True)
+
+    assert len(reply_rows) == 1
+    assert reply_rows[0]["thread_id"] == "reply-thread"
+
+
+def test_list_threads_filters_by_needs_reply_false(tmp_path):
+    """list_threads(needs_reply=False) returns only threads where needs_reply=0."""
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="r1-me",
+            thread_id="reply-thread",
+            sender="Me",
+            subject="Hello",
+            created_at="2026-04-18T00:00:00+00:00",
+            is_read=1,
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="r1-them",
+            thread_id="reply-thread",
+            sender="Recruiter",
+            subject="Re: Hello",
+            body="Can you follow up?",
+            created_at="2026-04-18T01:00:00+00:00",
+            is_read=0,
+        )
+    )
+    store.upsert_item(
+        _item(
+            source="gmail",
+            account="a@example.com",
+            external_id="a1",
+            thread_id="auto-thread",
+            sender="no-reply@newsletter.com",
+            subject="Weekly digest",
+            created_at="2026-04-18T02:00:00+00:00",
+            is_read=0,
+        )
+    )
+    store.rebuild_threads()
+
+    no_reply_rows = store.list_threads(limit=10, needs_reply=False)
+
+    thread_ids = {row["thread_id"] for row in no_reply_rows}
+    assert "auto-thread" in thread_ids
+    assert "reply-thread" not in thread_ids
