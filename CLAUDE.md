@@ -379,3 +379,17 @@ Read `SESSION_BRIEF.txt` when spawned by the Master Orchestrator (`project=inbox
 - **Hooks:** Use global `~/.cursor/hooks.json` (Tokenjuice, cmux, memjuice). No project-local hook overrides.
 - **Tooling:** `llm-tldr` / `rtk` first; validate with `scripts/check_tooling.sh` and `scripts/validate_agent_safe.sh`.
 - **Queue example:** `./orch queue add --project inbox --role implementer --write-scope <path> "<task>"`
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default Matt Pocock vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout. See `docs/agents/domain.md`.
