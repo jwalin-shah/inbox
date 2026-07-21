@@ -22,7 +22,7 @@ from secrets import compare_digest, token_urlsafe
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel, StrictBool
@@ -74,6 +74,7 @@ from memory_store import MemoryStore
 from message_index_store import MessageIndexStore
 from message_sync import bootstrap as index_bootstrap_sync
 from message_sync import incremental as index_incremental_sync
+from approval_store import ApprovalStore
 from scheduler import SchedulerStore
 from service_models import ApprovalGateDecision, ApprovalLease
 from services import (
@@ -684,15 +685,13 @@ def _approval_decision(
     )
 
 
-def mint_local_approval_lease(
-    method: str,
-    path: str,
-    *,
-    body: bytes | dict[str, Any] | None = None,
-    now: datetime | None = None,
-    ttl_seconds: int = APPROVAL_LEASE_TTL_SECONDS,
-) -> str:
-    """Create a local per-action lease for tests and local approval adapters."""
+def _approval_context_for_action(
+    method: str, path: str, body: bytes | dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Compute the (rule, account_ref, resource_ref, item_count, payload_hash,
+    query_hash) tuple that a lease for this exact action would be scoped to,
+    without minting anything. Shared by mint_local_approval_lease() and
+    POST /approvals/request so the two can never compute this differently."""
     body_bytes = (
         json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
         if isinstance(body, dict)
@@ -707,25 +706,48 @@ def mint_local_approval_lease(
     if rule is None:
         raise ValueError(f"no approval route rule for {method} {path}")
     fields = _approval_body_fields(body_bytes)
-    lease_request = type(
+    fake_request = type(
         "_LeaseRequest",
         (),
         {"url": type("_Url", (), {"path": request_path})(), "query_params": query_params},
     )()
+    return {
+        "rule": rule,
+        "request_path": request_path,
+        "body_bytes": body_bytes,
+        "account_ref": _approval_account_ref(fake_request, fields),
+        "resource_ref": _approval_resource_ref(fake_request, fields),
+        "item_count": _approval_item_count(fields),
+        "payload_hash": _canonical_payload_hash(body_bytes),
+        "query_hash": _canonical_query_hash(parse_qsl(parsed_path.query, keep_blank_values=True)),
+    }
+
+
+def mint_local_approval_lease(
+    method: str,
+    path: str,
+    *,
+    body: bytes | dict[str, Any] | None = None,
+    now: datetime | None = None,
+    ttl_seconds: int = APPROVAL_LEASE_TTL_SECONDS,
+) -> str:
+    """Create a local per-action lease for tests and local approval adapters."""
+    ctx = _approval_context_for_action(method, path, body)
+    rule: ApprovalRouteRule = ctx["rule"]
     lease_id = f"lease_{token_urlsafe(18)}"
     lease = ApprovalLease(
         lease_id=lease_id,
         method=method.upper(),
-        path=request_path,
+        path=ctx["request_path"],
         provider=rule.provider,
         operation=rule.operation,
         approval_class=rule.approval_class,
         executor=rule.executor,
-        account_ref=_approval_account_ref(lease_request, fields),
-        resource_ref=_approval_resource_ref(lease_request, fields),
-        item_count=_approval_item_count(fields),
-        payload_hash=_canonical_payload_hash(body_bytes),
-        query_hash=_canonical_query_hash(parse_qsl(parsed_path.query, keep_blank_values=True)),
+        account_ref=ctx["account_ref"],
+        resource_ref=ctx["resource_ref"],
+        item_count=ctx["item_count"],
+        payload_hash=ctx["payload_hash"],
+        query_hash=ctx["query_hash"],
         not_after=(now or datetime.now(UTC)) + timedelta(seconds=ttl_seconds),
         nonce=token_urlsafe(18),
     )
@@ -1065,6 +1087,21 @@ class TaskLinkRequest(BaseModel):
     message_source: str  # "gmail" | "imessage"
     thread_id: str = ""
     account: str = ""
+
+
+class ApprovalRequestIn(BaseModel):
+    """Describes a pending guarded action, in the exact shape the lease
+    system already hashes on: method + path (+ query string) + body."""
+
+    method: str
+    path: str
+    body: dict[str, Any] | None = None
+
+
+class ApprovalDecisionIn(BaseModel):
+    approve: StrictBool
+    decided_by: str = "captain"
+    denial_reason: str = ""
 
 
 class TaskFromMessageRequest(BaseModel):
@@ -1545,6 +1582,7 @@ class ServerState:
         )
         self.dictation: DictationService = DictationService()
         self.scheduler: SchedulerStore = SchedulerStore()
+        self.approvals: ApprovalStore = ApprovalStore()
         self.index_store: MessageIndexStore = MessageIndexStore()
         self.capture_health_store: CaptureHealthStore = CaptureHealthStore()
         self.source_adapters: SourceAdapters = SourceAdapters()
@@ -2134,7 +2172,39 @@ async def require_api_token(request: Request, call_next):
     decision = await _approval_decision_for_request(request)
     if decision is not None and not decision.can_execute:
         return _deny_approval_response(decision)
-    return await call_next(request)
+    exc: BaseException | None = None
+    response = None
+    try:
+        response = await call_next(request)
+    except BaseException as caught:  # noqa: BLE001 - must audit before re-raising
+        exc = caught
+    if decision is not None and decision.can_execute:
+        # Audit every guarded write that actually reached the provider helper,
+        # regardless of which path minted its lease (approvals flow, direct
+        # mint_local_approval_lease() call, or test helper) -- including ones
+        # that blew up inside the route handler, not just non-2xx responses.
+        status_code = response.status_code if response is not None else 500
+        await asyncio.to_thread(
+            state.approvals.log_event,
+            "guarded_write_executed",
+            lease_id=request.headers.get(APPROVAL_LEASE_HEADER, ""),
+            method=request.method,
+            path=request.url.path,
+            provider=decision.provider,
+            operation=decision.operation,
+            account=decision.account,
+            resource=decision.target_resource,
+            payload_hash=decision.metadata.get("payload_hash", ""),
+            result="success" if status_code < 400 else "failed",
+            detail={
+                "status_code": status_code,
+                "executor": decision.executor,
+                **({"exception": repr(exc)} if exc is not None else {}),
+            },
+        )
+    if exc is not None:
+        raise exc
+    return response
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -3638,6 +3708,160 @@ async def create_followup_reminder(req: FollowupCreateRequest):
 async def cancel_followup_reminder(fid: int):
     ok = await asyncio.to_thread(state.scheduler.cancel_followup, fid)
     return {"ok": ok}
+
+
+# ── Approvals & Audit Log ─────────────────────────────────────────────────────
+#
+# Wires up mint_local_approval_lease()/_approval_decision_for_request() (which
+# already gate every guarded write, see APPROVAL_ROUTE_RULES above) to an
+# actual human-in-the-loop flow: a caller describes the pending action here,
+# the captain decides, and only on approval does a lease get minted. Nothing
+# here weakens the gate -- it is the only place outside tests that calls
+# mint_local_approval_lease(), and it only does so after an explicit decision
+# is recorded in the audit log.
+
+
+@app.post("/approvals/request")
+async def create_approval_request(req: ApprovalRequestIn):
+    """Record a pending guarded action for the captain to approve/deny.
+
+    Does NOT mint a lease. Caller polls GET /approvals/{request_id} (or is
+    notified some other way) and, once state == "approved", reads the
+    lease_id and supplies it as the X-Inbox-Approval-Lease header on the
+    real request.
+    """
+    method = req.method.upper()
+    if method not in APPROVAL_GUARDED_METHODS:
+        raise HTTPException(400, f"{method} is not a guarded method")
+    try:
+        ctx = await asyncio.to_thread(_approval_context_for_action, method, req.path, req.body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    rule: ApprovalRouteRule = ctx["rule"]
+    row = await asyncio.to_thread(
+        state.approvals.create_request,
+        method=method,
+        # Store the *full* path including query string -- mint_local_approval_lease()
+        # re-derives the query_hash from it on approval, so dropping the query
+        # here would let the recorded request silently cover a different query
+        # than the one the captain actually saw and approved.
+        path=req.path,
+        body=req.body,
+        provider=rule.provider,
+        operation=rule.operation,
+        approval_class=rule.approval_class,
+        executor=rule.executor,
+        account_ref=ctx["account_ref"],
+        resource_ref=ctx["resource_ref"],
+        item_count=ctx["item_count"],
+        payload_hash=ctx["payload_hash"],
+        query_hash=ctx["query_hash"],
+    )
+    await asyncio.to_thread(
+        state.approvals.log_event,
+        "approval_requested",
+        request_id=row["request_id"],
+        method=method,
+        path=ctx["request_path"],
+        provider=rule.provider,
+        operation=rule.operation,
+        account=ctx["account_ref"],
+        resource=ctx["resource_ref"],
+        payload_hash=ctx["payload_hash"],
+        actor=req.body.get("__actor", "") if isinstance(req.body, dict) else "",
+        result="pending",
+    )
+    return row
+
+
+@app.get("/approvals")
+async def list_approval_requests(
+    state_filter: str = Query("pending", alias="state"), limit: int = 100
+):
+    return await asyncio.to_thread(state.approvals.list_requests, state_filter or None, limit)
+
+
+@app.get("/approvals/{request_id}")
+async def get_approval_request(request_id: str):
+    row = await asyncio.to_thread(state.approvals.get_request, request_id)
+    if row is None:
+        raise HTTPException(404, "approval request not found")
+    return row
+
+
+@app.post("/approvals/{request_id}/decide")
+async def decide_approval_request(request_id: str, req: ApprovalDecisionIn):
+    """Captain (or an interactive script acting on the captain's behalf)
+    approves or denies a pending request. On approval, mints the real lease
+    server-side from the exact recorded action -- the caller never gets to
+    choose what the lease covers."""
+    row = await asyncio.to_thread(state.approvals.get_request, request_id)
+    if row is None:
+        raise HTTPException(404, "approval request not found")
+    if row["state"] != "pending":
+        raise HTTPException(409, f"approval request already {row['state']}")
+
+    lease_id = ""
+    if req.approve:
+        body = json.loads(row["body_json"] or "{}")
+        lease_id = await asyncio.to_thread(
+            mint_local_approval_lease, row["method"], row["path"], body=body
+        )
+
+    updated = await asyncio.to_thread(
+        state.approvals.decide_request,
+        request_id,
+        approved=bool(req.approve),
+        decided_by=req.decided_by,
+        lease_id=lease_id,
+        denial_reason=req.denial_reason,
+    )
+    if updated is None:
+        raise HTTPException(409, "approval request was decided concurrently")
+
+    await asyncio.to_thread(
+        state.approvals.log_event,
+        "approval_decided",
+        request_id=request_id,
+        lease_id=lease_id,
+        method=row["method"],
+        path=row["path"],
+        provider=row["provider"],
+        operation=row["operation"],
+        account=row["account_ref"],
+        resource=row["resource_ref"],
+        payload_hash=row["payload_hash"],
+        actor=req.decided_by,
+        result="approved" if req.approve else "denied",
+        detail={"denial_reason": req.denial_reason} if not req.approve else {},
+    )
+    if lease_id:
+        await asyncio.to_thread(
+            state.approvals.log_event,
+            "lease_minted",
+            request_id=request_id,
+            lease_id=lease_id,
+            method=row["method"],
+            path=row["path"],
+            provider=row["provider"],
+            operation=row["operation"],
+            account=row["account_ref"],
+            resource=row["resource_ref"],
+            payload_hash=row["payload_hash"],
+            actor=req.decided_by,
+            result="minted",
+        )
+    return updated
+
+
+@app.get("/audit/log")
+async def get_audit_log(limit: int = 200, event_type: str = "", request_id: str = ""):
+    return await asyncio.to_thread(
+        state.approvals.list_audit_log,
+        limit=limit,
+        event_type=event_type or None,
+        request_id=request_id or None,
+    )
 
 
 # ── Task ↔ Message Links ─────────────────────────────────────────────────────

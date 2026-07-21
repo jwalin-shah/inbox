@@ -196,6 +196,7 @@ APPROVAL_EXCEPTION_CLASSES = frozenset(
         "local_audio_capture",
         "local_write",
         "local_notification",
+        "oauth_consent",
     }
 )
 
@@ -217,6 +218,12 @@ MUTATING_METHOD_EXCEPTION_POLICY = {
     ("POST", "/calendar/free-slots"): ApprovalExceptionPolicy("pure_read", True, "calendar availability calculation"),
     ("POST", "/calendar/freebusy"): ApprovalExceptionPolicy("external_read_sync", True, "calendar free/busy provider read; no provider write"),
     ("POST", "/connectors/search"): ApprovalExceptionPolicy("pure_read", True, "connector metadata search"),
+    ("POST", "/accounts/add"): ApprovalExceptionPolicy(
+        "oauth_consent", True, "Google's own OAuth consent screen is the real approval step; a lease can't be minted before the browser flow completes"
+    ),
+    ("POST", "/accounts/reauth"): ApprovalExceptionPolicy(
+        "oauth_consent", True, "Google's own OAuth consent screen is the real approval step; a lease can't be minted before the browser flow completes"
+    ),
     ("POST", "/gateway/dry-run/ahmed-office-location-calendar-update"): ApprovalExceptionPolicy(
         "pure_read", True, "iMessage/calendar read dry-run that returns a proposal without provider write"
     ),
@@ -256,6 +263,19 @@ MUTATING_METHOD_EXCEPTION_POLICY = {
     ("POST", "/search"): ApprovalExceptionPolicy("pure_read", True, "local search with request body"),
     ("POST", "/sheets/{spreadsheet_id}/values/batch-get"): ApprovalExceptionPolicy("pure_read", True, "sheets batch read"),
     ("PUT", "/voice/config"): ApprovalExceptionPolicy("local_write", True, "local voice config file update; no provider write"),
+    ("POST", "/approvals/request"): ApprovalExceptionPolicy(
+        "local_write",
+        True,
+        "records a pending approval request in local sqlite; does not mint a "
+        "lease or reach any provider, no provider write",
+    ),
+    ("POST", "/approvals/{request_id}/decide"): ApprovalExceptionPolicy(
+        "local_write",
+        True,
+        "captain decision on a pending approval request; mints a lease into "
+        "local state on approval but performs no provider write itself, no "
+        "provider write",
+    ),
 }
 
 
@@ -1215,3 +1235,239 @@ def test_connector_sync_coercible_truthy_execute_is_rejected_before_sync_helper(
 
     assert resp.status_code == 422
     mock_sync.assert_not_called()
+
+
+# ── Approval-request / decide / audit-log workflow ───────────────────────────
+#
+# POST /approvals/request + POST /approvals/{id}/decide are the human-in-the-
+# loop front end for mint_local_approval_lease(): a caller describes the
+# pending action, the captain decides, and only on approval is a real lease
+# minted (server-side, from the exact recorded action -- the caller cannot
+# choose what gets minted). GET /audit/log is the persistent record of every
+# request, decision, mint, and executed guarded write.
+
+
+@pytest.fixture(autouse=False)
+def _isolated_approvals(approval_client, tmp_path):
+    """approval_client's ServerState() already built a real ApprovalStore at
+    the module default path; point it at a tmp_path db so tests don't share
+    state with each other or with a running dev server."""
+    import inbox_server
+    from approval_store import ApprovalStore
+
+    inbox_server.state.approvals = ApprovalStore(tmp_path / "approvals.sqlite3")
+    return approval_client
+
+
+def test_approval_request_records_pending_row_without_minting_lease(_isolated_approvals):
+    import inbox_server
+
+    resp = _isolated_approvals.post(
+        "/approvals/request",
+        json={
+            "method": "POST",
+            "path": "/tasks?account=me@example.com",
+            "body": {"title": "Ping Alice"},
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "pending"
+    assert body["lease_id"] == ""
+    assert body["provider"] == "google_tasks"
+    assert body["executor"] == "inbox.tasks.write"
+    assert body["request_id"].startswith("apr_")
+    # No lease exists yet -- nothing was minted just by describing the action.
+    assert inbox_server._approval_leases == {}
+
+
+def test_approval_request_unknown_route_is_rejected(_isolated_approvals):
+    resp = _isolated_approvals.post(
+        "/approvals/request",
+        json={"method": "POST", "path": "/not/a/guarded/route", "body": {}},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_approve_decision_mints_lease_that_executes_the_real_route_once(_isolated_approvals):
+    import inbox_server
+
+    inbox_server.state.tasks_services = {"me@example.com": MagicMock()}
+    body = {"title": "Ping Alice"}
+    created = _isolated_approvals.post(
+        "/approvals/request",
+        json={"method": "POST", "path": "/tasks?account=me@example.com", "body": body},
+    ).json()
+
+    decision = _isolated_approvals.post(
+        f"/approvals/{created['request_id']}/decide",
+        json={"approve": True, "decided_by": "captain"},
+    )
+
+    assert decision.status_code == 200
+    decided = decision.json()
+    assert decided["state"] == "approved"
+    assert decided["lease_id"].startswith("lease_")
+
+    fetched = _isolated_approvals.get(f"/approvals/{created['request_id']}")
+    assert fetched.json()["lease_id"] == decided["lease_id"]
+
+    with patch("inbox_server.task_create", return_value=True) as mock_create:
+        executed = _isolated_approvals.post(
+            "/tasks?account=me@example.com",
+            headers={"X-Inbox-Approval-Lease": decided["lease_id"]},
+            json=body,
+        )
+    assert executed.status_code == 200
+    mock_create.assert_called_once()
+
+    # Lease is single-use: replaying it must still fail closed.
+    with patch("inbox_server.task_create") as mock_replay:
+        replay = _isolated_approvals.post(
+            "/tasks?account=me@example.com",
+            headers={"X-Inbox-Approval-Lease": decided["lease_id"]},
+            json=body,
+        )
+    assert replay.status_code == 403
+    assert replay.json()["reason"] == "lease_replayed"
+    mock_replay.assert_not_called()
+
+
+def test_deny_decision_never_mints_a_lease(_isolated_approvals):
+    import inbox_server
+
+    created = _isolated_approvals.post(
+        "/approvals/request",
+        json={
+            "method": "POST",
+            "path": "/reminders",
+            "body": {"title": "No-op"},
+        },
+    ).json()
+
+    decision = _isolated_approvals.post(
+        f"/approvals/{created['request_id']}/decide",
+        json={"approve": False, "decided_by": "captain", "denial_reason": "not today"},
+    )
+
+    assert decision.status_code == 200
+    decided = decision.json()
+    assert decided["state"] == "denied"
+    assert decided["lease_id"] == ""
+    assert decided["denial_reason"] == "not today"
+    assert inbox_server._approval_leases == {}
+
+    with patch("inbox_server.reminder_create") as mock_create:
+        resp = _isolated_approvals.post("/reminders", json={"title": "No-op"})
+    assert resp.status_code == 403
+    mock_create.assert_not_called()
+
+
+def test_deciding_an_already_decided_request_is_rejected(_isolated_approvals):
+    created = _isolated_approvals.post(
+        "/approvals/request",
+        json={"method": "POST", "path": "/reminders", "body": {"title": "No-op"}},
+    ).json()
+    _isolated_approvals.post(
+        f"/approvals/{created['request_id']}/decide", json={"approve": True}
+    )
+
+    second = _isolated_approvals.post(
+        f"/approvals/{created['request_id']}/decide", json={"approve": False}
+    )
+
+    assert second.status_code == 409
+
+
+def test_decide_unknown_request_id_is_404(_isolated_approvals):
+    resp = _isolated_approvals.post(
+        "/approvals/apr_does_not_exist/decide", json={"approve": True}
+    )
+    assert resp.status_code == 404
+
+
+def test_list_approvals_defaults_to_pending_only(_isolated_approvals):
+    pending = _isolated_approvals.post(
+        "/approvals/request",
+        json={"method": "POST", "path": "/reminders", "body": {"title": "Pending one"}},
+    ).json()
+    approved = _isolated_approvals.post(
+        "/approvals/request",
+        json={"method": "POST", "path": "/reminders", "body": {"title": "Approved one"}},
+    ).json()
+    _isolated_approvals.post(f"/approvals/{approved['request_id']}/decide", json={"approve": True})
+
+    resp = _isolated_approvals.get("/approvals")
+
+    ids = {row["request_id"] for row in resp.json()}
+    assert ids == {pending["request_id"]}
+
+
+def test_audit_log_captures_full_lifecycle_of_an_approved_action(_isolated_approvals):
+    import inbox_server
+
+    inbox_server.state.tasks_services = {"me@example.com": MagicMock()}
+    body = {"title": "Audit me"}
+    created = _isolated_approvals.post(
+        "/approvals/request",
+        json={"method": "POST", "path": "/tasks?account=me@example.com", "body": body},
+    ).json()
+    decided = _isolated_approvals.post(
+        f"/approvals/{created['request_id']}/decide", json={"approve": True}
+    ).json()
+    with patch("inbox_server.task_create", return_value=True):
+        _isolated_approvals.post(
+            "/tasks?account=me@example.com",
+            headers={"X-Inbox-Approval-Lease": decided["lease_id"]},
+            json=body,
+        )
+
+    log = _isolated_approvals.get("/audit/log").json()
+    event_types = [e["event_type"] for e in log if e["request_id"] == created["request_id"]]
+
+    assert "approval_requested" in event_types
+    assert "approval_decided" in event_types
+    assert "lease_minted" in event_types
+    write_events = [e for e in log if e["event_type"] == "guarded_write_executed"]
+    assert any(e["result"] == "success" and e["lease_id"] == decided["lease_id"] for e in write_events)
+
+
+def test_audit_log_records_failed_guarded_write_execution(_isolated_approvals):
+    import inbox_server
+
+    inbox_server.state.tasks_services = {"me@example.com": MagicMock()}
+    lease = inbox_server.mint_local_approval_lease(
+        "POST", "/tasks?account=me@example.com", body={"title": "Will fail"}
+    )
+
+    with patch("inbox_server.task_create", side_effect=RuntimeError("boom")):
+        resp = _isolated_approvals.post(
+            "/tasks?account=me@example.com",
+            headers={"X-Inbox-Approval-Lease": lease},
+            json={"title": "Will fail"},
+        )
+    assert resp.status_code >= 400
+
+    log = _isolated_approvals.get("/audit/log").json()
+    write_events = [e for e in log if e["event_type"] == "guarded_write_executed"]
+    assert any(e["result"] == "failed" and e["lease_id"] == lease for e in write_events)
+
+
+def test_audit_log_filters_by_event_type(_isolated_approvals):
+    _isolated_approvals.post(
+        "/approvals/request",
+        json={"method": "POST", "path": "/reminders", "body": {"title": "One"}},
+    )
+    _isolated_approvals.post(
+        "/approvals/request",
+        json={"method": "POST", "path": "/reminders", "body": {"title": "Two"}},
+    )
+
+    log = _isolated_approvals.get(
+        "/audit/log", params={"event_type": "approval_requested"}
+    ).json()
+
+    assert len(log) == 2
+    assert all(e["event_type"] == "approval_requested" for e in log)
