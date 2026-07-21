@@ -196,6 +196,7 @@ APPROVAL_EXCEPTION_CLASSES = frozenset(
         "local_audio_capture",
         "local_write",
         "local_notification",
+        "oauth_consent",
     }
 )
 
@@ -217,6 +218,12 @@ MUTATING_METHOD_EXCEPTION_POLICY = {
     ("POST", "/calendar/free-slots"): ApprovalExceptionPolicy("pure_read", True, "calendar availability calculation"),
     ("POST", "/calendar/freebusy"): ApprovalExceptionPolicy("external_read_sync", True, "calendar free/busy provider read; no provider write"),
     ("POST", "/connectors/search"): ApprovalExceptionPolicy("pure_read", True, "connector metadata search"),
+    ("POST", "/accounts/add"): ApprovalExceptionPolicy(
+        "oauth_consent", True, "Google's own OAuth consent screen is the real approval step; a lease can't be minted before the browser flow completes"
+    ),
+    ("POST", "/accounts/reauth"): ApprovalExceptionPolicy(
+        "oauth_consent", True, "Google's own OAuth consent screen is the real approval step; a lease can't be minted before the browser flow completes"
+    ),
     ("POST", "/gateway/dry-run/ahmed-office-location-calendar-update"): ApprovalExceptionPolicy(
         "pure_read", True, "iMessage/calendar read dry-run that returns a proposal without provider write"
     ),
