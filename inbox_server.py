@@ -495,9 +495,14 @@ APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
     _route_rule(
         "POST", r"^/connectors/[^/]+/sync$", "connector", "execute_sync", "inbox.connectors.sync"
     ),
-    _route_rule(
-        "POST", r"^/accounts/(add|reauth)$", "google_oauth", "auth_flow", "inbox.google.auth_flow"
-    ),
+    # /accounts/add and /accounts/reauth are intentionally NOT approval-gated here.
+    # inbox_client.add_account()/reauth_account() never mint or attach an
+    # x-inbox-approval-lease header, so this rule made the TUI's own Ctrl+A flow
+    # (its only way to connect a Google account) unconditionally fail with
+    # missing_per_action_approval_lease. Google's own browser OAuth consent screen
+    # is the real human-approval step for granting account access; gating the
+    # local callback a second time with an unmintable lease was a dead-end, not
+    # defense in depth.
 )
 
 
@@ -1930,15 +1935,39 @@ async def _process_departure_alerts() -> None:
         logger.exception("[scheduler] _process_departure_alerts failed")
 
 
+_INDEX_SYNC_INTERVAL_TICKS = 40  # 40 * 30s = every 20 minutes
+# Widened from 5 to 20 minutes 2026-07-20: this Mac is on a pre-release macOS
+# (27.0, "Tier 2 unsupported" per Homebrew) that crashes with EXC_BREAKPOINT/
+# SIGTRAP inside Python's built-in _ssl module's TLS-alert error-handling path
+# under network load — confirmed via ~/Library/Logs/DiagnosticReports/, not
+# specific to any one CPython patch version (reproduced on both 3.12.13 and
+# 3.12.12). Not fixable at this layer; widening the interval only reduces how
+# often the crash path gets hit, it doesn't fix the underlying OS bug.
+
+
 async def _scheduler_loop() -> None:
-    """Background loop: check scheduled messages, followups, departures every 30s."""
+    """Background loop: check scheduled messages, followups, departures every 30s.
+
+    Also runs incremental mail/iMessage index sync every 5 minutes. Before this,
+    index_incremental_sync() was only reachable via a manual POST to
+    /index/sync/incremental — nothing called it automatically, so the index went
+    stale between manual triggers (this is what caused it to sit empty for weeks).
+    """
     logger.info("[scheduler] Background loop started")
+    tick = 0
     while True:
         try:
             await asyncio.sleep(30)
+            tick += 1
             await _process_scheduled_messages()
             await _process_followup_reminders()
             await _process_departure_alerts()
+            if tick % _INDEX_SYNC_INTERVAL_TICKS == 0:
+                try:
+                    stats = await asyncio.to_thread(index_incremental_sync, state.index_store)
+                    logger.info("[scheduler] incremental index sync: %s", stats)
+                except Exception:
+                    logger.exception("[scheduler] incremental index sync failed")
         except asyncio.CancelledError:
             logger.info("[scheduler] Background loop cancelled")
             raise
