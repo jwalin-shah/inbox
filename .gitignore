@@ -73,3 +73,7 @@ CLAUDE.md.new
 .cocoindex_code/__pycache__/
 .headroom/
 coverage.json
+*.pem
+*_rsa
+.netrc
+.env.*
