@@ -1,5 +1,31 @@
 # Inbox Agent Notes
 
+## Invariants & Oracle System
+
+Inbox invariants are formalized as tensor equations in `docs/invariants.md`, each mapped to a canonical oracle from the orbit research pipeline at `~/projects/orbit/docs/research/`.
+
+### Quick reference
+
+| Inbox subsystem | Oracle | Key invariants |
+|---|---|---|
+| Server API (`inbox_server.py`) | `api-design-oracle.md` | X-Request-ID, structured errors, timeouts, connection pool hygiene |
+| Connectors (`connectors/`) | `saltzer-schroeder-oracle.md` | Auth check before use, 429 backoff, non-blocking sync, circuit breaker |
+| MCP gateway (`mcp_gateway.py`) | `api-design-oracle.md` | JSON-RPC 2.0 conformance, tool call validation, session lifecycle |
+| Message sync (`message_sync.py`) | `data-quality-oracle.md` | Unique message IDs, no sync duplicates, idempotent sync |
+| Approval store (`approval_store.py`) | `saltzer-schroeder-oracle.md` | State machine consistency, complete mediation, audit logging |
+| Egress audit (`egress_audit.py`) | `saltzer-schroeder-oracle.md` | Host allowlist, all outbound traffic logged |
+| Scheduler (`scheduler.py`) | `ostep-oracle.md` | Task state machine, persistence across restarts |
+| TUI (`inbox.py`) | `apple-platform-oracle.md` | Non-blocking updates, undo for destructive actions |
+
+### Contract
+
+1. Before modifying any subsystem, read the corresponding oracle in `~/projects/orbit/docs/research/`
+2. Write the invariant as a tensor equation in `docs/invariants.md` before writing implementation code
+3. Every P0 invariant must have a test that exercises the invariant boundary
+4. Every P1 invariant must have a line-level tensor equation in `docs/invariants.md`
+
+See `docs/oracle-map.md` for the full mapping table and `docs/invariants.md` for the complete tensor equations.
+
 ## Validation
 
 Default agent-safe local validation:
