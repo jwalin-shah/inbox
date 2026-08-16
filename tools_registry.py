@@ -107,10 +107,18 @@ def _build_handler(tool: Tool, backend: Any) -> Callable[..., Any]:
     return handler
 
 
-def register_all(mcp: Any, backend: Any, *, readonly_only: bool) -> list[str]:
+def register_all(
+    mcp: Any,
+    backend: Any,
+    *,
+    readonly_only: bool,
+    include_names: set[str] | None = None,
+) -> list[str]:
     """Register every applicable tool from TOOLS onto `mcp`. Returns names registered."""
     registered: list[str] = []
     for tool in TOOLS:
+        if include_names is not None and tool.name not in include_names:
+            continue
         if readonly_only and not tool.readonly:
             continue
         handler = _build_handler(tool, backend)
@@ -523,6 +531,21 @@ TOOLS: list[Tool] = [
         description="List recent audited direct outbound HTTP requests.",
         readonly=True,
         params=[Param("limit", int, 100, "query")],
+    ),
+    Tool(
+        name="get_audit_log",
+        method="GET",
+        path="/audit/log",
+        description=(
+            "List recent approval and mutation audit records, including the "
+            "account, resource, operation, result, and redacted detail."
+        ),
+        readonly=True,
+        params=[
+            Param("limit", int, 200, "query"),
+            Param("event_type", str, "", "query"),
+            Param("request_id", str, "", "query"),
+        ],
     ),
     Tool(
         name="get_capability_inventory",

@@ -59,6 +59,7 @@ def build_mcp(
     *,
     readonly: bool = False,
     for_http: bool = False,
+    include_names: set[str] | None = None,
 ) -> tuple[Any, Any, Any]:
     """
     Build a configured FastMCP instance for the inbox MCP surface.
@@ -186,6 +187,11 @@ def build_mcp(
             return memory_store.close_commitment(entry_id)
 
     # --- Registry-driven tools ---
-    _register_registry_tools(mcp, backend, readonly_only=readonly)
+    if include_names is None:
+        _register_registry_tools(mcp, backend, readonly_only=readonly)
+    else:
+        _register_registry_tools(
+            mcp, backend, readonly_only=readonly, include_names=include_names
+        )
 
     return mcp, backend, memory_store

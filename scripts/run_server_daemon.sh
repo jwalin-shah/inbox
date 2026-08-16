@@ -16,4 +16,13 @@ if [[ -f "$SERVER_ENV" ]]; then
   set +a
 fi
 
+# The Inbox Maps credential is intentionally kept in the login Keychain rather
+# than in the repository or server.env. If it is unavailable, Maps features
+# remain disabled while all other Inbox features continue to run.
+if GOOGLE_MAPS_API_KEY="$(/usr/bin/security find-generic-password -a "$USER" -s 'inbox-google-maps-api-key' -w 2>/dev/null)"; then
+  export GOOGLE_MAPS_API_KEY
+else
+  unset GOOGLE_MAPS_API_KEY
+fi
+
 exec "$ROOT/.venv/bin/python3" inbox_server.py

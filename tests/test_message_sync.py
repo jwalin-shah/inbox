@@ -3,8 +3,10 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from googleapiclient.errors import HttpError
 
 import message_sync
 from message_index_store import IndexedItem, MessageIndexStore
@@ -473,6 +475,53 @@ def test_sync_gmail_incremental_uses_history_for_new_and_changed_messages(tmp_pa
     assert existing["is_read"] == 1
     assert '"UNREAD"' not in existing["labels_json"]
     assert inserted["is_read"] == 0
+
+
+def test_sync_gmail_incremental_history_skips_deleted_message(tmp_path, monkeypatch):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+    store.set_sync_state(
+        source="gmail",
+        account="acct@example.com",
+        checkpoint_type=message_sync.GMAIL_HISTORY_CURSOR,
+        checkpoint_value="9000",
+        status="idle",
+        metadata={
+            "cursor_mode": "history",
+            "history_id": "9000",
+            "timestamp_checkpoint_ms": "100",
+        },
+    )
+    service = _FakeGmailService(
+        list_payloads={},
+        full_messages={
+            "deleted": HttpError(SimpleNamespace(status=404, reason="Not Found"), b"not found"),
+            "m2": _gmail_message("m2", 200, labels=["INBOX"]),
+        },
+        history_payloads={
+            "__first__": {
+                "historyId": "9001",
+                "history": [
+                    {
+                        "messagesAdded": [
+                            {"message": {"id": "deleted"}},
+                            {"message": {"id": "m2"}},
+                        ]
+                    }
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        message_sync,
+        "google_auth_all",
+        lambda: ({"acct@example.com": service}, {}, {}, {}, {}, {}),
+    )
+
+    assert message_sync.sync_gmail_incremental(store) == {"acct@example.com": 1}
+    state = store.get_sync_state("gmail", "acct@example.com")
+    assert state is not None
+    assert state["status"] == "idle"
+    assert state["checkpoint_value"] == "9001"
 
 
 def test_sync_gmail_incremental_falls_back_without_history_cursor(tmp_path, monkeypatch):

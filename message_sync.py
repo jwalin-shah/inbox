@@ -9,6 +9,8 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
+from googleapiclient.errors import HttpError
+
 from message_index_store import IndexedItem, MessageIndexStore
 from services import (
     IMSG_DB,
@@ -109,6 +111,11 @@ def _json(value: object) -> str:
 
 def _fetch_gmail_full_message(service: Any, message_id: str) -> dict[str, Any]:
     return service.users().messages().get(userId="me", id=message_id, format="full").execute()
+
+
+def _is_gmail_message_not_found(error: HttpError) -> bool:
+    """Return true only when a history entry refers to a now-deleted message."""
+    return getattr(error.resp, "status", None) == 404
 
 
 def _fetch_gmail_profile_history_id(service: Any) -> str:
@@ -331,7 +338,12 @@ def _sync_gmail_incremental_history(
             if message_id in seen:
                 continue
             seen.add(message_id)
-            full_message = _fetch_gmail_full_message(service, message_id)
+            try:
+                full_message = _fetch_gmail_full_message(service, message_id)
+            except HttpError as exc:
+                if _is_gmail_message_not_found(exc):
+                    continue
+                raise
             timestamp_checkpoint = max(
                 timestamp_checkpoint, int(full_message.get("internalDate", 0) or 0)
             )
