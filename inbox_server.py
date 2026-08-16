@@ -148,6 +148,7 @@ from services import (
     gmail_attachment_download,
     gmail_batch_modify,
     gmail_compose_send,
+    gmail_create_draft,
     gmail_contacts,
     gmail_contacts_by_label,
     gmail_create_filter,
@@ -299,6 +300,7 @@ APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
         "POST", r"^/imessage/send$", "imessage_gmail", "send_message", "inbox.messages.send"
     ),
     _route_rule("POST", r"^/messages/compose$", "gmail", "compose_send", "inbox.gmail.send_email"),
+    _route_rule("POST", r"^/messages/drafts$", "gmail", "draft_create", "inbox.gmail.create_draft"),
     _route_rule("POST", r"^/messages/gmail/reply$", "gmail", "reply", "inbox.gmail.reply"),
     _route_rule(
         "POST",
@@ -1418,6 +1420,13 @@ class VoiceConfigRequest(BaseModel):
 class ComposeRequest(BaseModel):
     to: str
     subject: str
+    body: str
+    account: str = ""
+
+
+class GmailDraftRequest(BaseModel):
+    to: str = ""
+    subject: str = ""
     body: str
     account: str = ""
 
@@ -3171,6 +3180,13 @@ async def compose_email(req: ComposeRequest):
     _, svc = _get_gmail_service_for_account(req.account)
     ok = await asyncio.to_thread(gmail_compose_send, svc, req.to, req.subject, req.body)
     return {"ok": ok}
+
+
+@app.post("/messages/drafts")
+async def create_gmail_draft(req: GmailDraftRequest):
+    acct, svc = _get_gmail_service_for_account(req.account)
+    draft = await asyncio.to_thread(gmail_create_draft, svc, req.to, req.subject, req.body)
+    return {"ok": draft is not None, "account": acct, "draft": draft or {}}
 
 
 @app.post("/messages/gmail/reply")

@@ -1675,6 +1675,28 @@ def gmail_compose_send(service, to: str, subject: str, body: str) -> bool:
         return False
 
 
+def gmail_create_draft(service, to: str, subject: str, body: str) -> dict[str, str] | None:
+    """Create a Gmail draft without sending it."""
+    _assert_live_write_allowed("create Gmail draft")
+    msg = MIMEText(body)
+    msg["to"] = to
+    msg["subject"] = subject
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    try:
+        result = service.users().drafts().create(
+            userId="me", body={"message": {"raw": raw}}
+        ).execute()
+        return {
+            "id": str(result.get("id", "")),
+            "message_id": str(result.get("message", {}).get("id", "")),
+        }
+    except Exception:
+        _log_service_failure(
+            "gmail_create_draft", to=to, subject=subject, body_length=len(body)
+        )
+        return None
+
+
 def gmail_reply(
     service,
     msg_id: str,

@@ -35,6 +35,11 @@ Run the private inbox backend and the MCP layers separately:
    - Local subprocess entrypoint for the read-only tool surface
    - Useful if you want a second local MCP server with fewer capabilities
 
+6. `inbox-mcp-full`
+   - Owner-only launcher for the complete local registry
+   - Keeps every mutation behind `confirm=True` and the per-action approval lease
+   - Must remain separate from the read-only remote tunnel
+
 ## Which Path To Use
 
 Use local `stdio` when the assistant runs on the same machine as Inbox.
@@ -61,6 +66,20 @@ Best practice:
 - cloud agents -> HTTP MCP
 
 Both point to the same private Inbox backend.
+
+### Remote access boundary
+
+The existing `life-ops-inbox` tunnel is intentionally read-only. Do not repoint
+it at the full server: that would silently expand the permissions of clients
+already using the tunnel. If a trusted cloud client later needs writes, create
+a second tunnel and second ChatGPT app for the full surface, after confirming
+that the target ChatGPT workspace is eligible for write-capable custom MCP
+apps. The local full surface is available immediately through
+`/Users/jwalinshah/projects/dotfiles/bin/inbox-mcp-full`.
+
+MCP tool annotations explicitly distinguish reads from confirmation-gated
+writes. A client should not infer safety from a tool name or from the fact that
+a server is called “read-only.”
 
 ## Primary vs Dev Testing
 

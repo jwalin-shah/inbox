@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import quote
 
+from mcp.types import ToolAnnotations
+
 ParamLocation = Literal["query", "body", "path"]
 _EMPTY = inspect.Parameter.empty
 
@@ -107,6 +109,23 @@ def _build_handler(tool: Tool, backend: Any) -> Callable[..., Any]:
     return handler
 
 
+def _tool_annotations(tool: Tool) -> ToolAnnotations:
+    """Describe the effect boundary of a registry tool to MCP clients."""
+    if tool.readonly:
+        return ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    return ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+
+
 def register_all(
     mcp: Any,
     backend: Any,
@@ -122,7 +141,7 @@ def register_all(
         if readonly_only and not tool.readonly:
             continue
         handler = _build_handler(tool, backend)
-        mcp.tool()(handler)
+        mcp.tool(annotations=_tool_annotations(tool))(handler)
         registered.append(tool.name)
     return registered
 
@@ -219,6 +238,22 @@ TOOLS: list[Tool] = [
             Param("to", str, "", "body"),
             Param("subject", str, "", "body"),
             Param("message_id_header", str, "", "body"),
+            Param("account", str, "", "body"),
+        ],
+    ),
+    Tool(
+        name="create_gmail_draft",
+        method="POST",
+        path="/messages/drafts",
+        description=(
+            "Create a Gmail draft without sending it. Confirmation-gated: caller "
+            "must set confirm=True."
+        ),
+        confirm=True,
+        params=[
+            Param("to", str, "", "body"),
+            Param("subject", str, "", "body"),
+            Param("body", str, _EMPTY, "body"),
             Param("account", str, "", "body"),
         ],
     ),

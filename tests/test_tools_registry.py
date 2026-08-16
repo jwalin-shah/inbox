@@ -17,10 +17,12 @@ INVENTORY_TOOL_NAMES = {"get_capability_inventory"}
 class DummyMCP:
     def __init__(self):
         self._handlers = []
+        self._annotations = {}
 
-    def tool(self):
+    def tool(self, **kwargs):
         def decorator(fn):
             self._handlers.append(fn)
+            self._annotations[fn.__name__] = kwargs.get("annotations")
             return fn
 
         return decorator
@@ -79,6 +81,18 @@ def test_index_tools_are_readonly_and_do_not_require_confirm():
         assert tools_by_name[name].readonly is True
         assert tools_by_name[name].confirm is False
         assert "confirm" not in inspect.signature(handlers[name]).parameters
+
+
+def test_registered_tools_advertise_effect_metadata():
+    mcp = DummyMCP()
+    register_all(mcp, DummyBackend(), readonly_only=False)
+    tools_by_name = {tool.name: tool for tool in TOOLS}
+
+    for name, annotations in mcp._annotations.items():
+        tool = tools_by_name[name]
+        assert annotations.readOnlyHint is tool.readonly
+        assert annotations.openWorldHint is True
+        assert annotations.destructiveHint is (not tool.readonly)
 
 
 def test_confirm_param_is_added_only_for_confirm_tools():
