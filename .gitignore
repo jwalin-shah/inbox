@@ -77,3 +77,4 @@ coverage.json
 *_rsa
 .netrc
 .env.*
+data/autoslash_cursor.json
