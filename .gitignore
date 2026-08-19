@@ -78,3 +78,5 @@ coverage.json
 .netrc
 .env.*
 data/autoslash_cursor.json
+data/imessage_cursor.json
+data/thinkthrough/
