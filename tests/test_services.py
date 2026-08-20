@@ -970,6 +970,64 @@ class _WriteShouldNotRun:
         raise AssertionError(f"live write service was touched: {name}")
 
 
+class _FakeTasksListRequest:
+    def __init__(self, items: list[dict[str, str]]):
+        self._items = items
+
+    def execute(self) -> dict[str, list[dict[str, str]]]:
+        return {"items": self._items}
+
+
+class _FakeTasksInsertRequest:
+    def __init__(self, api: _FakeTasksAPI, body: dict[str, Any]):
+        self._api = api
+        self._body = body
+
+    def execute(self) -> dict[str, str]:
+        self._api.insert_calls.append(self._body)
+        return {"id": "new-task-id"}
+
+
+class _FakeTasksAPI:
+    def __init__(self, existing_items: list[dict[str, str]]):
+        self._existing_items = existing_items
+        self.insert_calls: list[dict[str, Any]] = []
+
+    def list(self, **kwargs: Any) -> _FakeTasksListRequest:
+        return _FakeTasksListRequest(self._existing_items)
+
+    def insert(self, tasklist: str, body: dict[str, Any]) -> _FakeTasksInsertRequest:
+        return _FakeTasksInsertRequest(self, body)
+
+
+class _FakeTasksService:
+    def __init__(self, existing_items: list[dict[str, str]]):
+        self._api = _FakeTasksAPI(existing_items)
+
+    def tasks(self) -> _FakeTasksAPI:
+        return self._api
+
+
+def test_task_create_dedupes_existing_title():
+    """A second create with the same title in the same list is a no-op, not a duplicate."""
+    svc = _FakeTasksService([{"id": "existing-1", "title": "Renew passport"}])
+
+    result = services.task_create(svc, "Renew passport")
+
+    assert result is True
+    assert svc.tasks().insert_calls == []
+
+
+def test_task_create_inserts_when_no_title_match():
+    svc = _FakeTasksService([{"id": "existing-1", "title": "Unrelated task"}])
+
+    result = services.task_create(svc, "Renew passport")
+
+    assert result is True
+    assert len(svc.tasks().insert_calls) == 1
+    assert svc.tasks().insert_calls[0]["title"] == "Renew passport"
+
+
 def test_test_mode_blocks_representative_live_writes(monkeypatch):
     monkeypatch.setenv("INBOX_TEST_MODE", "1")
     from inbox_test_mode import LiveWriteBlocked

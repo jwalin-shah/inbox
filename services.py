@@ -4020,8 +4020,26 @@ def task_create(
     due: str = "",
     notes: str = "",
 ) -> bool:
-    """Create a Google Task."""
+    """Create a Google Task.
+
+    Deduped against existing incomplete tasks in the same list by exact title
+    match before inserting. This is Inbox's own writer only — it cannot see
+    writes made by other paths (e.g. the Sheets/Apps-Script Tasks bridge), so
+    it protects against Inbox-originated duplicates, not cross-path races.
+    """
     _assert_live_write_allowed("create Google Task")
+    try:
+        existing = service.tasks().list(
+            tasklist=list_id, showCompleted=False, maxResults=100
+        ).execute()
+        for t in existing.get("items", []):
+            if t.get("title", "").strip() == title.strip():
+                logger.info(f"task_create deduped (title={title!r} list_id={list_id!r})")
+                return True
+    except Exception:
+        # Dedup check failing (e.g. transient API error) should not block the
+        # create — fall through to the normal insert path.
+        pass
     try:
         body = {"title": title}
         if notes:
