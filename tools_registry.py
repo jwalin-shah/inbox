@@ -752,6 +752,22 @@ TOOLS: list[Tool] = [
             Param("account", str, "", "body"),
         ],
     ),
+    Tool(
+        name="suggest_message_reply",
+        method="POST",
+        path="/autocomplete",
+        description=(
+            "Suggest a draft reply from message context using the local MLX model. "
+            "Does not send. Returns null when the model is unavailable (non-macOS or not loaded)."
+        ),
+        readonly=True,
+        params=[
+            Param("messages", list, _EMPTY, "body"),
+            Param("max_tokens", int, 64, "body"),
+            Param("temperature", float, 0.5, "body"),
+        ],
+        extra_body={"mode": "reply", "draft": ""},
+    ),
     # ---------- Search ----------
     Tool(
         name="search_all",

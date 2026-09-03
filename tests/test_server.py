@@ -2091,6 +2091,32 @@ class TestCalendarExtensions:
         assert len(data) == 2
         assert [event["summary"] for event in data] == ["Event 0", "Event 1"]
 
+    @patch("inbox_server.calendar_find_conflicts")
+    def test_calendar_conflicts_accepts_json_body(self, mock_conflicts, client):
+        import inbox_server
+
+        inbox_server.state.cal_services = {"me@gmail.com": MagicMock()}
+        mock_conflicts.return_value = [
+            CalendarEvent(
+                summary="Overlap",
+                start=datetime(2025, 6, 15, 10, 0),
+                end=datetime(2025, 6, 15, 11, 0),
+                location="Office",
+            ),
+        ]
+        resp = client.post(
+            "/calendar/conflicts",
+            json={
+                "start": "2025-06-15T09:00:00",
+                "end": "2025-06-15T12:00:00",
+                "account": "me@gmail.com",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["conflicts"][0]["title"] == "Overlap"
+        assert data["conflicts"][0]["location"] == "Office"
+
     @patch("inbox_server.calendar_create_event")
     def test_create_event_with_attendees(self, mock_create, client):
         import inbox_server

@@ -300,3 +300,52 @@ def test_body_params_are_not_url_encoded():
         "conv_id": "chat/with spaces",
         "text": "hello / raw",
     }
+
+
+def test_check_calendar_conflicts_dispatches_json_body():
+    handlers = _handlers()
+
+    result = asyncio.run(
+        handlers["check_calendar_conflicts"](
+            start="2026-09-03T09:00:00",
+            end="2026-09-03T17:00:00",
+            account="me@gmail.com",
+        )
+    )
+
+    assert result == {
+        "method": "POST",
+        "path": "/calendar/conflicts",
+        "params": None,
+        "json": {
+            "start": "2026-09-03T09:00:00",
+            "end": "2026-09-03T17:00:00",
+            "account": "me@gmail.com",
+        },
+    }
+
+
+def test_suggest_message_reply_dispatches_autocomplete_reply_mode():
+    handlers = _handlers()
+    messages = [{"sender": "Alice", "body": "Can we meet Tuesday?"}]
+
+    result = asyncio.run(
+        handlers["suggest_message_reply"](
+            messages=messages,
+            max_tokens=48,
+            temperature=0.3,
+        )
+    )
+
+    assert result == {
+        "method": "POST",
+        "path": "/autocomplete",
+        "params": None,
+        "json": {
+            "mode": "reply",
+            "draft": "",
+            "messages": messages,
+            "max_tokens": 48,
+            "temperature": 0.3,
+        },
+    }

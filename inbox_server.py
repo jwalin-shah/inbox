@@ -1404,6 +1404,12 @@ class AutocompleteRequest(BaseModel):
     mode: str = "complete"
 
 
+class CalendarConflictsRequest(BaseModel):
+    start: str
+    end: str
+    account: str = ""
+
+
 class NotificationTestRequest(BaseModel):
     title: str
     body: str = ""
@@ -6258,20 +6264,20 @@ async def audit_gmail_filters(account: str = ""):
 
 
 @app.post("/calendar/conflicts")
-async def check_calendar_conflicts(start: str, end: str, account: str = ""):
+async def check_calendar_conflicts(req: CalendarConflictsRequest):
     """Find calendar conflicts in time range [start, end]."""
     try:
-        start_dt = datetime.fromisoformat(start)
-        end_dt = datetime.fromisoformat(end)
-        acct, svc = _get_cal_service_for_account(account)
+        start_dt = datetime.fromisoformat(req.start)
+        end_dt = datetime.fromisoformat(req.end)
+        acct, svc = _get_cal_service_for_account(req.account)
         conflicts = await asyncio.to_thread(calendar_find_conflicts, {acct: svc}, start_dt, end_dt)
         return {
             "conflicts": [
                 {
-                    "id": c.id,
-                    "title": c.title,
-                    "start": c.start,
-                    "end": c.end,
+                    "id": c.event_id,
+                    "title": c.summary,
+                    "start": c.start.isoformat() if hasattr(c.start, "isoformat") else c.start,
+                    "end": c.end.isoformat() if hasattr(c.end, "isoformat") else c.end,
                     "location": c.location or "",
                 }
                 for c in conflicts
