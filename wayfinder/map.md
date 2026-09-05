@@ -43,14 +43,29 @@ flaky tests. The codebase layout is consistent (no split between root and
   constrained generation
 - Ambient audio: capture → ASR → extraction → Obsidian notes pipeline
 - Scheduler: background task runner with persistent SQLite state
-- Test suite: 1888 passing, 1 failing (`test_print_summary_with_threads` in
-  `test_message_sync.py`)
+- Message index: `.inbox_index.sqlite3` is integrity-checkable, tracks Gmail
+  and native iMessage checkpoints, and exposes indexed views plus health/status
+  endpoints
+- Evidence spine: `.inbox_event_log.sqlite3` stores append-only raw events with
+  provenance; `/events/capture`, `/events/backfill/index`, and
+  `/sources/registry` are available locally
+- Message usefulness triage: `/triage/messages` provides a bounded,
+  read-only `reply_now` / `task` / `calendar` / `waiting` / `fyi` / `archive`
+  projection with confidence, reason, and event/source references; LifeOps MCP
+  exposes it as `triage_messages`
+- Person profiles: `/people/search` hydrates canonical local person records from
+  source contacts; `/people/{person_id}/profile` combines external contact
+  evidence with local notes and relationship claims. LifeOps exposes
+  `people_search`, `person_profile`, and approval-gated note/relationship
+  proposals.
+- Targeted sync/server regression suite: 287 passing, including the serialized
+  index-sync concurrency test
 - Overall coverage: 82% (25,758/30,904 statements missed → mostly uncovered
   utility scripts and error paths)
 
 **Broken:**
-- One test failure: `test_print_summary_with_threads` — assertion error,
-  likely a stale expected value after a code change in the gnhf series
+- Full-repository test status was not re-run in this pass; only the targeted
+  sync/server regression suite is current evidence
 - `unsubscribe_bulk.py` at 6% coverage, `unsubscribe_interactive.py` at 6%
   — these are the lowest-coverage files and were skipped in the gnhf push
 - `docs/agents/` stubs were removed in the most recent commit (087b294) but
@@ -62,6 +77,18 @@ flaky tests. The codebase layout is consistent (no split between root and
   work (SYM-115 through SYM-214, WP-014 through WP-182)
 - Whether the ambient daemon's auto-start on server boot works reliably after
   the gnhf refactors (it was tested to 98% but only with mocks)
+- Whether the 20-minute index sync cadence is sufficient for the desired
+  daily-driver message freshness; checkpoint age is now reported explicitly
+- Which existing source adapters should emit raw events first, and which
+  payload fields should be retained locally versus represented by a content ref
+- Whether the historical message-index backfill should be extended to other
+  source types after Gmail/iMessage coverage is complete
+- Whether message-level entity resolution should be added before or alongside
+  the next calendar/contacts correlation pass
+- Whether DeepSeek labels should remain optional suggestions or become a
+  separately persisted interpretation event type after evaluation
+- Whether distinct external identifiers should be explicitly mergeable through
+  a user-approved alias-link workflow
 
 ## Decisions so far
 
@@ -85,6 +112,15 @@ flaky tests. The codebase layout is consistent (no split between root and
   Development happens in git worktrees on alt ports (9850+). This avoids
   disrupting the daily-driver inbox during development. Documented in
   CLAUDE.md and proven across multiple dev sessions.
+- **Serialized index sync.** Manual bootstrap/incremental syncs and the
+  scheduler share one event-loop lock, and each run logs mode, duration, and
+  per-source counts so SQLite freshness can be diagnosed from evidence.
+- **Evidence before interpretation.** Raw observations live in a separate
+  append-only event SQLite store. The message index remains a rebuildable
+  operational read model; entity/state projections must not rewrite evidence.
+- **Honest historical backfill.** Rows copied from the message index are
+  `message.indexed_backfill` events with `raw_payload_available=false`; fresh
+  provider reads remain `message.observed` events.
 - **MLX-native AI stack.** Qwen3.5-0.8B-MLX-4bit for LLM, mlx-whisper for ASR,
   Outlines for constrained generation. All run locally on Apple Silicon. No
   cloud dependency for core AI features.

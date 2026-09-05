@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -165,9 +166,75 @@ class MessageIndexStore:
                     reply_count INTEGER NOT NULL DEFAULT 0,
                     last_seen_at TEXT NOT NULL DEFAULT ''
                 );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
+                    item_id UNINDEXED,
+                    source,
+                    account,
+                    thread_id UNINDEXED,
+                    sender,
+                    subject,
+                    snippet,
+                    body_text
+                );
+
+                CREATE TABLE IF NOT EXISTS item_embeddings (
+                    item_id INTEGER PRIMARY KEY,
+                    model_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    dimensions INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (item_id) REFERENCES items(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_item_embeddings_model
+                    ON item_embeddings(model_id, updated_at DESC);
                 """
             )
             self._migrate_schema(conn)
+            self._rebuild_fts_if_needed(conn)
+
+    @staticmethod
+    def _fts_row(item_id: int, item: IndexedItem) -> tuple[object, ...]:
+        return (
+            item_id,
+            item.source,
+            item.account,
+            item.thread_id,
+            item.sender,
+            item.subject,
+            item.snippet,
+            item.body_text,
+        )
+
+    @classmethod
+    def _replace_fts(cls, conn: sqlite3.Connection, item_id: int, item: IndexedItem) -> None:
+        conn.execute("DELETE FROM items_fts WHERE item_id = ?", (item_id,))
+        if item.is_deleted:
+            return
+        conn.execute(
+            "INSERT INTO items_fts (item_id, source, account, thread_id, sender, subject, snippet, body_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            cls._fts_row(item_id, item),
+        )
+
+    def _rebuild_fts_if_needed(self, conn: sqlite3.Connection) -> None:
+        item_count = int(
+            conn.execute("SELECT COUNT(*) FROM items WHERE is_deleted = 0").fetchone()[0]
+        )
+        fts_count = int(conn.execute("SELECT COUNT(*) FROM items_fts").fetchone()[0])
+        if item_count == fts_count:
+            return
+        conn.execute("DELETE FROM items_fts")
+        conn.execute(
+            """
+            INSERT INTO items_fts (item_id, source, account, thread_id, sender, subject, snippet, body_text)
+            SELECT id, source, account, thread_id, sender, subject, snippet, body_text
+            FROM items
+            WHERE is_deleted = 0
+            """
+        )
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(sync_state)").fetchall()}
@@ -184,6 +251,11 @@ class MessageIndexStore:
 
     def upsert_item(self, item: IndexedItem) -> None:
         with self._connect() as conn:
+            prior = conn.execute(
+                "SELECT id, body_hash, sender, subject, snippet FROM items "
+                "WHERE source = ? AND account = ? AND external_id = ?",
+                (item.source, item.account, item.external_id),
+            ).fetchone()
             conn.execute(
                 """
                 INSERT INTO items (
@@ -215,6 +287,18 @@ class MessageIndexStore:
                 """,
                 item.to_dict(),
             )
+            row = conn.execute(
+                "SELECT id FROM items WHERE source = ? AND account = ? AND external_id = ?",
+                (item.source, item.account, item.external_id),
+            ).fetchone()
+            if row:
+                item_id = int(row[0])
+                self._replace_fts(conn, item_id, item)
+                if prior and any(
+                    prior[key] != getattr(item, key)
+                    for key in ("body_hash", "sender", "subject", "snippet")
+                ):
+                    conn.execute("DELETE FROM item_embeddings WHERE item_id = ?", (item_id,))
 
     def insert_item_if_absent(self, item: IndexedItem) -> bool:
         with self._connect() as conn:
@@ -234,7 +318,161 @@ class MessageIndexStore:
                 """,
                 item.to_dict(),
             )
+            if int(cur.rowcount or 0) == 1 and cur.lastrowid:
+                self._replace_fts(conn, int(cur.lastrowid), item)
         return int(cur.rowcount or 0) == 1
+
+    @staticmethod
+    def _item_row_to_dict(row: sqlite3.Row) -> dict[str, object]:
+        result = dict(row)
+        for key in ("recipients_json", "labels_json"):
+            if key in result:
+                result[key.removesuffix("_json")] = _json_loads(str(result.pop(key) or "[]"))
+        return result
+
+    @staticmethod
+    def _fts_query(query: str) -> str:
+        tokens = re.findall(r"[\w@.+-]+", query.casefold())
+        if not tokens:
+            return ""
+        # Quoted tokens prevent FTS5 operators from being injected. Prefix
+        # matching makes short natural-language queries useful without a scan.
+        return " AND ".join(f'"{token.replace(chr(34), "")}"*' for token in tokens)
+
+    def search_items(
+        self,
+        query: str,
+        *,
+        limit: int = 25,
+        source: str = "",
+        account: str = "",
+    ) -> list[dict[str, object]]:
+        match = self._fts_query(query)
+        if not match:
+            return []
+        predicates = ["items.is_deleted = 0", "items_fts MATCH ?"]
+        params: list[object] = [match]
+        if source:
+            predicates.append("items.source = ?")
+            params.append(source)
+        if account:
+            predicates.append("items.account = ?")
+            params.append(account)
+        params.append(max(1, min(int(limit), 100)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT items.*, bm25(items_fts) AS lexical_score "
+                "FROM items_fts JOIN items ON items.id = CAST(items_fts.item_id AS INTEGER) "
+                f"WHERE {' AND '.join(predicates)} ORDER BY lexical_score LIMIT ?",  # noqa: S608
+                params,
+            ).fetchall()
+        return [self._item_row_to_dict(row) for row in rows]
+
+    def embedding_status(self, model_id: str = "") -> dict[str, object]:
+        with self._connect() as conn:
+            total = int(conn.execute("SELECT COUNT(*) FROM items WHERE is_deleted = 0").fetchone()[0])
+            if model_id:
+                embedded = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM item_embeddings WHERE model_id = ?",
+                        (model_id,),
+                    ).fetchone()[0]
+                )
+            else:
+                embedded = int(conn.execute("SELECT COUNT(*) FROM item_embeddings").fetchone()[0])
+        return {"items": total, "embedded": embedded, "pending": max(0, total - embedded)}
+
+    def embedding_backlog(
+        self, *, model_id: str, limit: int = 100, source: str = "", account: str = ""
+    ) -> list[dict[str, object]]:
+        predicates = ["i.is_deleted = 0", "(e.item_id IS NULL OR e.model_id != ?)"]
+        params: list[object] = [model_id]
+        if source:
+            predicates.append("i.source = ?")
+            params.append(source)
+        if account:
+            predicates.append("i.account = ?")
+            params.append(account)
+        params.append(max(1, min(int(limit), 1000)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT i.* FROM items i LEFT JOIN item_embeddings e ON e.item_id = i.id "
+                f"WHERE {' AND '.join(predicates)} ORDER BY i.id LIMIT ?",  # noqa: S608
+                params,
+            ).fetchall()
+        return [self._item_row_to_dict(row) for row in rows]
+
+    def upsert_embedding(
+        self,
+        *,
+        item_id: int,
+        model_id: str,
+        content_hash: str,
+        vector: list[float],
+    ) -> None:
+        import numpy as np
+
+        array = np.asarray(vector, dtype=np.float32)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO item_embeddings (
+                    item_id, model_id, content_hash, dimensions, vector, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    model_id=excluded.model_id,
+                    content_hash=excluded.content_hash,
+                    dimensions=excluded.dimensions,
+                    vector=excluded.vector,
+                    updated_at=excluded.updated_at
+                """,
+                (item_id, model_id, content_hash, int(array.size), array.tobytes(), _utcnow()),
+            )
+
+    def search_embeddings(
+        self,
+        vector: list[float],
+        *,
+        model_id: str,
+        limit: int = 25,
+        source: str = "",
+        account: str = "",
+    ) -> list[dict[str, object]]:
+        import numpy as np
+
+        query = np.asarray(vector, dtype=np.float32)
+        norm = float(np.linalg.norm(query))
+        if norm == 0:
+            return []
+        query /= norm
+        predicates = ["i.is_deleted = 0", "e.model_id = ?"]
+        params: list[object] = [model_id]
+        if source:
+            predicates.append("i.source = ?")
+            params.append(source)
+        if account:
+            predicates.append("i.account = ?")
+            params.append(account)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT i.*, e.vector FROM item_embeddings e JOIN items i ON i.id = e.item_id "
+                f"WHERE {' AND '.join(predicates)}",  # noqa: S608
+                params,
+            ).fetchall()
+        scored: list[tuple[float, sqlite3.Row]] = []
+        for row in rows:
+            candidate = np.frombuffer(row["vector"], dtype=np.float32)
+            if candidate.size != query.size:
+                continue
+            scored.append((float(np.dot(query, candidate)), row))
+        scored.sort(key=lambda value: value[0], reverse=True)
+        results: list[dict[str, object]] = []
+        for score, row in scored[: max(1, min(int(limit), 100))]:
+            item = self._item_row_to_dict(row)
+            item.pop("vector", None)
+            item["semantic_score"] = score
+            results.append(item)
+        return results
 
     def set_sync_state(
         self,
@@ -566,6 +804,8 @@ class MessageIndexStore:
         self,
         *,
         limit: int = 25,
+        source: str | None = None,
+        account: str | None = None,
         actionable_only: bool = False,
         newest_only: bool = False,
         actions: tuple[str, ...] | None = None,
@@ -576,6 +816,12 @@ class MessageIndexStore:
     ) -> list[dict[str, object]]:
         predicates: list[str] = []
         params: list[object] = []
+        if source is not None:
+            predicates.append("source = ?")
+            params.append(source)
+        if account is not None:
+            predicates.append("account = ?")
+            params.append(account)
         if actionable_only:
             predicates.append("actionability IN ('reply', 'review', 'track')")
         if newest_only:

@@ -17,6 +17,7 @@ from mcp_gateway import (
     make_health_handler,
     make_memory_store,
 )
+from oauth_gateway import READ_SCOPE, WRITE_SCOPE, _conn, _token
 from tools_registry import TOOLS
 
 pytestmark = pytest.mark.safe
@@ -70,6 +71,131 @@ def test_public_auth_middleware_allows_when_no_token_configured(monkeypatch):
     with TestClient(app) as client:
         resp = client.get("/secure")
     assert resp.status_code == 200
+
+
+def test_public_auth_middleware_requires_bearer_when_oauth_is_configured(monkeypatch):
+    monkeypatch.delenv("INBOX_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "google-client")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "google-secret")
+    app = _app()
+    with TestClient(app) as client:
+        resp = client.get("/secure")
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == (
+        'Bearer resource_metadata="http://testserver/.well-known/oauth-protected-resource/mcp", '
+        'scope="inbox.read"'
+    )
+
+
+def test_oauth_discovery_registration_and_scoped_bearer(monkeypatch, tmp_path):
+    monkeypatch.setenv("INBOX_OAUTH_DB", str(tmp_path / "oauth.sqlite3"))
+    monkeypatch.setenv("INBOX_OAUTH_SECRET", "test-secret")
+    app = _app()
+    app.routes.extend([
+        Route("/.well-known/oauth-authorization-server", __import__("oauth_gateway").metadata),
+        Route("/oauth/register", __import__("oauth_gateway").register, methods=["POST"]),
+    ])
+    with TestClient(app) as client:
+        discovery = client.get("/.well-known/oauth-authorization-server")
+        registration = client.post("/oauth/register", json={"redirect_uris": ["https://gemini.example/callback"]})
+        read = client.get("/secure", headers={"Authorization": f"Bearer {_token('client', [READ_SCOPE])}"})
+        denied = client.get("/secure", headers={"Authorization": f"Bearer {_token('client', [])}"})
+        write = client.get("/secure", headers={"Authorization": f"Bearer {_token('client', [WRITE_SCOPE])}", "X-Inbox-Write": "true"})
+    assert discovery.status_code == 200
+    assert discovery.json()["code_challenge_methods_supported"] == ["S256"]
+    assert registration.status_code == 201
+    assert read.status_code == 200
+    assert denied.status_code == 403
+    assert write.status_code == 200
+
+
+def test_token_exchange_uses_google_pkce_verifier_separately(monkeypatch, tmp_path):
+    import oauth_gateway
+
+    monkeypatch.setenv("INBOX_OAUTH_DB", str(tmp_path / "oauth.sqlite3"))
+    monkeypatch.setenv("INBOX_OAUTH_SECRET", "test-secret")
+    monkeypatch.setenv("INBOX_PUBLIC_BASE_URL", "https://gateway.example")
+    gemini_verifier = "gemini-verifier"
+    google_verifier = "google-verifier"
+    code = "broker-code"
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO clients VALUES (?,?,?)",
+            ("client", "client-secret", "https://client.example/callback"),
+        )
+        conn.execute(
+            "INSERT INTO codes VALUES (?,?,?,?,?,?,0)",
+            (
+                code,
+                "client",
+                "https://client.example/callback",
+                oauth_gateway._b64(__import__("hashlib").sha256(gemini_verifier.encode()).digest()),
+                __import__("json").dumps(
+                    {"scopes": [READ_SCOPE], "google_code": "google-code", "google_verifier": google_verifier}
+                ),
+                2_000_000_000,
+            ),
+        )
+
+    seen = {}
+
+    def fake_exchange(provider_code, redirect_uri, verifier):
+        seen.update(provider_code=provider_code, redirect_uri=redirect_uri, verifier=verifier)
+        return {"refresh_token": "refresh"}
+
+    monkeypatch.setattr(oauth_gateway, "_google_exchange", fake_exchange)
+    app = Starlette(routes=[Route("/oauth/token", oauth_gateway.token, methods=["POST"])])
+    with TestClient(app) as client:
+        response = client.post(
+            "/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": "client",
+                "client_secret": "client-secret",
+                "code": code,
+                "redirect_uri": "https://client.example/callback",
+                "code_verifier": gemini_verifier,
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen == {
+        "provider_code": "google-code",
+        "redirect_uri": "https://gateway.example/oauth/callback",
+        "verifier": google_verifier,
+    }
+    assert response.json()["refresh_token"] == "refresh"
+
+
+def test_static_gemini_client_can_start_authorization(monkeypatch, tmp_path):
+    import oauth_gateway
+
+    monkeypatch.setenv("INBOX_OAUTH_DB", str(tmp_path / "oauth.sqlite3"))
+    monkeypatch.setenv("INBOX_GEMINI_MCP_CLIENT_ID", "gemini-static")
+    monkeypatch.setenv("INBOX_GEMINI_MCP_CLIENT_SECRET", "gemini-static-secret")
+    redirect_uri = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-test"
+    monkeypatch.setenv("INBOX_GEMINI_MCP_REDIRECT_URI", redirect_uri)
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "google-client")
+    monkeypatch.setenv("INBOX_PUBLIC_BASE_URL", "https://gateway.example")
+    app = Starlette(routes=[Route("/oauth/authorize", oauth_gateway.authorize)])
+    app.state.oauth_states = {}
+    with TestClient(app) as client:
+        response = client.get(
+            "/oauth/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "gemini-static",
+                "redirect_uri": redirect_uri,
+                "scope": READ_SCOPE,
+                "state": "gemini-state",
+                "code_challenge": "challenge",
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+    assert response.status_code == 307
+    assert "accounts.google.com" in response.headers["location"]
+    assert len(app.state.oauth_states) == 1
 
 
 def test_make_memory_store_uses_configured_path(tmp_path, monkeypatch):

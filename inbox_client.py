@@ -551,6 +551,23 @@ class InboxClient:
         r.raise_for_status()
         return r.json()
 
+    def find_best_gas(
+        self,
+        origin: str = "",
+        destination: str = "",
+        fuel_type: str = "regular",
+        gallons_needed: float | None = None,
+        max_detour_minutes: float | None = None,
+    ) -> dict:
+        params: dict = {"origin": origin, "destination": destination, "fuel_type": fuel_type}
+        if gallons_needed:
+            params["gallons_needed"] = gallons_needed
+        if max_detour_minutes:
+            params["max_detour_minutes"] = max_detour_minutes
+        r = self._client.get("/gas/find-best", params=params)
+        r.raise_for_status()
+        return r.json()
+
     # ── WhatsApp ─────────────────────────────────────────────────────────
 
     def whatsapp_contacts(self, limit: int = 20) -> list[dict]:

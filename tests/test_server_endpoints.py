@@ -126,6 +126,7 @@ class TestReminderEndpoints:
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
+
     def test_edit_nonexistent_reminder(self, client):
         c, _ = client
         with patch("inbox_server.reminder_by_id", return_value=None):
@@ -206,6 +207,43 @@ class TestReminderEndpoints:
         assert resp.status_code == 200
         # Verify list_name was passed to the AppleScript function
         mock_delete.assert_called_once_with("Buy milk", "Daily")
+
+
+class TestRouteEndpoint:
+    def test_multi_stop_route_is_read_only_and_returns_plan(self, client):
+        c, _ = client
+        with patch(
+            "inbox_server.maps_travel_time",
+            side_effect=[
+                {
+                    "duration_seconds": 20 * 60,
+                    "duration_text": "20 mins",
+                    "distance_text": "5 mi",
+                },
+                {
+                    "duration_seconds": 15 * 60,
+                    "duration_text": "15 mins",
+                    "distance_text": "4 mi",
+                },
+            ],
+        ):
+            resp = c.post(
+                "/maps/route",
+                json={
+                    "origin": "Home",
+                    "stops": [
+                        {"name": "Harsh", "location": "Harsh address", "dwell_minutes": 5},
+                        {"name": "Practice", "location": "Practice address"},
+                    ],
+                    "arrival_time": "2026-08-27T17:40:00-07:00",
+                    "buffer_minutes": 10,
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["read_only"] is True
+        assert data["departure_time"] == "2026-08-27T16:50:00-07:00"
+        assert len(data["legs"]) == 2
 
 
 class TestGitHubEndpoints:
@@ -562,6 +600,150 @@ class TestContactsEndpoints:
         assert resp.status_code == 200
         assert resp.json() == []
 
+    def test_memory_read_is_bounded_and_preserves_records(self, client):
+        c, _ = client
+        rows = [
+            {
+                "id": 7,
+                "memory_type": "project",
+                "subject": "Street play",
+                "content": "Practice coordination",
+                "source": "manual",
+                "confidence": 1.0,
+                "status": "active",
+                "metadata": {"capture_id": "cap_1"},
+            }
+        ]
+        with patch("inbox_server.memory_store.query_entries", return_value=rows) as query:
+            resp = c.get("/memory", params={"memory_type": "project", "limit": 9999})
+        assert resp.status_code == 200
+        assert resp.json() == rows
+        query.assert_called_once_with(
+            query="",
+            memory_type="project",
+            subject="",
+            status="",
+            limit=500,
+        )
+
+    def test_project_records_are_bounded_and_source_linked(self, client):
+        c, _ = client
+        with (
+            patch("inbox_server._get_sheets_service_for_account", return_value=("jshah1331@gmail.com", object())),
+            patch(
+                "inbox_server.sheets_values_get",
+                return_value=[
+                    ["Area", "Project", "Status", "Next Action", "Source of Truth"],
+                    ["Personal Ops", "Life Ops", "Active", "Keep rules simple", "System Map"],
+                    ["Hardware", "Hardware Lab", "Active", "Inventory", "Drive folder"],
+                ],
+            ) as read_values,
+        ):
+            resp = c.get("/project-records", params={"limit": 1})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema_version"] == "inbox.project_records.v1"
+        assert data["read_only"] is True
+        assert data["record_count"] == 1
+        assert data["records"][0]["project"] == "Life Ops"
+        assert data["records"][0]["source_ref"]["source"] == "google_sheets"
+        assert data["records"][0]["source_ref"]["row"] == 2
+        read_values.assert_called_once()
+
+    def test_master_ops_queues_are_read_only_and_row_attributed(self, client):
+        c, _ = client
+        tab_values = {
+            "Email Action Queue": [
+                ["Email ID", "Subject", "Action Needed", "Status"],
+                ["E-0001", "Review billing", "Update billing model", "Open"],
+            ],
+            "Capture Inbox": [["Captured At", "Text", "Status"]],
+            "Google Tasks Mirror": [
+                ["google_task_id", "title", "status"],
+                ["task-1", "Follow up", "needsAction"],
+            ],
+        }
+
+        def read_values(_service, _spreadsheet_id, range_name):
+            for name, values in tab_values.items():
+                if name in range_name:
+                    return values
+            raise AssertionError(range_name)
+
+        with (
+            patch("inbox_server._get_sheets_service_for_account", return_value=("jshah1331@gmail.com", object())),
+            patch("inbox_server.sheets_values_get", side_effect=read_values),
+        ):
+            resp = c.get("/master-ops/queues", params={"limit": 1})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema_version"] == "inbox.master_ops_queues.v1"
+        assert data["read_only"] is True
+        email_row = data["queues"]["email_actions"]["records"][0]
+        assert email_row["email_id"] == "E-0001"
+        assert email_row["source_ref"]["sheet_name"] == "Email Action Queue"
+        assert email_row["source_ref"]["row"] == 2
+
+    def test_lifeops_sheet_projection_preserves_people_and_action_rows(self, client):
+        c, _ = client
+        tab_values = {
+            "04_PEOPLE": [["person_id", "name", "identity_confidence"], ["P-1", "Alex", "high"]],
+            "05_ACTIONS": [["action_id", "action", "state"], ["A-1", "Reply to Alex", "READY_HUMAN"]],
+            "03_PROJECTS": [["project_id", "project", "status"], ["PR-1", "LifeOps", "ACTIVE"]],
+        }
+
+        def read_values(_service, _spreadsheet_id, range_name):
+            for name, values in tab_values.items():
+                if name in range_name:
+                    return values
+            raise AssertionError(range_name)
+
+        with (
+            patch("inbox_server._get_sheets_service_for_account", return_value=("jshah1331@gmail.com", object())),
+            patch("inbox_server.sheets_values_get", side_effect=read_values),
+        ):
+            resp = c.get("/lifeops-sheet/projection", params={"limit": 1})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema_version"] == "inbox.lifeops_sheet.v1"
+        assert data["read_only"] is True
+        assert data["spreadsheet_id"] == "10XAlrmI7tMvXADyrHVK7hLYGcDV6V-IxZhihtxsh5m8"
+        assert data["tabs"]["people"]["records"][0]["person_id"] == "P-1"
+        assert data["tabs"]["actions"]["records"][0]["action_id"] == "A-1"
+        assert data["tabs"]["projects"]["records"][0]["source_ref"]["row"] == 2
+        assert data["tabs"]["people"]["records"][0]["source_ref"]["sheet_name"] == "04_PEOPLE"
+
+    def test_lifeops_sheet_projection_can_include_bounded_auxiliary_tabs(self, client):
+        c, _ = client
+        tab_values = {
+            "04_PEOPLE": [["person_id", "name"], ["P-1", "Alex"]],
+            "05_ACTIONS": [["action_id", "action"], ["A-1", "Reply"]],
+            "03_PROJECTS": [["project_id", "project"], ["PR-1", "LifeOps"]],
+            "08_EVIDENCE": [["evidence_id", "claim"], ["E-1", "Connection"]],
+            "11_SOURCES": [["source_id", "canonical_authority"], ["S-1", "Gmail"]],
+        }
+
+        def read_values(_service, _spreadsheet_id, range_name):
+            for name, values in tab_values.items():
+                if name in range_name:
+                    return values
+            raise AssertionError(range_name)
+
+        with (
+            patch("inbox_server._get_sheets_service_for_account", return_value=("jwalinshah13@gmail.com", object())),
+            patch("inbox_server.sheets_values_get", side_effect=read_values),
+        ):
+            resp = c.get(
+                "/lifeops-sheet/projection",
+                params={"limit": 1, "include_tabs": "evidence,sources"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["tabs"]["evidence"]["records"][0]["evidence_id"] == "E-1"
+        assert data["tabs"]["sources"]["records"][0]["source_id"] == "S-1"
+        assert data["tabs"]["evidence"]["records"][0]["source_ref"]["sheet_name"] == "08_EVIDENCE"
+        assert data["spreadsheet_id"] == "10XAlrmI7tMvXADyrHVK7hLYGcDV6V-IxZhihtxsh5m8"
+
     def test_get_contact_profile(self, client):
         c, _ = client
         mock_profile = {
@@ -872,3 +1054,17 @@ class TestAIEndpoints:
             resp = c.post("/ai/extract-actions", json={"text": "No actions in this message."})
         assert resp.status_code == 200
         assert resp.json() == {"actions": []}
+
+
+class TestLifeOpsReadPrimitives:
+    def test_current_location_is_explicitly_read_only(self, client):
+        c, _ = client
+        with patch("inbox_server.get_current_location", return_value="37.5485,-121.9886"):
+            resp = c.get("/location/current")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "location": "37.5485,-121.9886",
+            "available": True,
+            "source": "macos_core_location_or_home_address",
+            "read_only": True,
+        }

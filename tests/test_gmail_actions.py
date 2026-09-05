@@ -274,6 +274,31 @@ class TestGmailCompose:
         )
         assert resp.status_code == 404
 
+    def test_draft_create_does_not_send(self, client_with_gmail):
+        c, state, mock_svc = client_with_gmail
+        with patch(
+            "inbox_server.gmail_create_draft",
+            return_value={"id": "draft1", "message_id": "msg1"},
+        ) as mock_draft:
+            resp = c.post(
+                "/messages/drafts",
+                json={
+                    "to": "bob@example.com",
+                    "subject": "Hello",
+                    "body": "Hi Bob",
+                    "account": "test@gmail.com",
+                },
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "ok": True,
+            "account": "test@gmail.com",
+            "draft": {"id": "draft1", "message_id": "msg1"},
+        }
+        mock_draft.assert_called_once_with(
+            mock_svc, "bob@example.com", "Hello", "Hi Bob"
+        )
+
 
 class TestGmailReplyRouting:
     def test_reply_auto_routes_to_message_owner(self, client):
@@ -552,6 +577,26 @@ class TestGmailServiceFunctions:
         mock_svc = MagicMock()
         mock_svc.users().messages().send().execute.side_effect = Exception("API error")
         assert gmail_compose_send(mock_svc, "bob@test.com", "Hello", "Body") is False
+
+    def test_gmail_create_draft(self):
+        from services import gmail_create_draft
+
+        mock_svc = MagicMock()
+        mock_svc.users().drafts().create().execute.return_value = {
+            "id": "draft1",
+            "message": {"id": "msg1"},
+        }
+        assert gmail_create_draft(mock_svc, "bob@test.com", "Hello", "Body") == {
+            "id": "draft1",
+            "message_id": "msg1",
+        }
+
+    def test_gmail_create_draft_failure(self):
+        from services import gmail_create_draft
+
+        mock_svc = MagicMock()
+        mock_svc.users().drafts().create().execute.side_effect = Exception("API error")
+        assert gmail_create_draft(mock_svc, "bob@test.com", "Hello", "Body") is None
 
     def test_extract_attachments(self):
         from services import _extract_attachments

@@ -24,11 +24,13 @@ from __future__ import annotations
 from typing import Any
 
 import ambient_notes
+from inbox_bridge_adapter import event_from_memory_entry
 from mcp_gateway import make_backend, make_memory_store
 from tools_registry import register_all as _register_registry_tools
 
 try:
     from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
 except ImportError as exc:  # pragma: no cover
     raise RuntimeError(
         "The 'mcp' package is required. Install with: uv sync"
@@ -84,7 +86,14 @@ def build_mcp(
     memory_store = make_memory_store()
 
     name = "Inbox Personal Assistant" + (" (Read Only)" if readonly else "")
-    mcp = FastMCP(name, stateless_http=for_http, json_response=for_http)
+    transport_security = (
+        TransportSecuritySettings(
+            allowed_hosts=["127.0.0.1:8000", "localhost:8000", "crumpled-resume-arbitrate.ngrok-free.dev"]
+        )
+        if for_http
+        else None
+    )
+    mcp = FastMCP(name, stateless_http=for_http, json_response=for_http, transport_security=transport_security)
 
     # --- Ambient notes ---
 
@@ -132,6 +141,11 @@ def build_mcp(
     async def list_open_commitments(limit: int = 25) -> list[dict]:
         """List open commitment memory entries."""
         return memory_store.list_open_commitments(limit=limit)
+
+    @mcp.tool()
+    async def export_bridge_event(entry_id: int) -> dict:
+        """Project an existing Inbox memory entry into a Bridge event envelope."""
+        return event_from_memory_entry(memory_store.get_entry(entry_id))
 
     if not readonly:
 

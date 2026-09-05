@@ -1,0 +1,16 @@
+{
+  "request": {
+    "command": "series",
+    "series_id": "PET.EMM_EPMR_PTE_NUS_DPG.W"
+  },
+  "response": {
+    "total": 3,
+    "dateFormat": "YYYY-MM-DD",
+    "frequency": "weekly",
+    "data": [
+      {"period": "2026-08-11", "value": "4.876"},
+      {"period": "2026-08-04", "value": "4.801"},
+      {"period": "2026-07-28", "value": "4.799"}
+    ]
+  }
+}

@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import quote
 
+from mcp.types import ToolAnnotations
+
 ParamLocation = Literal["query", "body", "path"]
 _EMPTY = inspect.Parameter.empty
 
@@ -107,6 +109,23 @@ def _build_handler(tool: Tool, backend: Any) -> Callable[..., Any]:
     return handler
 
 
+def _tool_annotations(tool: Tool) -> ToolAnnotations:
+    """Describe the effect boundary of a registry tool to MCP clients."""
+    if tool.readonly:
+        return ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    return ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+
+
 def register_all(
     mcp: Any,
     backend: Any,
@@ -122,7 +141,7 @@ def register_all(
         if readonly_only and not tool.readonly:
             continue
         handler = _build_handler(tool, backend)
-        mcp.tool()(handler)
+        mcp.tool(annotations=_tool_annotations(tool))(handler)
         registered.append(tool.name)
     return registered
 
@@ -219,6 +238,22 @@ TOOLS: list[Tool] = [
             Param("to", str, "", "body"),
             Param("subject", str, "", "body"),
             Param("message_id_header", str, "", "body"),
+            Param("account", str, "", "body"),
+        ],
+    ),
+    Tool(
+        name="create_gmail_draft",
+        method="POST",
+        path="/messages/drafts",
+        description=(
+            "Create a Gmail draft without sending it. Confirmation-gated: caller "
+            "must set confirm=True."
+        ),
+        confirm=True,
+        params=[
+            Param("to", str, "", "body"),
+            Param("subject", str, "", "body"),
+            Param("body", str, _EMPTY, "body"),
             Param("account", str, "", "body"),
         ],
     ),
@@ -761,6 +796,44 @@ TOOLS: list[Tool] = [
             Param("origin", str, _EMPTY, "query"),
             Param("destination", str, _EMPTY, "query"),
             Param("mode", str, "driving", "query"),
+        ],
+    ),
+    Tool(
+        name="multi_stop_route",
+        method="POST",
+        path="/maps/route",
+        description=(
+            "Read-only route snapshot for an origin and ordered stops. Returns "
+            "each leg, dwell time, and one latest safe departure time. Use for "
+            "pickup chains and other multi-location commitments."
+        ),
+        readonly=True,
+        params=[
+            Param("stops", list[dict[str, Any]], _EMPTY, "body"),
+            Param("arrival_time", str, _EMPTY, "body"),
+            Param("origin", str, "", "body"),
+            Param("origin_name", str, "Origin", "body"),
+            Param("mode", str, "driving", "body"),
+            Param("buffer_minutes", int, 10, "body"),
+        ],
+    ),
+    Tool(
+        name="find_best_gas",
+        method="GET",
+        path="/gas/find-best",
+        description=(
+            "Find the best gas station near an origin, ranked deterministically "
+            "by fuel price plus route detour cost. Use when the user needs gas "
+            "('I need gas' or 'gas on the way to X'). origin: 'lat,lng', 'home', "
+            "or 'work'."
+        ),
+        readonly=True,
+        params=[
+            Param("origin", str, "", "query"),
+            Param("destination", str, "", "query"),
+            Param("fuel_type", str, "regular", "query"),
+            Param("gallons_needed", float, 0, "query"),
+            Param("max_detour_minutes", float, 0, "query"),
         ],
     ),
     Tool(

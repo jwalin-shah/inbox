@@ -18,23 +18,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+
+from loguru import logger
+from playwright.async_api import async_playwright
 
 from connectors.base import (
     PROFILES_DIR,
-    RAW_DIR,
     AuthStatus,
     BaseConnector,
     JobStatus,
     SyncResult,
 )
-from loguru import logger
-from playwright.async_api import async_playwright
 
 # ── ChatGPT internal API endpoints (unsupported — adapter must be replaceable) ──
 
@@ -166,7 +162,6 @@ class ChatGPTConnector(BaseConnector):
         # Save raw data
         batch_id = f"{job_id}-{int(time.time())}"
         raw_path = self._save_raw(all_raw, batch_id)
-        raw_hash = self._hash_file(raw_path)
 
         # Normalize
         normalized = [self._normalize_conversation(c, "chatgpt", self.account_id) for c in all_raw]

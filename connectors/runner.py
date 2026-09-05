@@ -11,17 +11,14 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
 import sys
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
 
-from connectors.base import INBOX_DATA, STATE_DB, AuthStatus, JobStatus
+from loguru import logger
+
+from connectors.base import STATE_DB, AuthStatus
 from connectors.chatgpt.connector import ChatGPTConnector
 from connectors.claude.connector import ClaudeConnector
-from loguru import logger
 
 logger.remove()
 logger.add(sys.stderr, level="INFO", format="<green>{time:HH:mm:ss}</green> | {message}")

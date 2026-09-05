@@ -8,7 +8,7 @@ Inbox uses local connector CLIs as adapters, while Inbox remains the product lay
 | --- | --- | --- | --- | --- |
 | Google Workspace | `gog` | Gmail, Calendar, Drive, Docs, Sheets, Contacts | `~/Library/Application Support/gogcli` | Yes, confirm first |
 | WhatsApp | `wacli` | WhatsApp chats/history | `~/.wacli` | Yes, confirm first |
-| iMessage/SMS | `imsg` | Messages.app history | `~/Library/Messages/chat.db` | Yes, confirm first |
+| iMessage/SMS | Inbox native reader; optional `imsg` CLI | Messages.app history | `~/Library/Messages/chat.db` | Yes, confirm first |
 | LinkedIn | `python3 scripts/linkedin_web_scanner.py` | LinkedIn Messaging export/scanner DB | `~/.openhuman/**/linkedin_data.db` | No |
 | Discord | `discrawl` | Discord archive/search | `~/Library/Application Support/discrawl/discrawl.db` | No |
 | X/Twitter | `birdclaw` | Local X/Twitter archive | `~/.birdclaw` | Yes, confirm first |
@@ -27,7 +27,7 @@ Inbox uses local connector CLIs as adapters, while Inbox remains the product lay
   - `["connector:linkedin"]`
   - `["connectors"]`
 
-`/search` with `["all"]`, `["imessage"]`, or `["gmail"]` keeps the existing built-in Inbox behavior and does not automatically call external connector CLIs.
+`/search` with `["all"]`, `["imessage"]`, or `["gmail"]` keeps the existing built-in Inbox behavior and does not automatically call external connector CLIs. Connector status reports that native path separately from optional CLI installation.
 
 ## Account Substrate
 
@@ -60,7 +60,7 @@ Every status row includes `action_policy`:
 ## Readiness Checklist
 
 - Google Workspace: `gog` on PATH, OAuth status command succeeds, Gmail/Calendar/Sheets scopes are present, and dry-run sync command is reviewable.
-- iMessage/SMS: `imsg` on PATH, `~/Library/Messages/chat.db` exists/readable, and Full Disk Access is granted to the launcher process.
+- iMessage/SMS native Inbox path: `~/Library/Messages/chat.db` exists/readable by the Inbox process and the required macOS permission is granted. `imsg` is optional for external CLI/search workflows; it is not required for Inbox's built-in reader.
 - WhatsApp: `wacli` on PATH, `wacli doctor --json` succeeds, and sync is reviewed through dry-run before any execute path.
 - LinkedIn: scanner module imports, LinkedIn export/scanner `linkedin_data.db` exists/readable, and scanner use remains opt-in with `INBOX_ENABLE_LINKEDIN_SCRAPER=1`.
 - Job outreach: Gmail and LinkedIn sources are both readable so recruiter email history and LinkedIn message history are available.

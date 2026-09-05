@@ -1,0 +1,72 @@
+{
+  "places": [
+    {
+      "id": "ChIJARCO",
+      "displayName": {"text": "ARCO", "languageCode": "en"},
+      "formattedAddress": "123 Main St, Fremont, CA 94538, USA",
+      "location": {"latitude": 37.501, "longitude": -121.912},
+      "fuelOptions": {
+        "fuelPrices": [
+          {
+            "type": "REGULAR_UNLEADED",
+            "price": {"currencyCode": "USD", "units": "4", "nanos": 470000000},
+            "updateTime": "2026-08-18T17:20:00Z"
+          },
+          {
+            "type": "PREMIUM",
+            "price": {"currencyCode": "USD", "units": "4", "nanos": 890000000},
+            "updateTime": "2026-08-18T17:20:00Z"
+          }
+        ]
+      },
+      "googleMapsLinks": {
+        "placeUri": "https://maps.google.com/?cid=1001",
+        "directionsUri": "https://www.google.com/maps/dir/?api=1&destination=ARCO&destination_place_id=ChIJARCO"
+      }
+    },
+    {
+      "id": "ChIJCOST",
+      "displayName": {"text": "Costco Gasoline", "languageCode": "en"},
+      "formattedAddress": "456 Warehouse Way, Fremont, CA 94538, USA",
+      "location": {"latitude": 37.610, "longitude": -121.930},
+      "fuelOptions": {
+        "fuelPrices": [
+          {
+            "type": "REGULAR_UNLEADED",
+            "price": {"currencyCode": "USD", "units": "4", "nanos": 290000000},
+            "updateTime": "2026-08-18T17:40:00Z"
+          }
+        ]
+      },
+      "googleMapsLinks": {
+        "directionsUri": "https://www.google.com/maps/dir/?api=1&destination=Costco&destination_place_id=ChIJCOST"
+      }
+    },
+    {
+      "id": "ChIJSTALE",
+      "displayName": {"text": "Old Town Fuel", "languageCode": "en"},
+      "formattedAddress": "789 Old Rd, Fremont, CA 94536, USA",
+      "location": {"latitude": 37.520, "longitude": -121.900},
+      "fuelOptions": {
+        "fuelPrices": [
+          {
+            "type": "REGULAR_UNLEADED",
+            "price": {"currencyCode": "USD", "units": "3", "nanos": 999000000},
+            "updateTime": "2026-08-17T10:00:00Z"
+          }
+        ]
+      },
+      "googleMapsLinks": {
+        "directionsUri": "https://maps.google.com/?cid=1003"
+      }
+    },
+    {
+      "id": "ChIJNOPRICE",
+      "displayName": {"text": "No Price Mart", "languageCode": "en"},
+      "formattedAddress": "321 Empty Ave, Fremont, CA 94538, USA",
+      "location": {"latitude": 37.540, "longitude": -121.950},
+      "fuelOptions": {"fuelPrices": []},
+      "googleMapsLinks": {}
+    }
+  ]
+}

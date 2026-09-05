@@ -15,10 +15,11 @@ import inbox_mcp_factory
 class RecordingMCP:
     """A FastMCP stand-in that records tool registrations."""
 
-    def __init__(self, name, stateless_http=False, json_response=False):
+    def __init__(self, name, stateless_http=False, json_response=False, transport_security=None):
         self.name = name
         self.stateless_http = stateless_http
         self.json_response = json_response
+        self.transport_security = transport_security
         self.tools: dict[str, callable] = {}
 
     def tool(self):
@@ -142,6 +143,7 @@ class TestBuildMcp:
         assert "read_daily_note" in mcp.tools
         assert "get_memory" in mcp.tools
         assert "list_open_commitments" in mcp.tools
+        assert "export_bridge_event" in mcp.tools
 
     def test_readonly_omits_write_tools(self):
         mcp, _, _ = _build_with_mocks(readonly=True)
@@ -156,6 +158,21 @@ class TestBuildMcp:
         assert "save_memory_note" in mcp.tools
         assert "update_memory" in mcp.tools
         assert "close_commitment" in mcp.tools
+
+    @pytest.mark.anyio
+    async def test_export_bridge_event_projects_existing_memory(self):
+        mcp, _, memory = _build_with_mocks(readonly=True)
+        memory.get_entry.return_value = {
+            "id": 7,
+            "content": "Capture this for Bridge.",
+            "source": "manual",
+            "created_at": "2026-08-23T20:00:00Z",
+        }
+        event = await mcp.tools["export_bridge_event"](7)
+        assert event["id"] == "inbox:memory:7"
+        assert event["version"] == "bridge.contracts.v1"
+        assert event["payload"]["text"] == "Capture this for Bridge."
+        memory.get_entry.assert_called_once_with(7)
 
     def test_calls_register_registry_tools(self):
         from unittest.mock import ANY

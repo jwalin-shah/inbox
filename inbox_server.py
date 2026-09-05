@@ -13,6 +13,8 @@ import os
 import re
 import shutil
 import sqlite3
+import threading
+import time
 from collections.abc import Callable, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -25,11 +27,13 @@ from urllib.parse import parse_qs, parse_qsl, urlsplit
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from loguru import logger
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, Field, StrictBool
 
 import ambient_notes
 import egress_audit
 import google_account_resolution as _gacct
+from route_planning import RouteStop, plan_multi_stop_route
+from approval_store import ApprovalStore
 from capability_inventory import build_capability_inventory
 from capture_health import CaptureHealthRecord, CaptureHealthStore, capture_summary, utc_now_iso
 from connector_registry import (
@@ -39,6 +43,8 @@ from connector_registry import (
     partition_search_sources,
     search_connectors,
 )
+from event_backfill import backfill_message_index
+from event_store import RawEvent, RawEventStore
 from gmail_triage import (
     KIND_PREFIX as _KIND_PREFIX,
 )
@@ -70,12 +76,15 @@ from gmail_triage import (
 from gmail_triage import (
     thread_summary_to_out as _thread_summary_to_out,
 )
+from identity_link_store import IdentityLinkStore
 from memory_store import MemoryStore
 from message_index_store import MessageIndexStore
 from message_sync import bootstrap as index_bootstrap_sync
 from message_sync import incremental as index_incremental_sync
-from approval_store import ApprovalStore
+from normalization_projection import gmail_normalization, reconcile_tasks, todo_candidates
+from person_store import PersonProfileStore
 from scheduler import SchedulerStore
+from semantic_index import DEFAULT_MODEL_ID, LocalTextEmbedder, content_hash, item_embedding_text
 from service_models import ApprovalGateDecision, ApprovalLease
 from services import (
     IMSG_DB,
@@ -134,6 +143,8 @@ from services import (
     drive_files,
     drive_get,
     drive_upload,
+    find_best_gas,
+    find_nearby_gas_prices,
     gemini_categorize,
     gemini_digest,
     gemini_extract_action_items,
@@ -150,6 +161,7 @@ from services import (
     gmail_compose_send,
     gmail_contacts,
     gmail_contacts_by_label,
+    gmail_create_draft,
     gmail_create_filter,
     gmail_delete,
     gmail_filter_audit,
@@ -168,6 +180,7 @@ from services import (
     gmail_unsubscribe,
     google_auth_all,
     google_auth_diagnostics,
+    google_contacts_all,
     imsg_contacts,
     imsg_links,
     imsg_messages,
@@ -232,6 +245,8 @@ from services import (
 from services import (
     autocomplete as services_autocomplete,
 )
+from source_registry import list_source_definitions
+from triage_projection import TRIAGE_CATEGORIES, triage_message_threads
 
 # Test-only: keeps _extract_* / _rank_thread imports live for ruff.
 _gmail_triage_reexports = (
@@ -299,6 +314,7 @@ APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
         "POST", r"^/imessage/send$", "imessage_gmail", "send_message", "inbox.messages.send"
     ),
     _route_rule("POST", r"^/messages/compose$", "gmail", "compose_send", "inbox.gmail.send_email"),
+    _route_rule("POST", r"^/messages/drafts$", "gmail", "draft_create", "inbox.gmail.create_draft"),
     _route_rule("POST", r"^/messages/gmail/reply$", "gmail", "reply", "inbox.gmail.reply"),
     _route_rule(
         "POST",
@@ -400,6 +416,20 @@ APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
         "inbox.tasks.write",
     ),
     _route_rule("PUT", r"^/tasks/[^/]+$", "google_tasks", "update_task", "inbox.tasks.write"),
+    _route_rule(
+        "POST",
+        r"^/people/[^/]+/(notes|relationships)$",
+        "lifeops_local",
+        "person_profile_write",
+        "inbox.people.write",
+    ),
+    _route_rule(
+        "POST",
+        r"^/identity/links$",
+        "lifeops_local",
+        "identity_link_write",
+        "inbox.identity.write",
+    ),
     _route_rule(
         "DELETE",
         r"^/tasks(/links)?/[^/]+$",
@@ -631,6 +661,11 @@ def _approval_resource_ref(request: Request, fields: dict[str, Any]) -> str:
         "document_id",
         "spreadsheet_id",
         "task_id",
+        "canonical_person_id",
+        "canonical_id",
+        "target_id",
+        "target_source",
+        "contact_id",
         "reminder_id",
         "chat_name",
         "to",
@@ -916,6 +951,21 @@ class CalendarEventOut(BaseModel):
     reminders: dict = {}
     recurring_event_id: str = ""
     workflow: str = ""
+
+
+class RouteStopRequest(BaseModel):
+    name: str = "Stop"
+    location: str
+    dwell_minutes: int = Field(default=0, ge=0, le=1440)
+
+
+class RoutePlanRequest(BaseModel):
+    origin: str = ""
+    origin_name: str = "Origin"
+    stops: list[RouteStopRequest] = Field(min_length=1, max_length=12)
+    arrival_time: str
+    mode: str = "driving"
+    buffer_minutes: int = Field(default=10, ge=0, le=240)
 
 
 class CalendarOut(BaseModel):
@@ -1228,6 +1278,118 @@ class WorkflowEventRequest(BaseModel):
     account: str = ""
 
 
+class CaptureEventRequest(BaseModel):
+    source: str
+    event_type: str = "manual.capture"
+    source_object_id: str = ""
+    observed_at: str = ""
+    occurred_at: str = ""
+    actor: dict[str, Any] = Field(default_factory=dict)
+    object: dict[str, Any] = Field(default_factory=dict)
+    content: str = ""
+    content_ref: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 1.0
+    payload: Any = None
+
+
+class RawEventOut(BaseModel):
+    event_id: str
+    source: str
+    source_object_id: str
+    observed_at: str
+    occurred_at: str
+    actor: dict[str, Any]
+    object: dict[str, Any]
+    event_type: str
+    content_ref: str
+    metadata: dict[str, Any]
+    provenance: dict[str, Any]
+    confidence: float
+    payload: Any
+    ingested_at: str
+    schema_version: str
+
+
+class CaptureEventOut(BaseModel):
+    ok: bool
+    inserted: bool
+    event: RawEventOut
+
+
+class RawEventListOut(BaseModel):
+    db_path: str
+    count: int
+    events: list[RawEventOut]
+
+
+class SourceRegistryOut(BaseModel):
+    registry_version: str = "lifeops.source_registry.v1"
+    sources: list[dict[str, Any]]
+
+
+class EventBackfillRequest(BaseModel):
+    source: str = ""
+    account: str = ""
+    batch_size: int = 250
+    max_items: int | None = None
+
+
+class EventBackfillOut(BaseModel):
+    ok: bool
+    result: dict[str, Any]
+
+
+class PersonNoteRequest(BaseModel):
+    body: str
+    source: str = "manual"
+    source_ref: str = ""
+    confidence: float = 1.0
+    confirmed: bool = True
+    expires_at: str = ""
+
+
+class PersonRelationshipRequest(BaseModel):
+    label: str
+    context: str = ""
+    source: str = "manual"
+    source_ref: str = ""
+    confidence: float = 1.0
+    confirmed: bool = True
+
+
+class IdentityLinkRequest(BaseModel):
+    canonical_person_id: str
+    canonical_name: str = ""
+    target_source: str = "contacts"
+    target_id: str
+    target_name: str = ""
+    confidence: float = 1.0
+    confirmed: bool = True
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MessageTriageRequest(BaseModel):
+    source: str = ""
+    account: str = ""
+    category: str = ""
+    limit: int = 50
+    offset: int = 0
+
+
+class MessageTriageOut(BaseModel):
+    checked_at: str
+    read_only: bool
+    projection: str
+    items: list[dict[str, Any]]
+    counts: dict[str, int]
+    returned_count: int
+    filters: dict[str, str]
+    coverage: dict[str, Any]
+    authority_rule: str
+
+
 class NeedsActionOut(BaseModel):
     thread_read_model: str = "index"
     raw_thread_provider_fetch: bool = False
@@ -1240,7 +1402,7 @@ class NeedsActionOut(BaseModel):
 class IndexSyncOut(BaseModel):
     ok: bool
     mode: str
-    stats: dict[str, dict[str, int]]
+    stats: dict[str, Any]
 
 
 class IndexSyncStateOut(BaseModel):
@@ -1269,6 +1431,16 @@ class IndexOverviewOut(BaseModel):
     raw_provider_fetch: bool = False
     counts: dict[str, int]
     sync_states: list[IndexSyncStateOut]
+
+
+class IndexedMessageSearchOut(BaseModel):
+    query: str
+    mode: str
+    read_only: bool = True
+    raw_provider_fetch: bool = False
+    results: list[dict[str, Any]]
+    embedding_status: dict[str, Any]
+    embedding_error: str = ""
 
 
 class IndexSyncHealthStateOut(IndexSyncStateOut):
@@ -1418,6 +1590,13 @@ class VoiceConfigRequest(BaseModel):
 class ComposeRequest(BaseModel):
     to: str
     subject: str
+    body: str
+    account: str = ""
+
+
+class GmailDraftRequest(BaseModel):
+    to: str = ""
+    subject: str = ""
     body: str
     account: str = ""
 
@@ -1575,6 +1754,7 @@ class ServerState:
         self.sheets_services: dict[str, object] = {}
         self.docs_services: dict[str, object] = {}
         self.tasks_services: dict[str, object] = {}
+        self.google_contacts_services: dict[str, object] = {}
         self.conv_cache: dict[str, Contact] = {}  # "source:id" -> Contact
         self.events_cache: list[CalendarEvent] = []
         self.ambient: AmbientService = AmbientService(
@@ -1584,12 +1764,17 @@ class ServerState:
         self.scheduler: SchedulerStore = SchedulerStore()
         self.approvals: ApprovalStore = ApprovalStore()
         self.index_store: MessageIndexStore = MessageIndexStore()
+        self.event_store: RawEventStore = RawEventStore()
+        self.person_store: PersonProfileStore = PersonProfileStore()
+        self.identity_link_store: IdentityLinkStore = IdentityLinkStore()
         self.capture_health_store: CaptureHealthStore = CaptureHealthStore()
         self.source_adapters: SourceAdapters = SourceAdapters()
 
 
 state = ServerState()
 memory_store = MemoryStore()
+_index_embedder: LocalTextEmbedder | None = None
+_index_embedding_lock = threading.Lock()
 
 
 @dataclass
@@ -1950,6 +2135,16 @@ async def _process_departure_alerts() -> None:
                 title = f"🚗 Leave now for {dep.event_summary} ({dep.duration_text})"
                 notes = f"Travel: {dep.distance_text}, {dep.duration_text} ({dep.mode})\nTo: {dep.event_location}\nEvent: {dep.event_start.strftime('%I:%M %p')}"
 
+                # Surface a local notification first, then create a synced task/reminder.
+                # The worker is opt-in via INBOX_ENABLE_DEPARTURE_ALERTS and only runs
+                # when a live origin and a located calendar event are available.
+                notified = await asyncio.to_thread(
+                    send_notification,
+                    title,
+                    f"Leave by {dep.departure_time.strftime('%I:%M %p')} · {notes}",
+                    "calendar",
+                )
+
                 # Try Google Tasks first, fallback to Apple Reminders
                 ok = False
                 if state.tasks_services:
@@ -1968,12 +2163,18 @@ async def _process_departure_alerts() -> None:
                     )
 
                 if ok:
+                    _departure_task_created.add(event_key)
                     logger.info(f"[scheduler] Departure alert: {title}")
+                elif notified:
+                    _departure_task_created.add(event_key)
+                    logger.info(f"[scheduler] Departure notification sent: {title}")
     except Exception:
         logger.exception("[scheduler] _process_departure_alerts failed")
 
 
 _INDEX_SYNC_INTERVAL_TICKS = 40  # 40 * 30s = every 20 minutes
+_index_sync_lock: asyncio.Lock | None = None
+_index_sync_lock_loop: asyncio.AbstractEventLoop | None = None
 # Widened from 5 to 20 minutes 2026-07-20: this Mac is on a pre-release macOS
 # (27.0, "Tier 2 unsupported" per Homebrew) that crashes with EXC_BREAKPOINT/
 # SIGTRAP inside Python's built-in _ssl module's TLS-alert error-handling path
@@ -1983,10 +2184,93 @@ _INDEX_SYNC_INTERVAL_TICKS = 40  # 40 * 30s = every 20 minutes
 # often the crash path gets hit, it doesn't fix the underlying OS bug.
 
 
+def _get_index_sync_lock() -> asyncio.Lock:
+    """Return a lock scoped to the active event loop for all index sync entrypoints."""
+    global _index_sync_lock, _index_sync_lock_loop
+    loop = asyncio.get_running_loop()
+    if _index_sync_lock is None or _index_sync_lock_loop is not loop:
+        _index_sync_lock = asyncio.Lock()
+        _index_sync_lock_loop = loop
+    return _index_sync_lock
+
+
+async def _run_index_sync(sync_func: Callable[[MessageIndexStore], Any], mode: str) -> Any:
+    """Serialize local SQLite syncs and emit useful run receipts to the server log."""
+    async with _get_index_sync_lock():
+        started = time.monotonic()
+        logger.info("[index-sync] starting: {}", mode)
+        try:
+            stats = await asyncio.to_thread(sync_func, state.index_store)
+        except Exception:
+            logger.exception("[index-sync] failed: {}", mode)
+            raise
+        elapsed = time.monotonic() - started
+        logger.info("[index-sync] completed: mode={} elapsed_seconds={:.2f} stats={}", mode, elapsed, stats)
+        return stats
+
+
+def _embed_pending_items(
+    store: MessageIndexStore, *, batch_size: int = 8, max_items: int = 32
+) -> dict[str, Any]:
+    """Fill a bounded batch of missing local vectors for the configured model."""
+    global _index_embedder
+    if max_items <= 0:
+        return {"processed": 0, **store.embedding_status(DEFAULT_MODEL_ID)}
+    if _index_embedder is None:
+        _index_embedder = LocalTextEmbedder()
+
+    processed = 0
+    while processed < max_items:
+        rows = store.embedding_backlog(
+            model_id=DEFAULT_MODEL_ID,
+            limit=min(max(1, batch_size), max_items - processed),
+        )
+        if not rows:
+            break
+        texts = [item_embedding_text(row) for row in rows]
+        with _index_embedding_lock:
+            vectors = _index_embedder.encode(texts, batch_size=max(1, batch_size))
+        if len(vectors) != len(rows):
+            raise RuntimeError("local embedding model returned an unexpected vector count")
+        for row, text, vector in zip(rows, texts, vectors, strict=True):
+            store.upsert_embedding(
+                item_id=int(row["id"]),
+                model_id=DEFAULT_MODEL_ID,
+                content_hash=content_hash(text),
+                vector=vector,
+            )
+        processed += len(rows)
+    return {"processed": processed, **store.embedding_status(DEFAULT_MODEL_ID)}
+
+
+async def _run_embedding_refresh(*, max_items: int = 32) -> dict[str, Any]:
+    """Refresh derived vectors without making provider sync depend on the model."""
+    started = time.monotonic()
+    async with _get_index_sync_lock():
+        try:
+            result = await asyncio.to_thread(
+                _embed_pending_items, state.index_store, max_items=max_items
+            )
+        except Exception:
+            logger.exception("[embedding-sync] failed")
+            raise
+    elapsed = time.monotonic() - started
+    logger.info("[embedding-sync] completed: elapsed_seconds={:.2f} status={}", elapsed, result)
+    return result
+
+
+def _index_bootstrap_with_events(store: MessageIndexStore) -> Any:
+    return index_bootstrap_sync(store, event_store=state.event_store)
+
+
+def _index_incremental_with_events(store: MessageIndexStore) -> Any:
+    return index_incremental_sync(store, event_store=state.event_store)
+
+
 async def _scheduler_loop() -> None:
     """Background loop: check scheduled messages, followups, departures every 30s.
 
-    Also runs incremental mail/iMessage index sync every 5 minutes. Before this,
+    Also runs incremental mail/iMessage index sync every 20 minutes. Before this,
     index_incremental_sync() was only reachable via a manual POST to
     /index/sync/incremental — nothing called it automatically, so the index went
     stale between manual triggers (this is what caused it to sit empty for weeks).
@@ -2002,10 +2286,15 @@ async def _scheduler_loop() -> None:
             await _process_departure_alerts()
             if tick % _INDEX_SYNC_INTERVAL_TICKS == 0:
                 try:
-                    stats = await asyncio.to_thread(index_incremental_sync, state.index_store)
-                    logger.info("[scheduler] incremental index sync: %s", stats)
+                    await _run_index_sync(_index_incremental_with_events, "incremental")
                 except Exception:
                     logger.exception("[scheduler] incremental index sync failed")
+                else:
+                    try:
+                        await _run_embedding_refresh()
+                    except Exception:
+                        # FTS/keyword search remains usable if the optional local model fails.
+                        logger.exception("[scheduler] embedding refresh failed")
         except asyncio.CancelledError:
             logger.info("[scheduler] Background loop cancelled")
             raise
@@ -2041,6 +2330,7 @@ def make_lifespan(runtime: InboxServerRuntime | None = None):
         state.sheets_services = sheets
         state.docs_services = docs
         state.tasks_services = tasks
+        state.google_contacts_services = await asyncio.to_thread(google_contacts_all)
         print(
             f"Gmail accounts: {list(gmail.keys())}, "
             f"Calendar accounts: {list(cal.keys())}, "
@@ -2480,7 +2770,7 @@ def _provider_readiness() -> ProviderReadinessOut:
         _google_provider("google_drive", state.drive_services, google_diag),
         _google_provider("google_sheets", state.sheets_services, google_diag),
         _google_provider("google_docs", state.docs_services, google_diag),
-        _google_provider("google_contacts", {}, google_diag, writable=False),
+        _google_provider("google_contacts", state.google_contacts_services, google_diag, writable=False),
         _google_provider("google_tasks", state.tasks_services, google_diag),
         _github_provider(),
         _local_sqlite_provider(
@@ -2586,6 +2876,30 @@ def _capture_record(
     )
 
 
+def _addressbook_contact_count() -> int:
+    """Count readable Apple Contacts records without copying contact values."""
+    from contacts import _addressbook_paths
+
+    total = 0
+    for db_path in _addressbook_paths():
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ZABCDRECORD'"
+            ).fetchone()
+            if not table:
+                continue
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM ZABCDRECORD
+                WHERE ZFIRSTNAME IS NOT NULL
+                   OR ZLASTNAME IS NOT NULL
+                   OR ZORGANIZATION IS NOT NULL
+                """
+            ).fetchone()
+            total += int(row[0] or 0) if row else 0
+    return total
+
+
 def _probe_collection(
     *,
     source_id: str,
@@ -2652,6 +2966,7 @@ def _probe_collection(
 
 
 def _build_capture_records() -> list[CaptureHealthRecord]:
+    from contacts import _addressbook_paths
     from services import _github_token
 
     google_diag = google_auth_diagnostics(check_refresh=False)
@@ -2686,6 +3001,15 @@ def _build_capture_records() -> list[CaptureHealthRecord]:
             newest_attr="creation_date",
             writable=True,
             coverage_notes=f"Reads local Reminders stores under: {REMINDERS_DIR}",
+        ),
+        _capture_record(
+            source_id="apple_contacts",
+            display_name="Apple Contacts",
+            source_type="local_db",
+            configured=bool(_addressbook_paths()),
+            readable=bool(_addressbook_paths()),
+            item_count=_addressbook_contact_count() if _addressbook_paths() else 0,
+            coverage_notes="Reads local macOS AddressBook SQLite databases; values remain read-only here.",
         ),
         _probe_collection(
             source_id="whatsapp",
@@ -2916,6 +3240,513 @@ async def get_capture_health():
         healthy=not reasons,
         reasons=reasons,
     )
+
+
+# ── Evidence Event Log ──────────────────────────────────────────────────────
+
+
+def _raw_event_to_out(event: RawEvent) -> RawEventOut:
+    return RawEventOut(**event.to_dict())
+
+
+@app.get("/sources/registry", response_model=SourceRegistryOut)
+async def get_source_registry():
+    """Return source capabilities and freshness policy without probing providers."""
+    return SourceRegistryOut(sources=list_source_definitions())
+
+
+@app.post("/events/capture", response_model=CaptureEventOut)
+async def capture_event(req: CaptureEventRequest):
+    """Append one raw observation; interpretation and state projection happen later."""
+    observed_at = req.observed_at or utc_now_iso()
+    occurred_at = req.occurred_at or observed_at
+    payload = req.payload if req.payload is not None else {"text": req.content}
+    if req.payload is None and not req.content.strip():
+        raise HTTPException(status_code=422, detail="content or payload is required")
+    try:
+        event = RawEvent.create(
+            event_id=None,
+            source=req.source,
+            source_object_id=req.source_object_id,
+            observed_at=observed_at,
+            occurred_at=occurred_at,
+            actor=req.actor,
+            object_data=req.object,
+            event_type=req.event_type,
+            content_ref=req.content_ref,
+            metadata=req.metadata,
+            provenance={"source": req.source, **req.provenance},
+            confidence=req.confidence,
+            payload=payload,
+        )
+        stored, inserted = await asyncio.to_thread(state.event_store.append, event)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return CaptureEventOut(ok=True, inserted=inserted, event=_raw_event_to_out(stored))
+
+
+@app.post("/events/backfill/index", response_model=EventBackfillOut)
+async def backfill_index_events(req: EventBackfillRequest):
+    """Backfill indexed evidence locally without calling Gmail or Messages providers."""
+    try:
+        result = await asyncio.to_thread(
+            backfill_message_index,
+            state.index_store.db_path,
+            state.event_store,
+            source=req.source,
+            account=req.account,
+            batch_size=req.batch_size,
+            max_items=req.max_items,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return EventBackfillOut(ok=True, result=result.to_dict())
+
+
+@app.get("/events", response_model=RawEventListOut)
+async def list_raw_events(limit: int = 100, source: str = "", event_type: str = ""):
+    events = await asyncio.to_thread(
+        state.event_store.list_recent,
+        limit=limit,
+        source=source,
+        event_type=event_type,
+    )
+    return RawEventListOut(
+        db_path=str(state.event_store.db_path),
+        count=await asyncio.to_thread(state.event_store.count, source=source),
+        events=[_raw_event_to_out(event) for event in events],
+    )
+
+
+@app.get("/events/{event_id}", response_model=RawEventOut)
+async def get_raw_event(event_id: str):
+    event = await asyncio.to_thread(state.event_store.get, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    return _raw_event_to_out(event)
+
+
+@app.get("/memory")
+async def list_memory_entries(
+    query: str = "",
+    memory_type: str = "",
+    subject: str = "",
+    status: str = "",
+    limit: int = 25,
+):
+    """Read bounded explicit LifeOps memory records with their provenance."""
+    bounded_limit = max(1, min(int(limit), 500))
+    return await asyncio.to_thread(
+        memory_store.query_entries,
+        query=query,
+        memory_type=memory_type,
+        subject=subject,
+        status=status,
+        limit=bounded_limit,
+    )
+
+
+_LIFEOPS_PROJECTS_SPREADSHEET_ID = os.getenv(
+    "LIFEOPS_PROJECTS_SPREADSHEET_ID",
+    "1B-uO5P5-G_H4fVE2lrftkl0AV4Vvu9O2WsxEUiRjQ38",
+)
+_LIFEOPS_PROJECTS_SHEET_NAME = os.getenv("LIFEOPS_PROJECTS_SHEET_NAME", "Projects & Areas")
+_LIFEOPS_MASTER_TRACKER_SPREADSHEET_ID = os.getenv(
+    "LIFEOPS_MASTER_TRACKER_SPREADSHEET_ID",
+    _LIFEOPS_PROJECTS_SPREADSHEET_ID,
+)
+# Canonical Context & LifeOps Registry (not LEGACY Persistent Context).
+# LEGACY id 1w0kjB11… used different tab titles (People/Actions/…); override
+# LIFEOPS_CONTEXT_*_TAB env vars if pointing at LEGACY for emergency reads.
+_LIFEOPS_CONTEXT_SPREADSHEET_ID = os.getenv(
+    "LIFEOPS_CONTEXT_SPREADSHEET_ID",
+    "10XAlrmI7tMvXADyrHVK7hLYGcDV6V-IxZhihtxsh5m8",
+)
+_LIFEOPS_CONTEXT_TAB_PEOPLE = os.getenv("LIFEOPS_CONTEXT_TAB_PEOPLE", "04_PEOPLE")
+_LIFEOPS_CONTEXT_TAB_ACTIONS = os.getenv("LIFEOPS_CONTEXT_TAB_ACTIONS", "05_ACTIONS")
+_LIFEOPS_CONTEXT_TAB_PROJECTS = os.getenv("LIFEOPS_CONTEXT_TAB_PROJECTS", "03_PROJECTS")
+
+
+def _tracker_tab_records(
+    values: list[list[Any]] | None,
+    *,
+    spreadsheet_id: str,
+    sheet_name: str,
+    account: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Normalize one bounded tracker tab while retaining row attribution."""
+    if not values:
+        return []
+    headers = [str(value or "").strip() for value in values[0]]
+    records: list[dict[str, Any]] = []
+    for row_number, row in enumerate(values[1:], start=2):
+        cells = list(row) + [None] * max(0, len(headers) - len(row))
+        data = {
+            headers[index]: cells[index]
+            for index in range(len(headers))
+            if headers[index]
+        }
+        if not any(str(value or "").strip() for value in data.values()):
+            continue
+        source_ref = {
+            "kind": "google_sheet_row",
+            "source": "google_sheets",
+            "id": f"{spreadsheet_id}:{sheet_name}:row:{row_number}",
+            "spreadsheet_id": spreadsheet_id,
+            "sheet_name": sheet_name,
+            "row": row_number,
+            "account": account,
+        }
+        records.append({"data": data, "source_ref": source_ref})
+        if len(records) >= limit:
+            break
+    return records
+
+
+@app.get("/project-records")
+async def list_project_records(
+    account: str = "",
+    limit: int = 50,
+    spreadsheet_id: str = "",
+    sheet_name: str = "",
+):
+    """Read explicit project rows from the canonical LifeOps tracker.
+
+    This is deliberately a projection read: it does not scan arbitrary Drive
+    text or infer projects from prose. Every returned record points to its
+    spreadsheet row so downstream context can retain attribution.
+    """
+    bounded_limit = max(1, min(int(limit), 200))
+    source_spreadsheet_id = spreadsheet_id.strip() or _LIFEOPS_PROJECTS_SPREADSHEET_ID
+    source_sheet_name = sheet_name.strip() or _LIFEOPS_PROJECTS_SHEET_NAME
+    if not source_spreadsheet_id:
+        raise HTTPException(status_code=503, detail="LifeOps project tracker is not configured")
+    try:
+        resolved_account, sheets_service = _get_sheets_service_for_account(account)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Google Sheets service unavailable") from exc
+    range_name = f"'{source_sheet_name.replace(chr(39), chr(39) * 2)}'!A1:N500"
+    values = await asyncio.to_thread(
+        sheets_values_get,
+        sheets_service,
+        source_spreadsheet_id,
+        range_name,
+    )
+    if values is None:
+        raise HTTPException(status_code=502, detail="Could not read the LifeOps project tracker")
+    if not values:
+        return {
+            "schema_version": "inbox.project_records.v1",
+            "read_only": True,
+            "account": resolved_account,
+            "spreadsheet_id": source_spreadsheet_id,
+            "sheet_name": source_sheet_name,
+            "records": [],
+        }
+
+    headers = [str(value or "").strip() for value in values[0]]
+    records: list[dict[str, Any]] = []
+    for row_number, row in enumerate(values[1:], start=2):
+        cells = list(row) + [None] * max(0, len(headers) - len(row))
+        data = {
+            headers[index]: cells[index]
+            for index in range(len(headers))
+            if headers[index]
+        }
+        project = str(data.get("Project") or "").strip()
+        if not project:
+            continue
+        source_ref = {
+            "kind": "google_sheet_row",
+            "source": "google_sheets",
+            "id": f"{source_spreadsheet_id}:{source_sheet_name}:row:{row_number}",
+            "spreadsheet_id": source_spreadsheet_id,
+            "sheet_name": source_sheet_name,
+            "row": row_number,
+            "account": resolved_account,
+        }
+        records.append(
+            {
+                "project": project,
+                "area": str(data.get("Area") or "").strip(),
+                "status": str(data.get("Status") or "").strip(),
+                "canonical_system": str(data.get("Canonical System") or "").strip(),
+                "main_link": str(data.get("Main Link") or "").strip(),
+                "notion_link": str(data.get("Notion Link") or "").strip(),
+                "drive_folder": str(data.get("Drive Folder") or "").strip(),
+                "deadline": data.get("Deadline"),
+                "next_action": str(data.get("Next Action") or "").strip(),
+                "review_cadence": str(data.get("Review Cadence") or "").strip(),
+                "owner": str(data.get("Owner") or "").strip(),
+                "budget": data.get("Budget"),
+                "notes": str(data.get("Notes") or "").strip(),
+                "source_of_truth": str(data.get("Source of Truth") or "").strip(),
+                "source_ref": source_ref,
+            }
+        )
+
+    return {
+        "schema_version": "inbox.project_records.v1",
+        "read_only": True,
+        "account": resolved_account,
+        "spreadsheet_id": source_spreadsheet_id,
+        "sheet_name": source_sheet_name,
+        "record_count": min(len(records), bounded_limit),
+        "records": records[:bounded_limit],
+    }
+
+
+@app.get("/master-ops/queues")
+async def list_master_ops_queues(account: str = "", limit: int = 100):
+    """Read bounded Master Tracker queues without creating duplicate state."""
+    bounded_limit = max(1, min(int(limit), 200))
+    spreadsheet_id = _LIFEOPS_MASTER_TRACKER_SPREADSHEET_ID
+    try:
+        resolved_account, sheets_service = _get_sheets_service_for_account(account)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Google Sheets service unavailable") from exc
+
+    tab_specs = {
+        "email_actions": "Email Action Queue",
+        "captures": "Capture Inbox",
+        "task_mirror": "Google Tasks Mirror",
+    }
+    output: dict[str, Any] = {
+        "schema_version": "inbox.master_ops_queues.v1",
+        "read_only": True,
+        "account": resolved_account,
+        "spreadsheet_id": spreadsheet_id,
+        "queues": {},
+    }
+    for key, sheet_name in tab_specs.items():
+        range_name = f"'{sheet_name}'!A1:Z500"
+        values = await asyncio.to_thread(
+            sheets_values_get,
+            sheets_service,
+            spreadsheet_id,
+            range_name,
+        )
+        if values is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not read Master Tracker tab: {sheet_name}",
+            )
+        rows = _tracker_tab_records(
+            values,
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+            account=resolved_account,
+            limit=bounded_limit,
+        )
+        normalized_rows: list[dict[str, Any]] = []
+        for row in rows:
+            data = row["data"]
+            source_ref = row["source_ref"]
+            normalized: dict[str, Any] = {"source_ref": source_ref}
+            for field, value in data.items():
+                normalized[re.sub(r"[^a-z0-9]+", "_", field.casefold()).strip("_")] = value
+            normalized_rows.append(normalized)
+        output["queues"][key] = {
+            "sheet_name": sheet_name,
+            "record_count": len(normalized_rows),
+            "records": normalized_rows,
+        }
+    return output
+
+
+@app.get("/lifeops-sheet/projection")
+async def list_lifeops_sheet_projection(
+    account: str = "", limit: int = 100, include_tabs: str = ""
+):
+    """Read explicit LifeOps rows with provenance and optional auxiliary tabs."""
+    bounded_limit = max(1, min(int(limit), 200))
+    spreadsheet_id = _LIFEOPS_CONTEXT_SPREADSHEET_ID
+    try:
+        resolved_account, sheets_service = _get_sheets_service_for_account(account)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Google Sheets service unavailable") from exc
+
+    tab_specs = {
+        "people": _LIFEOPS_CONTEXT_TAB_PEOPLE,
+        "actions": _LIFEOPS_CONTEXT_TAB_ACTIONS,
+        "projects": _LIFEOPS_CONTEXT_TAB_PROJECTS,
+    }
+    # Canonical Context tab titles (proved 2026-09-04 via Sheets API).
+    # LEGACY-only names (Captures, Values, Authority Map, …) are omitted —
+    # those workbooks are non-authoritative; do not project them as context.
+    auxiliary_specs = {
+        "profile": "01_PROFILE",
+        "preferences": "02_PREFERENCES",
+        "decisions": "06_DECISIONS",
+        "hypotheses": "07_HYPOTHESES",
+        "evidence": "08_EVIDENCE",
+        "watches": "09_WATCHES",
+        "interactions": "10_INTERACTIONS",
+        "sources": "11_SOURCES",
+        "schema": "12_SCHEMA",
+        "scoped_index": "13_SCOPED_INDEX",
+        "status_taxonomy": "14_STATUS_TAXONOMY",
+        "research_questions": "15_RESEARCH_QUESTIONS",
+    }
+    requested_tabs = {
+        item.strip().casefold()
+        for item in str(include_tabs or "").split(",")
+        if item.strip()
+    }
+    for key, sheet_name in auxiliary_specs.items():
+        if key in requested_tabs:
+            tab_specs[key] = sheet_name
+    output: dict[str, Any] = {
+        "schema_version": "inbox.lifeops_sheet.v1",
+        "read_only": True,
+        "account": resolved_account,
+        "spreadsheet_id": spreadsheet_id,
+        "included_tabs": list(tab_specs),
+        "tabs": {},
+    }
+    for key, sheet_name in tab_specs.items():
+        values = await asyncio.to_thread(
+            sheets_values_get,
+            sheets_service,
+            spreadsheet_id,
+            f"'{sheet_name}'!A1:Z500",
+        )
+        if values is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not read LifeOps sheet tab: {sheet_name}",
+            )
+        rows = _tracker_tab_records(
+            values,
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+            account=resolved_account,
+            limit=bounded_limit,
+        )
+        normalized_rows: list[dict[str, Any]] = []
+        for row in rows:
+            normalized: dict[str, Any] = {"source_ref": row["source_ref"]}
+            for field, value in row["data"].items():
+                normalized[re.sub(r"[^a-z0-9]+", "_", field.casefold()).strip("_")] = value
+            normalized_rows.append(normalized)
+        output["tabs"][key] = {
+            "sheet_name": sheet_name,
+            "record_count": len(normalized_rows),
+            "records": normalized_rows,
+        }
+    return output
+
+
+@app.post("/triage/messages", response_model=MessageTriageOut)
+async def triage_messages(req: MessageTriageRequest):
+    """Return a read-only usefulness/action projection over indexed messages."""
+    if req.category and req.category not in TRIAGE_CATEGORIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"category must be one of: {', '.join(TRIAGE_CATEGORIES)}",
+        )
+    if req.limit < 1 or req.limit > 200:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+    if req.offset < 0 or req.offset > 100000:
+        raise HTTPException(status_code=422, detail="offset must be between 0 and 100000")
+    result = await asyncio.to_thread(
+        triage_message_threads,
+        state.index_store,
+        state.event_store,
+        source=req.source,
+        account=req.account,
+        category=req.category,
+        limit=req.limit,
+        offset=req.offset,
+    )
+    return MessageTriageOut(**result)
+
+
+@app.get("/gmail/normalization")
+async def get_gmail_normalization() -> dict[str, Any]:
+    """Return read-only Gmail account coverage from the local index."""
+    return await asyncio.to_thread(gmail_normalization, state.index_store)
+
+
+@app.get("/triage/todo-candidates")
+async def get_todo_candidates(
+    source: str = "",
+    account: str = "",
+    category: str = "",
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Return attributable action candidates without creating tasks."""
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    if category and category not in {"reply_now", "task", "calendar", "waiting"}:
+        raise HTTPException(
+            status_code=422,
+            detail="category must be one of: reply_now, task, calendar, waiting",
+        )
+    return await asyncio.to_thread(
+        todo_candidates,
+        state.index_store,
+        state.event_store,
+        source=source,
+        account=account,
+        category=category,
+        limit=limit,
+    )
+
+
+@app.get("/tasks/reconciliation")
+async def get_task_reconciliation(
+    source: str = "",
+    account: str = "",
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Compare existing provider Tasks with message-derived candidates, read-only."""
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    candidate_reports = []
+    for candidate_category in ("reply_now", "task", "calendar", "waiting"):
+        candidate_reports.append(
+            await asyncio.to_thread(
+                todo_candidates,
+                state.index_store,
+                state.event_store,
+                source=source,
+                account=account,
+                category=candidate_category,
+                limit=limit,
+            )
+        )
+    candidate_items = [
+        item
+        for report in candidate_reports
+        for item in report.get("items", [])
+    ]
+    candidate_report = {
+        "projection": "inbox_todo_candidates_reconciliation_input_v1",
+        "items": candidate_items,
+        "returned_count": len(candidate_items),
+    }
+    accounts = (
+        {account: state.tasks_services[account]}
+        if account and account in state.tasks_services
+        else state.tasks_services
+    )
+    tasks_by_account: dict[str, list[dict[str, Any]]] = {}
+    for acct, svc in accounts.items():
+        rows: list[dict[str, Any]] = []
+        try:
+            lists = await asyncio.to_thread(tasks_lists, svc)
+            list_ids = [str(row.get("id") or "") for row in lists if row.get("id")]
+            if not list_ids:
+                list_ids = ["@default"]
+            for list_id in list_ids:
+                raw_tasks = await asyncio.to_thread(tasks_list, svc, list_id, False, 200)
+                rows.extend([_task_to_out(task, acct).dict() for task in raw_tasks])
+        except Exception as exc:
+            logger.warning("[tasks] reconciliation read failed for {}: {}", acct, exc)
+        tasks_by_account[acct] = rows
+    return await asyncio.to_thread(reconcile_tasks, candidate_report, tasks_by_account)
 
 
 # ── Egress Audit ─────────────────────────────────────────────────────────────
@@ -3171,6 +4002,13 @@ async def compose_email(req: ComposeRequest):
     _, svc = _get_gmail_service_for_account(req.account)
     ok = await asyncio.to_thread(gmail_compose_send, svc, req.to, req.subject, req.body)
     return {"ok": ok}
+
+
+@app.post("/messages/drafts")
+async def create_gmail_draft(req: GmailDraftRequest):
+    acct, svc = _get_gmail_service_for_account(req.account)
+    draft = await asyncio.to_thread(gmail_create_draft, svc, req.to, req.subject, req.body)
+    return {"ok": draft is not None, "account": acct, "draft": draft or {}}
 
 
 @app.post("/messages/gmail/reply")
@@ -4020,6 +4858,18 @@ async def ai_gemini_action_items(messages: list[dict]):
 # ── Departure Times (Google Maps) ────────────────────────────────────────────
 
 
+@app.get("/location/current")
+async def get_current_location_endpoint():
+    """Return the current location primitive without exposing any write capability."""
+    location = await asyncio.to_thread(get_current_location)
+    return {
+        "location": location or "",
+        "available": bool(location),
+        "source": "macos_core_location_or_home_address",
+        "read_only": True,
+    }
+
+
 @app.get("/calendar/departure-times")
 async def get_departure_times(
     origin: str = "",
@@ -4090,6 +4940,80 @@ async def get_travel_time(
     if not result:
         raise HTTPException(502, "Could not get travel time — check Maps API key and addresses")
     return result
+
+
+@app.post("/maps/route")
+async def plan_route(request: RoutePlanRequest):
+    """Calculate one leave time for an ordered multi-stop route.
+
+    This is intentionally read-only. Google Calendar remains the commitment
+    authority; Apple Calendar/Reminders are delivery surfaces and are not
+    mutated by this endpoint.
+    """
+    origin = request.origin.strip() or await asyncio.to_thread(get_current_location)
+    if not origin:
+        raise HTTPException(
+            400,
+            "No origin. Pass origin, set INBOX_HOME_ADDRESS, or grant Location Services.",
+        )
+
+    def _travel_time(
+        from_location: str,
+        to_location: str,
+        mode: str,
+        arrival_time: datetime,
+    ) -> dict | None:
+        return maps_travel_time(
+            from_location,
+            to_location,
+            mode=mode,
+            arrival_time=arrival_time,
+        )
+
+    try:
+        return await asyncio.to_thread(
+            plan_multi_stop_route,
+            RouteStop(request.origin_name, origin),
+            [RouteStop(stop.name, stop.location, stop.dwell_minutes) for stop in request.stops],
+            request.arrival_time,
+            _travel_time,
+            mode=request.mode,
+            buffer_minutes=request.buffer_minutes,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/gas/nearby")
+async def get_nearby_gas_prices(
+    latitude: float,
+    longitude: float,
+    fuel_type: str = "regular",
+    radius_meters: float | None = None,
+):
+    """Nearby gas stations with normalized fuel prices (Phase-1 primitive)."""
+    return await asyncio.to_thread(
+        find_nearby_gas_prices, latitude, longitude, fuel_type, radius_meters
+    )
+
+
+@app.get("/gas/find-best")
+async def get_find_best_gas(
+    origin: str = "",
+    destination: str = "",
+    fuel_type: str = "regular",
+    gallons_needed: float | None = None,
+    max_detour_minutes: float | None = None,
+):
+    """Rank nearby gas stations by effective cost (fuel price + route detour)."""
+    return await asyncio.to_thread(
+        find_best_gas,
+        origin or None,
+        destination or None,
+        fuel_type,
+        gallons_needed,
+        max_detour_minutes,
+    )
 
 
 # ── WhatsApp ─────────────────────────────────────────────────────────────────
@@ -5266,6 +6190,7 @@ _INFISICAL_SECRET_NAMES = [
     "INBOX_GOOGLE_OAUTH_CLIENT_JSON",
     "INBOX_GITHUB_TOKEN",
     "INBOX_GOOGLE_MAPS_API_KEY",
+    "INBOX_EIA_API_KEY",
     "INBOX_GEMINI_API_KEY",
     "INBOX_SERVER_TOKEN",
     "INBOX_MCP_TOKEN",
@@ -5831,6 +6756,7 @@ async def search_contacts(q: str = "", limit: int = 20):
         state.gmail_services,
         q,
         limit,
+        state.google_contacts_services,
     )
     return results
 
@@ -5842,8 +6768,139 @@ async def get_contact_profile(contact_id: str):
         contact_id,
         state.gmail_services,
         state.cal_services,
+        state.google_contacts_services,
     )
     return profile
+
+
+@app.get("/people/search")
+async def search_people(q: str = "", limit: int = 20):
+    """Search source contacts and hydrate local LifeOps person profiles."""
+    bounded = max(1, min(int(limit), 100))
+    contacts = await asyncio.to_thread(
+        contacts_search, state.gmail_services, q, bounded, state.google_contacts_services
+    )
+    for contact in contacts:
+        if isinstance(contact, dict) and contact.get("id"):
+            state.person_store.ensure_external_contact(contact)
+    return await asyncio.to_thread(state.person_store.search, q, bounded)
+
+
+@app.get("/people/{person_id}/profile")
+async def get_person_profile(person_id: str, include_activity: bool = False):
+    profile = await asyncio.to_thread(state.person_store.get_profile, person_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="person not found")
+    external_id = str(profile["person"].get("external_contact_id") or "")
+    if external_id and include_activity:
+        try:
+            external_profile = await asyncio.wait_for(
+                asyncio.to_thread(
+                    contacts_profile,
+                    external_id,
+                    state.gmail_services,
+                    state.cal_services,
+                ),
+                timeout=15,
+            )
+            profile["external_profile"] = external_profile
+        except Exception as exc:
+            profile["external_profile_error"] = type(exc).__name__
+    else:
+        profile["external_activity"] = {
+            "status": "not_requested",
+            "hint": "Set include_activity=true for provider-backed Gmail/iMessage/Calendar activity.",
+        }
+    profile["attribution"] = {
+        "authority": "lifeops_person_profile",
+        "source": "local_person_store",
+        "reference": {"kind": "person", "person_id": person_id},
+        "retrieved_at": utc_now_iso(),
+        "derived": True,
+        "read_only": True,
+    }
+    return profile
+
+
+@app.get("/identity/links")
+async def list_identity_links(
+    canonical_person_id: str = "",
+    target_source: str = "",
+    target_id: str = "",
+    limit: int = 100,
+):
+    """Read explicit, local identity decisions without touching provider contacts."""
+    return {
+        "schema_version": "inbox.identity_links.v1",
+        "read_only": True,
+        "links": await asyncio.to_thread(
+            state.identity_link_store.list_links,
+            canonical_person_id=canonical_person_id,
+            target_source=target_source,
+            target_id=target_id,
+            limit=limit,
+        ),
+    }
+
+
+@app.post("/identity/links")
+async def create_identity_link(req: IdentityLinkRequest):
+    """Persist one explicitly approved local identity link."""
+    try:
+        link = await asyncio.to_thread(
+            state.identity_link_store.add_link,
+            canonical_person_id=req.canonical_person_id,
+            canonical_name=req.canonical_name,
+            target_source=req.target_source,
+            target_id=req.target_id,
+            target_name=req.target_name,
+            confidence=req.confidence,
+            confirmed=req.confirmed,
+            source_refs=req.source_refs,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "link": link}
+
+
+@app.post("/people/{person_id}/notes")
+async def add_person_note(person_id: str, req: PersonNoteRequest):
+    try:
+        note = await asyncio.to_thread(
+            state.person_store.add_note,
+            person_id,
+            body=req.body,
+            source=req.source,
+            source_ref=req.source_ref,
+            confidence=req.confidence,
+            confirmed=req.confirmed,
+            expires_at=req.expires_at,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="person not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "note": note}
+
+
+@app.post("/people/{person_id}/relationships")
+async def add_person_relationship(person_id: str, req: PersonRelationshipRequest):
+    try:
+        relationship = await asyncio.to_thread(
+            state.person_store.add_relationship,
+            person_id,
+            label=req.label,
+            context=req.context,
+            source=req.source,
+            source_ref=req.source_ref,
+            confidence=req.confidence,
+            confirmed=req.confirmed,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="person not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "relationship": relationship}
 
 
 @app.get("/contacts/favorites")
@@ -5981,6 +7038,7 @@ async def add_account():
     state.sheets_services = sheets
     state.docs_services = docs
     state.tasks_services = tasks
+    state.google_contacts_services = await asyncio.to_thread(google_contacts_all)
     return {"email": email}
 
 
@@ -5998,6 +7056,7 @@ async def reauth_account(req: AccountRequest):
     state.sheets_services = sheets
     state.docs_services = docs
     state.tasks_services = tasks
+    state.google_contacts_services = await asyncio.to_thread(google_contacts_all)
     return {"email": email}
 
 
@@ -6565,6 +7624,109 @@ async def get_index_status():
     )
 
 
+def _merge_index_search_results(
+    lexical: list[dict[str, Any]], semantic: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    """Blend lexical and semantic evidence while preserving source IDs."""
+    merged: dict[int, dict[str, Any]] = {}
+    for rank, item in enumerate(lexical):
+        key = int(item["id"])
+        merged[key] = {**item, "search_match": "keyword", "search_score": 1.0 / (rank + 1)}
+    for rank, item in enumerate(semantic):
+        key = int(item["id"])
+        existing = merged.get(key)
+        semantic_score = float(item.get("semantic_score") or 0.0)
+        if existing is None:
+            merged[key] = {
+                **item,
+                "search_match": "semantic",
+                "search_score": semantic_score * 0.7 + 0.3 / (rank + 1),
+            }
+        else:
+            existing["search_match"] = "hybrid"
+            existing["semantic_score"] = semantic_score
+            existing["search_score"] = existing["search_score"] + semantic_score * 0.7
+    return sorted(
+        merged.values(), key=lambda item: float(item.get("search_score") or 0.0), reverse=True
+    )[:limit]
+
+
+async def _semantic_index_search(
+    query: str, *, limit: int, source: str, account: str
+) -> tuple[list[dict[str, Any]], str]:
+    global _index_embedder
+    try:
+        if _index_embedder is None:
+            _index_embedder = LocalTextEmbedder()
+        with _index_embedding_lock:
+            vectors = await asyncio.to_thread(_index_embedder.encode, [query], 1)
+        if not vectors:
+            return [], "embedding model returned no vector"
+        return await asyncio.to_thread(
+            state.index_store.search_embeddings,
+            vectors[0],
+            model_id=DEFAULT_MODEL_ID,
+            limit=limit,
+            source=source,
+            account=account,
+        ), ""
+    except Exception as exc:  # semantic search must never hide keyword search
+        logger.warning("[index-search] semantic search unavailable: {}", exc)
+        return [], str(exc)
+
+
+@app.get("/index/search", response_model=IndexedMessageSearchOut)
+async def search_indexed_messages(
+    q: str,
+    mode: str = "hybrid",
+    limit: int = 25,
+    source: str = "",
+    account: str = "",
+):
+    """Search the local message index without a live provider fan-out."""
+    mode = mode.strip().lower()
+    if mode not in {"keyword", "semantic", "hybrid"}:
+        raise HTTPException(400, "mode must be keyword, semantic, or hybrid")
+    bounded_limit = max(1, min(int(limit), 100))
+    lexical = []
+    if mode in {"keyword", "hybrid"}:
+        lexical = await asyncio.to_thread(
+            state.index_store.search_items,
+            q,
+            limit=bounded_limit,
+            source=source,
+            account=account,
+        )
+    semantic: list[dict[str, Any]] = []
+    embedding_error = ""
+    if mode in {"semantic", "hybrid"}:
+        semantic, embedding_error = await _semantic_index_search(
+            q, limit=max(bounded_limit, 50), source=source, account=account
+        )
+    if mode == "keyword":
+        results = [{**item, "search_match": "keyword"} for item in lexical]
+    elif mode == "semantic":
+        results = [{**item, "search_match": "semantic"} for item in semantic[:bounded_limit]]
+    else:
+        results = _merge_index_search_results(lexical, semantic, bounded_limit)
+    return IndexedMessageSearchOut(
+        query=q,
+        mode=mode,
+        results=results,
+        embedding_status=state.index_store.embedding_status(DEFAULT_MODEL_ID),
+        embedding_error=embedding_error,
+    )
+
+
+@app.get("/index/embedding-status")
+async def get_index_embedding_status():
+    return {
+        "read_only": True,
+        "model_id": DEFAULT_MODEL_ID,
+        **state.index_store.embedding_status(DEFAULT_MODEL_ID),
+    }
+
+
 @app.get("/index/health", response_model=IndexHealthOut)
 async def get_index_health():
     return _build_index_health(state.index_store.list_sync_states())
@@ -6582,13 +7744,21 @@ async def get_index_view(view_name: str, limit: int = 20):
 
 @app.post("/index/sync/bootstrap", response_model=IndexSyncOut)
 async def post_index_sync_bootstrap():
-    stats = await asyncio.to_thread(index_bootstrap_sync, state.index_store)
+    stats = await _run_index_sync(_index_bootstrap_with_events, "bootstrap")
+    try:
+        stats["embedding"] = await _run_embedding_refresh(max_items=250)
+    except Exception as exc:
+        stats["embedding_error"] = str(exc)
     return IndexSyncOut(ok=True, mode="bootstrap", stats=stats)
 
 
 @app.post("/index/sync/incremental", response_model=IndexSyncOut)
 async def post_index_sync_incremental():
-    stats = await asyncio.to_thread(index_incremental_sync, state.index_store)
+    stats = await _run_index_sync(_index_incremental_with_events, "incremental")
+    try:
+        stats["embedding"] = await _run_embedding_refresh()
+    except Exception as exc:
+        stats["embedding_error"] = str(exc)
     return IndexSyncOut(ok=True, mode="incremental", stats=stats)
 
 

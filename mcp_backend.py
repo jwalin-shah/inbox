@@ -296,6 +296,49 @@ class InboxBackend:
             params={"origin": origin, "destination": destination, "mode": mode},
         )
 
+    async def route(
+        self,
+        *,
+        stops: list[dict[str, Any]],
+        arrival_time: str,
+        origin: str = "",
+        origin_name: str = "Origin",
+        mode: str = "driving",
+        buffer_minutes: int = 10,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/maps/route",
+            json={
+                "origin": origin,
+                "origin_name": origin_name,
+                "stops": stops,
+                "arrival_time": arrival_time,
+                "mode": mode,
+                "buffer_minutes": buffer_minutes,
+            },
+        )
+
+    async def find_best_gas(
+        self,
+        origin: str = "",
+        destination: str = "",
+        fuel_type: str = "regular",
+        gallons_needed: float = 0,
+        max_detour_minutes: float = 0,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/gas/find-best",
+            params={
+                "origin": origin,
+                "destination": destination,
+                "fuel_type": fuel_type,
+                "gallons_needed": gallons_needed,
+                "max_detour_minutes": max_detour_minutes,
+            },
+        )
+
     async def whatsapp_contacts(self, limit: int = 20) -> list[dict[str, Any]]:
         return await self._request("GET", "/whatsapp/contacts", params={"limit": limit})
 

@@ -35,7 +35,11 @@ from googleapiclient.discovery import build
 from loguru import logger
 
 import egress_audit
+import gas_context
+import gas_optimizer
+import gas_providers
 from contacts import ContactBook
+from gas_models import load_gas_preferences
 from imessage_link_helpers import extract_x_links
 from service_models import (
     ATTACHMENT_PLACEHOLDER,
@@ -620,6 +624,32 @@ def google_auth_all() -> tuple[
             _log_service_failure("google_auth_all.tasks_service", email=email)
 
     return gmail_svcs, cal_svcs, drive_svcs, sheets_svcs, docs_svcs, tasks_svcs
+
+
+def google_contacts_all() -> dict[str, object]:
+    """Build Google People API services from the already stored OAuth tokens."""
+    if not os.environ.get("INBOX_SERVER_TOKEN", "").strip() and _TEST_DATA_DIR is None:
+        # Unauthenticated test/local processes should not hydrate a real
+        # user's People service as an incidental startup side effect.
+        return {}
+    contacts_svcs: dict[str, object] = {}
+    for token_path in sorted(TOKENS_DIR.glob("*.json")):
+        creds = _load_creds(token_path)
+        if not creds:
+            continue
+        try:
+            people_svc = build("people", "v1", credentials=creds)
+            # Probe the exact operation used by contacts_search so provider
+            # health does not report a merely constructed client as readable.
+            people_svc.people().connections().list(
+                resourceName="people/me",
+                pageSize=1,
+                personFields="names,emailAddresses,phoneNumbers,addresses,organizations",
+            ).execute()
+            contacts_svcs[token_path.stem] = people_svc
+        except Exception:
+            _log_service_failure("google_contacts_service", token_path=str(token_path))
+    return contacts_svcs
 
 
 def add_google_account() -> str | None:
@@ -1673,6 +1703,28 @@ def gmail_compose_send(service, to: str, subject: str, body: str) -> bool:
     except Exception:
         _log_service_failure("gmail_compose_send", to=to, subject=subject, body_length=len(body))
         return False
+
+
+def gmail_create_draft(service, to: str, subject: str, body: str) -> dict[str, str] | None:
+    """Create a Gmail draft without sending it."""
+    _assert_live_write_allowed("create Gmail draft")
+    msg = MIMEText(body)
+    msg["to"] = to
+    msg["subject"] = subject
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    try:
+        result = service.users().drafts().create(
+            userId="me", body={"message": {"raw": raw}}
+        ).execute()
+        return {
+            "id": str(result.get("id", "")),
+            "message_id": str(result.get("message", {}).get("id", "")),
+        }
+    except Exception:
+        _log_service_failure(
+            "gmail_create_draft", to=to, subject=subject, body_length=len(body)
+        )
+        return None
 
 
 def gmail_reply(
@@ -4508,6 +4560,78 @@ def departure_times_for_events(
     return results
 
 
+# ── Gas optimization ────────────────────────────────────────────────────────
+
+
+def _gas_place_provider(api_key: str | None) -> gas_providers.FuelPriceProvider:
+    """Build the composite fuel-price source.
+
+    Google Places is the first provider; additional (TomTom, INRIX, …) adapters
+    are appended here once they exist. The composite keeps the freshest price
+    per fuel type when two providers report the same pump.
+    """
+    return gas_providers.CompositeFuelPriceProvider(
+        [gas_providers.GooglePlacesFuelProvider(api_key)]
+    )
+
+
+def _eia_api_key() -> str | None:
+    """EIA API key (free tier) for the optional regional-average context."""
+    key = os.environ.get("INBOX_EIA_API_KEY", "").strip() or os.environ.get("EIA_API_KEY", "").strip()
+    return key or None
+
+
+def find_nearby_gas_prices(
+    latitude: float,
+    longitude: float,
+    fuel_type: str = "regular",
+    radius_meters: float | None = None,
+) -> dict:
+    """Nearby gas stations with Google's available fuel prices, normalized.
+
+    Phase-1 primitive. Live Google calls are skipped (returning NO_PRICE_DATA)
+    when no API key is configured.
+    """
+    api_key = _google_cloud_api_key()
+    return gas_optimizer.find_nearby_gas_prices(
+        latitude,
+        longitude,
+        fuel_type=fuel_type,
+        radius_meters=radius_meters,
+        api_key=api_key,
+        place_provider=_gas_place_provider(api_key),
+    )
+
+
+def find_best_gas(
+    origin: str | None = None,
+    destination: str | None = None,
+    fuel_type: str = "regular",
+    gallons_needed: float | None = None,
+    max_detour_minutes: float | None = None,
+) -> dict:
+    """Deterministically rank nearby gas stations by effective cost.
+
+    Combines Places fuel prices with Routes detour cost and returns one
+    recommendation. The API key stays server-side.
+    """
+    api_key = _google_cloud_api_key()
+    prefs = load_gas_preferences()
+    eia_key = _eia_api_key()
+    regional_context = gas_context.RegionalFuelPriceContext(eia_key, prefs.eia_series) if eia_key else None
+    return gas_optimizer.find_best_gas(
+        origin=origin,
+        destination=destination,
+        fuel_type=fuel_type,
+        gallons_needed=gallons_needed,
+        max_detour_minutes=max_detour_minutes,
+        api_key=api_key,
+        preferences=prefs,
+        place_provider=_gas_place_provider(api_key),
+        regional_context=regional_context,
+    )
+
+
 # ── GitHub ──────────────────────────────────────────────────────────────────
 
 _GITHUB_API = "https://api.github.com"
@@ -6499,9 +6623,13 @@ def send_notification(title: str, body: str, source: str = "") -> bool:
 
     # Fallback: osascript
     try:
-        safe_title = title.replace("'", "\\'")
-        safe_body = body.replace("'", "\\'")
-        script = f"display notification '{safe_body}' with title '{safe_title}'"
+        # AppleScript string literals require double-quoted expressions. Use
+        # the shared expression escaper so quotes, backslashes, and newlines
+        # cannot break the script or alter its command structure.
+        script = (
+            f"display notification {_escape_applescript(body)} "
+            f"with title {_escape_applescript(title)}"
+        )
         result = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,
@@ -6546,10 +6674,95 @@ def contacts_search(
     gmail_services: dict[str, object],
     q: str,
     limit: int = 20,
+    google_contacts_services: dict[str, object] | None = None,
 ) -> list[dict]:
     """Search contacts by name, email, or phone across AddressBook + Gmail + iMessage senders."""
     q_lower = q.lower().strip()
     results: dict[str, dict] = {}  # keyed by normalized identifier
+
+    # 0. Search Google People contacts when the Inbox runtime has loaded the
+    # service. This is additive; local AddressBook and message-derived senders
+    # remain useful when the provider is unavailable.
+    for account_email, svc in (google_contacts_services or {}).items():
+        try:
+            response = (
+                svc.people()
+                .connections()
+                .list(
+                    resourceName="people/me",
+                    pageSize=min(max(limit, 1), 100),
+                    personFields="names,emailAddresses,phoneNumbers,addresses,organizations",
+                )
+                .execute()
+            )
+            for person in response.get("connections", []):
+                names = person.get("names") or []
+                name = str((names[0] if names else {}).get("displayName") or "").strip()
+                emails = [
+                    str(item.get("value") or "").strip()
+                    for item in person.get("emailAddresses", [])
+                    if item.get("value")
+                ]
+                phones = [
+                    str(item.get("value") or "").strip()
+                    for item in person.get("phoneNumbers", [])
+                    if item.get("value")
+                ]
+                addresses = [
+                    {
+                        "label": str(item.get("type") or item.get("label") or "").strip(),
+                        "formatted": str(item.get("formattedValue") or "").strip(),
+                        "street": str(item.get("streetAddress") or "").strip(),
+                        "city": str(item.get("city") or "").strip(),
+                        "region": str(item.get("region") or "").strip(),
+                        "postal_code": str(item.get("postalCode") or "").strip(),
+                        "country": str(item.get("country") or "").strip(),
+                        "country_code": str(item.get("countryCode") or "").strip(),
+                        "source": "google_people",
+                        "source_account": account_email,
+                    }
+                    for item in person.get("addresses", [])
+                    if any(
+                        str(item.get(key) or "").strip()
+                        for key in (
+                            "formattedValue",
+                            "streetAddress",
+                            "city",
+                            "region",
+                            "postalCode",
+                            "country",
+                        )
+                    )
+                ]
+                address_text = " ".join(
+                    str(address.get("formatted") or "") for address in addresses
+                )
+                if not name and not emails and not phones and not addresses:
+                    continue
+                searchable = " ".join([name, *emails, *phones, address_text]).lower()
+                if q_lower and q_lower not in searchable:
+                    continue
+                key = emails[0].lower() if emails else (phones[0] if phones else name.lower())
+                if not key:
+                    continue
+                results.setdefault(
+                    key,
+                    {
+                        "id": key,
+                        "name": name or key,
+                        "emails": emails,
+                        "phones": phones,
+                        "addresses": [],
+                        "github_handle": "",
+                        "photo_url": "",
+                        "source_counts": {"imessage": 0, "gmail": 0, "calendar": 0},
+                        "google_accounts": [],
+                    },
+                )
+                results[key].setdefault("addresses", []).extend(addresses)
+                results[key].setdefault("google_accounts", []).append(account_email)
+        except Exception:
+            _log_service_failure("contacts_search.google_people", account=account_email)
 
     # 1. Search AddressBook
     from contacts import _addressbook_paths, _phone_variants
@@ -6564,6 +6777,50 @@ def contacts_search(
             if not cur.fetchone():
                 conn.close()
                 continue
+            postal_by_owner: dict[int, list[dict[str, str]]] = {}
+            try:
+                postal_rows = cur.execute(
+                    """
+                    SELECT ZOWNER, ZLABEL, ZCITY, ZCOUNTRYCODE, ZCOUNTRYNAME,
+                           ZREGION, ZSTATE, ZSTREET, ZSUBLOCALITY, ZZIPCODE
+                    FROM ZABCDPOSTALADDRESS
+                    WHERE ZOWNER IS NOT NULL
+                    """
+                ).fetchall()
+                for (
+                    owner,
+                    label,
+                    city,
+                    country_code,
+                    country_name,
+                    region,
+                    state,
+                    street,
+                    sublocality,
+                    postal_code,
+                ) in postal_rows:
+                    parts = [
+                        str(value).strip()
+                        for value in (street, sublocality, city, state or region, postal_code, country_name)
+                        if value and str(value).strip()
+                    ]
+                    postal_by_owner.setdefault(int(owner), []).append(
+                        {
+                            "label": str(label or "").strip(),
+                            "formatted": ", ".join(parts),
+                            "street": str(street or "").strip(),
+                            "city": str(city or "").strip(),
+                            "region": str(state or region or "").strip(),
+                            "postal_code": str(postal_code or "").strip(),
+                            "country": str(country_name or "").strip(),
+                            "country_code": str(country_code or "").strip(),
+                            "source": "apple_addressbook",
+                            "source_account": db_path.name,
+                        }
+                    )
+            except Exception:
+                # Older AddressBook schemas may not expose postal fields.
+                postal_by_owner = {}
             cur.execute("""
                 SELECT r.Z_PK, r.ZFIRSTNAME, r.ZLASTNAME, r.ZORGANIZATION,
                     GROUP_CONCAT(DISTINCT p.ZFULLNUMBER) as phones,
@@ -6581,9 +6838,18 @@ def contacts_search(
                     continue
                 emails = [e.strip() for e in (emails_raw or "").split(",") if e.strip()]
                 phones = [p.strip() for p in (phones_raw or "").split(",") if p.strip()]
+                addresses = postal_by_owner.get(int(_pk), [])
 
                 # Check if matches query
-                searchable = name.lower() + " " + " ".join(emails).lower() + " " + " ".join(phones)
+                searchable = (
+                    name.lower()
+                    + " "
+                    + " ".join(emails).lower()
+                    + " "
+                    + " ".join(phones)
+                    + " "
+                    + " ".join(str(address.get("formatted") or "") for address in addresses).lower()
+                )
                 if q_lower and q_lower not in searchable:
                     continue
 
@@ -6595,10 +6861,12 @@ def contacts_search(
                         "name": name,
                         "emails": emails,
                         "phones": phones,
+                        "addresses": [],
                         "github_handle": "",
                         "photo_url": "",
                         "source_counts": {"imessage": 0, "gmail": 0, "calendar": 0},
                     }
+                results[key].setdefault("addresses", []).extend(addresses)
             conn.close()
         except Exception:
             continue
@@ -6619,6 +6887,7 @@ def contacts_search(
                         "name": c.name,
                         "emails": [c.reply_to],
                         "phones": [],
+                        "addresses": [],
                         "github_handle": "",
                         "photo_url": "",
                         "source_counts": {"imessage": 0, "gmail": 0, "calendar": 0},
@@ -6656,6 +6925,7 @@ def contacts_search(
                             "name": c.name if not c.is_group else member,
                             "emails": [],
                             "phones": [member] if "@" not in member else [],
+                            "addresses": [],
                             "github_handle": "",
                             "photo_url": "",
                             "source_counts": {"imessage": 1, "gmail": 0, "calendar": 0},
@@ -6670,11 +6940,17 @@ def contacts_profile(
     contact_id: str,
     gmail_services: dict[str, object],
     cal_services: dict[str, object],
+    google_contacts_services: dict[str, object] | None = None,
 ) -> dict:
     """Aggregate cross-source profile for a contact."""
 
     # Find the contact via search
-    matches = contacts_search(gmail_services, contact_id, limit=50)
+    matches = contacts_search(
+        gmail_services,
+        contact_id,
+        limit=50,
+        google_contacts_services=google_contacts_services,
+    )
     contact = next(
         (m for m in matches if m["id"] == contact_id or contact_id in m["emails"]),
         None,

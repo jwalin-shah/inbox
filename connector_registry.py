@@ -50,6 +50,7 @@ class ConnectorDefinition:
     label: str
     binary: str
     category: str
+    native_read_path: str = ""
     storage_paths: tuple[str, ...] = ()
     auth_command: tuple[str, ...] = ()
     search_command: tuple[str, ...] = ()
@@ -226,6 +227,7 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         label="iMessage/SMS",
         binary="imsg",
         category="messaging",
+        native_read_path="Inbox services.imsg_* SQLite reader",
         storage_paths=("~/Library/Messages/chat.db",),
         auth_command=("imsg", "chats", "--limit", "1", "--json"),
         search_command=("imsg", "search", "{query}", "--limit", "{limit}", "--json"),
@@ -250,9 +252,9 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
             ),
         ),
         remediation=(
-            "Install imsg and ensure it is on PATH.",
+            "Inbox's built-in iMessage reader is available; imsg is optional for external CLI/search workflows.",
             "Grant Full Disk Access to the launcher process if chat.db is unreadable.",
-            "Run imsg chats --limit 1 --json to confirm read access.",
+            "Install imsg only if an external CLI workflow is required.",
         ),
         write_capable=True,
         notes="Reads Messages.app history; sending requires Automation permission and confirmation.",
@@ -419,6 +421,7 @@ def _safe_command_preview(command: tuple[str, ...]) -> list[str]:
 def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
     binary_path = shutil.which(connector.binary)
     installed = binary_path is not None
+    native_read_available = bool(connector.native_read_path)
     auth_state = "not_installed"
     auth_detail: Any = None
     auth_error = ""
@@ -433,13 +436,15 @@ def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
         auth_state = "ok" if code == 0 else "needs_attention"
     elif installed:
         auth_state = "unknown"
+    elif native_read_available:
+        auth_state = "native"
 
     storage = _storage_status(connector.storage_paths)
     missing_env = [item["name"] for item in _env_status(connector.required_env) if not item["present"]]
     missing_storage = [item["path"] for item in storage if not item["exists"]]
     remediation = list(connector.remediation)
     install_step = f"Install {connector.binary} and ensure it is on PATH."
-    if not installed and install_step not in remediation:
+    if not installed and not native_read_available and install_step not in remediation:
         remediation.insert(0, install_step)
     if missing_env:
         remediation.append(f"Set required env for live scanner/auth use: {', '.join(missing_env)}.")
@@ -453,6 +458,9 @@ def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
         "binary": connector.binary,
         "binary_path": binary_path or "",
         "installed": installed,
+        "native_read_available": native_read_available,
+        "native_read_path": connector.native_read_path,
+        "read_ready": native_read_available or (installed and auth_state in {"ok", "unknown"}),
         "auth_state": auth_state,
         "auth_exit_code": auth_exit_code,
         "auth_detail": auth_detail,

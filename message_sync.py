@@ -11,6 +11,7 @@ from typing import Any
 
 from googleapiclient.errors import HttpError
 
+from event_store import RawEvent, RawEventStore
 from message_index_store import IndexedItem, MessageIndexStore
 from services import (
     IMSG_DB,
@@ -101,6 +102,45 @@ def _gmail_item(account: str, message: dict[str, Any]) -> IndexedItem:
         is_deleted=0,
         is_read=0 if "UNREAD" in labels else 1,
     )
+
+
+def _append_raw_message_event(
+    event_store: RawEventStore | None,
+    item: IndexedItem,
+    raw_payload: Any,
+) -> None:
+    if event_store is None:
+        return
+    event_store.append(
+        RawEvent.create(
+            source=item.source,
+            source_object_id=f"{item.account}:{item.external_id}",
+            observed_at=datetime.now(UTC).isoformat(),
+            occurred_at=item.created_at,
+            actor={"name": item.sender},
+            object_data={
+                "kind": item.kind,
+                "thread_id": item.thread_id,
+                "subject": item.subject,
+            },
+            event_type="message.observed",
+            content_ref=item.raw_pointer,
+            metadata={"account": item.account, "labels": item.labels_json},
+            provenance={"adapter": "message_sync", "source": item.source},
+            confidence=1.0,
+            payload=raw_payload,
+        )
+    )
+
+
+def _call_sync(
+    sync_func: Any,
+    store: MessageIndexStore,
+    event_store: RawEventStore | None,
+) -> Any:
+    if event_store is None:
+        return sync_func(store)
+    return sync_func(store, event_store=event_store)
 
 
 def _json(value: object) -> str:
@@ -204,7 +244,9 @@ def _history_message_ids(history_entries: list[dict[str, Any]]) -> list[str]:
     return message_ids
 
 
-def sync_gmail_bootstrap(store: MessageIndexStore) -> dict[str, int]:
+def sync_gmail_bootstrap(
+    store: MessageIndexStore, event_store: RawEventStore | None = None
+) -> dict[str, int]:
     gmail_services, _, _, _, _, _ = google_auth_all()
     stats: dict[str, int] = {}
     for account, service_obj in gmail_services.items():
@@ -243,7 +285,9 @@ def sync_gmail_bootstrap(store: MessageIndexStore) -> dict[str, int]:
                     break
                 for stub in messages:
                     full_message = _fetch_gmail_full_message(service, stub["id"])
-                    if store.insert_item_if_absent(_gmail_item(account, full_message)):
+                    item = _gmail_item(account, full_message)
+                    _append_raw_message_event(event_store, item, full_message)
+                    if store.insert_item_if_absent(item):
                         count += 1
                     newest_seen = max(newest_seen, int(full_message.get("internalDate", 0) or 0))
                 page_token = response.get("nextPageToken")
@@ -303,6 +347,7 @@ def _sync_gmail_incremental_history(
     history_api: Any,
     history_id: str,
     timestamp_checkpoint: int,
+    event_store: RawEventStore | None = None,
 ) -> int:
     page_token: str | None = None
     latest_history_id = history_id
@@ -347,7 +392,9 @@ def _sync_gmail_incremental_history(
             timestamp_checkpoint = max(
                 timestamp_checkpoint, int(full_message.get("internalDate", 0) or 0)
             )
-            store.upsert_item(_gmail_item(account, full_message))
+            item = _gmail_item(account, full_message)
+            store.upsert_item(item)
+            _append_raw_message_event(event_store, item, full_message)
             count += 1
 
         store.set_sync_state(
@@ -376,6 +423,7 @@ def _sync_gmail_incremental_timestamp(
     service: Any,
     checkpoint: int,
     fallback_reason: str,
+    event_store: RawEventStore | None = None,
 ) -> int:
     page_token: str | None = None
     newest_seen = checkpoint
@@ -414,7 +462,9 @@ def _sync_gmail_incremental_timestamp(
                 if internal_date <= checkpoint:
                     stop = True
                     break
-                store.upsert_item(_gmail_item(account, full_message))
+                item = _gmail_item(account, full_message)
+                store.upsert_item(item)
+                _append_raw_message_event(event_store, item, full_message)
                 newest_seen = max(newest_seen, internal_date)
                 count += 1
             store.update_sync_progress(
@@ -450,7 +500,9 @@ def _sync_gmail_incremental_timestamp(
     return count
 
 
-def sync_gmail_incremental(store: MessageIndexStore) -> dict[str, int]:
+def sync_gmail_incremental(
+    store: MessageIndexStore, event_store: RawEventStore | None = None
+) -> dict[str, int]:
     gmail_services, _, _, _, _, _ = google_auth_all()
     stats: dict[str, int] = {}
     for account, service_obj in gmail_services.items():
@@ -467,6 +519,7 @@ def sync_gmail_incremental(store: MessageIndexStore) -> dict[str, int]:
                 history_api=history_api,
                 history_id=history_id,
                 timestamp_checkpoint=timestamp_checkpoint,
+                event_store=event_store,
             )
         else:
             fallback_reason = "history_api_unavailable" if history_id else "missing_history_cursor"
@@ -476,6 +529,7 @@ def sync_gmail_incremental(store: MessageIndexStore) -> dict[str, int]:
                 service=service,
                 checkpoint=timestamp_checkpoint,
                 fallback_reason=fallback_reason,
+                event_store=event_store,
             )
     return stats
 
@@ -526,7 +580,12 @@ def _imessage_item(row: sqlite3.Row) -> IndexedItem:
     )
 
 
-def _sync_imessage_from_local_store(store: MessageIndexStore, *, full_sync: bool) -> dict[str, int]:
+def _sync_imessage_from_local_store(
+    store: MessageIndexStore,
+    *,
+    full_sync: bool,
+    event_store: RawEventStore | None = None,
+) -> dict[str, int]:
     state = store.get_sync_state("imessage", "local") or {}
     checkpoint_rowid = int(state.get("checkpoint_value", "0") or 0)
     highest_rowid = checkpoint_rowid
@@ -546,7 +605,9 @@ def _sync_imessage_from_local_store(store: MessageIndexStore, *, full_sync: bool
             body = _clean_imessage_body(row["text"] or "")
             if not body:
                 continue
-            store.upsert_item(_imessage_item(row))
+            item = _imessage_item(row)
+            store.upsert_item(item)
+            _append_raw_message_event(event_store, item, dict(row))
             count += 1
             if count % IMESSAGE_PROGRESS_EVERY == 0:
                 store.update_sync_progress(
@@ -571,12 +632,16 @@ def _sync_imessage_from_local_store(store: MessageIndexStore, *, full_sync: bool
     return {"local": count}
 
 
-def sync_imessage_bootstrap(store: MessageIndexStore) -> dict[str, int]:
-    return _sync_imessage_from_local_store(store, full_sync=True)
+def sync_imessage_bootstrap(
+    store: MessageIndexStore, event_store: RawEventStore | None = None
+) -> dict[str, int]:
+    return _sync_imessage_from_local_store(store, full_sync=True, event_store=event_store)
 
 
-def sync_imessage_incremental(store: MessageIndexStore) -> dict[str, int]:
-    return _sync_imessage_from_local_store(store, full_sync=False)
+def sync_imessage_incremental(
+    store: MessageIndexStore, event_store: RawEventStore | None = None
+) -> dict[str, int]:
+    return _sync_imessage_from_local_store(store, full_sync=False, event_store=event_store)
 
 
 def _openhuman_whatsapp_rows() -> list[sqlite3.Row]:
@@ -843,9 +908,11 @@ def rebuild_all_threads(store: MessageIndexStore) -> int:
     return store.rebuild_threads()
 
 
-def bootstrap(store: MessageIndexStore) -> dict[str, dict[str, int]]:
-    gmail_stats = sync_gmail_bootstrap(store)
-    imessage_stats = sync_imessage_bootstrap(store)
+def bootstrap(
+    store: MessageIndexStore, event_store: RawEventStore | None = None
+) -> dict[str, dict[str, int]]:
+    gmail_stats = _call_sync(sync_gmail_bootstrap, store, event_store)
+    imessage_stats = _call_sync(sync_imessage_bootstrap, store, event_store)
     whatsapp_stats = sync_whatsapp_bootstrap(store)
     linkedin_stats = sync_linkedin_bootstrap(store)
     result = {
@@ -864,9 +931,11 @@ def bootstrap(store: MessageIndexStore) -> dict[str, dict[str, int]]:
     return result
 
 
-def incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
-    gmail_stats = sync_gmail_incremental(store)
-    imessage_stats = sync_imessage_incremental(store)
+def incremental(
+    store: MessageIndexStore, event_store: RawEventStore | None = None
+) -> dict[str, dict[str, int]]:
+    gmail_stats = _call_sync(sync_gmail_incremental, store, event_store)
+    imessage_stats = _call_sync(sync_imessage_incremental, store, event_store)
     whatsapp_stats = sync_whatsapp_incremental(store)
     linkedin_stats = sync_linkedin_incremental(store)
     result = {
@@ -886,7 +955,12 @@ def incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
 
 
 def print_summary(store: MessageIndexStore, limit: int) -> None:
-    for row in store.list_threads(limit=limit, actionable_only=True, newest_only=True):
+    rows = store.list_threads(limit=limit, actionable_only=True, newest_only=True)
+    if not rows:
+        rows = store.list_threads(limit=limit, newest_only=True)
+    if not rows:
+        rows = store.list_threads(limit=limit)
+    for row in rows:
         print(
             f"{row['latest_item_at']} | {row['source']} | {row['actionability']} | "
             f"{row['urgency']} | {row['summary']}"

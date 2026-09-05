@@ -49,6 +49,10 @@ The inbox should be built as four layers:
 - derived classifications
 - compact summaries
 
+The operational index is not the immutable evidence history. Raw observations
+are stored separately in `.inbox_event_log.sqlite3` with provenance and can be
+projected into this index or future state graphs.
+
 3. Inbox views
 - actionable threads
 - recent changes
@@ -220,13 +224,52 @@ Core tables:
 - `threads`
 - `sync_state`
 
-Likely next additions:
+Likely next additions to the operational index:
 - `open_loops`
 - `thread_labels`
 - `thread_people_refs`
 - `thread_events`
 
 This remains an operational inbox store, not a general-purpose memory graph.
+
+Evidence spine already established separately:
+- `event_store.py` — append-only raw observations with idempotent retries
+- `event_backfill.py` — resumable, batch-bounded index-to-evidence backfill
+- `source_registry.py` — source capability and freshness policy
+- `/events/capture`, `/events/backfill/index`, `/events`, `/sources/registry` — authenticated local API
+
+Message usefulness projection now established:
+- `triage_projection.py` — read-only category, usefulness, reason, confidence,
+  and evidence-reference derivation over indexed Gmail/iMessage threads
+- `/triage/messages` — bounded review queue; no provider calls or source writes
+- LifeOps MCP `triage_messages` — exposes the same attributed queue to ChatGPT,
+  with optional DeepSeek labeling over summaries only
+
+The projection categories are `reply_now`, `task`, `calendar`, `waiting`,
+`fyi`, and `archive`. Source systems and the append-only event log remain
+authoritative; the projection is rebuildable and must not be treated as a
+permission to send, archive, or modify anything.
+
+Person profile layer now established:
+- `person_store.py` — local canonical person profiles with external-contact
+  identifiers, explicit notes, and relationship claims
+- `/people/search` and `/people/{person_id}/profile` — source-contact hydration
+  plus local profile context
+- `/people/{person_id}/notes` and `/people/{person_id}/relationships` — local
+  writes only; LifeOps exposes them through exact approval-bound proposals
+
+Person data rules:
+- Apple/Google Contacts remain external source systems and are never silently
+  overwritten;
+- explicit notes and relationship claims are separate from inferred evidence;
+- every note and relationship carries source, confidence, confirmation state,
+  and optional provenance/expiry;
+- different external identifiers are not automatically merged merely because
+  their display names match.
+
+Gmail and iMessage sync paths now emit fresh `message.observed` events. The
+next product step after historical coverage is a rebuildable interpretation and
+canonical-state projection.
 
 ## TUI Information Architecture
 

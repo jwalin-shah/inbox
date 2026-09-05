@@ -20,8 +20,11 @@ ALLOWLIST_ENV = "INBOX_EGRESS_ALLOWLIST"
 LOCAL_ONLY_ENV = "INBOX_LOCAL_ONLY"
 DEFAULT_ALLOWED_HOSTS = frozenset(
     {
+        "api.eia.gov",
         "api.github.com",
         "maps.googleapis.com",
+        "places.googleapis.com",
+        "routes.googleapis.com",
     }
 )
 
@@ -266,6 +269,10 @@ def patch(url: str, **kwargs: Any) -> httpx.Response:
 
 def put(url: str, **kwargs: Any) -> httpx.Response:
     return request("PUT", url, **kwargs)
+
+
+def post(url: str, **kwargs: Any) -> httpx.Response:
+    return request("POST", url, **kwargs)
 
 
 def status() -> dict[str, Any]:

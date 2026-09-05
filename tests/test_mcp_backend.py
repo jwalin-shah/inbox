@@ -690,6 +690,24 @@ class TestTravelMethods:
             _, kwargs = client_mock.request.call_args
             assert kwargs["params"] == {"origin": "Home", "destination": "Office", "mode": "walking"}
 
+    def test_multi_stop_route(self) -> None:
+        data = {"departure_time": "2026-08-27T16:50:00-07:00"}
+        client_mock = _make_async_client_mock(response=_json_response(200, data))
+        stops = [{"name": "Harsh", "location": "Harsh address", "dwell_minutes": 5}]
+        with patch("httpx.AsyncClient", return_value=client_mock):
+            backend = InboxBackend(base_url="http://test:1234")
+            result = _run(
+                backend.route(
+                    stops=stops,
+                    arrival_time="2026-08-27T17:40:00-07:00",
+                    origin="Home",
+                )
+            )
+            assert result == data
+            _, kwargs = client_mock.request.call_args
+            assert kwargs["json"]["stops"] == stops
+            assert kwargs["json"]["arrival_time"] == "2026-08-27T17:40:00-07:00"
+
 
 class TestWhatsappMethods:
     def test_whatsapp_contacts(self) -> None:

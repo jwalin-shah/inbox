@@ -1,0 +1,13 @@
+{
+  "fuel_type": "regular",
+  "search_radius_miles": 8,
+  "max_detour_minutes": 10,
+  "gallons_default": 10,
+  "time_value_per_hour": 15,
+  "vehicle_mpg": 25,
+  "max_price_age_hours": 72,
+  "eia_series": "PET.EMM_EPMR_PTE_NUS_DPG.W",
+  "home": "37.5485,-121.9886",
+  "work": "",
+  "preferred_brands": ["Costco"]
+}
