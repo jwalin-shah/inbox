@@ -2586,6 +2586,30 @@ def _capture_record(
     )
 
 
+def _addressbook_contact_count() -> int:
+    """Count readable Apple Contacts records without copying contact values."""
+    from contacts import _addressbook_paths
+
+    total = 0
+    for db_path in _addressbook_paths():
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ZABCDRECORD'"
+            ).fetchone()
+            if not table:
+                continue
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM ZABCDRECORD
+                WHERE ZFIRSTNAME IS NOT NULL
+                   OR ZLASTNAME IS NOT NULL
+                   OR ZORGANIZATION IS NOT NULL
+                """
+            ).fetchone()
+            total += int(row[0] or 0) if row else 0
+    return total
+
+
 def _probe_collection(
     *,
     source_id: str,
@@ -2652,6 +2676,7 @@ def _probe_collection(
 
 
 def _build_capture_records() -> list[CaptureHealthRecord]:
+    from contacts import _addressbook_paths
     from services import _github_token
 
     google_diag = google_auth_diagnostics(check_refresh=False)
@@ -2686,6 +2711,15 @@ def _build_capture_records() -> list[CaptureHealthRecord]:
             newest_attr="creation_date",
             writable=True,
             coverage_notes=f"Reads local Reminders stores under: {REMINDERS_DIR}",
+        ),
+        _capture_record(
+            source_id="apple_contacts",
+            display_name="Apple Contacts",
+            source_type="local_db",
+            configured=bool(_addressbook_paths()),
+            readable=bool(_addressbook_paths()),
+            item_count=_addressbook_contact_count() if _addressbook_paths() else 0,
+            coverage_notes="Reads local macOS AddressBook SQLite databases; values remain read-only here.",
         ),
         _probe_collection(
             source_id="whatsapp",

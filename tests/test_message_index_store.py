@@ -300,6 +300,44 @@ def test_sync_state_tracks_status_and_metadata(tmp_path):
     assert states[0]["metadata"]["messages_processed"] == 50
 
 
+def test_running_sync_does_not_advance_last_success_at(tmp_path):
+    store = MessageIndexStore(tmp_path / "index.sqlite3")
+
+    store.mark_sync_started(
+        source="gmail",
+        account="a@example.com",
+        checkpoint_type="internalDateMs",
+        checkpoint_value="100",
+    )
+    running = store.get_sync_state("gmail", "a@example.com")
+    assert running is not None
+    assert running["last_success_at"] == ""
+
+    store.set_sync_state(
+        source="gmail",
+        account="a@example.com",
+        checkpoint_type="internalDateMs",
+        checkpoint_value="200",
+        status="idle",
+    )
+    successful = store.get_sync_state("gmail", "a@example.com")
+    assert successful is not None
+    assert successful["last_success_at"] != ""
+    last_success_at = successful["last_success_at"]
+
+    store.update_sync_progress(
+        source="gmail",
+        account="a@example.com",
+        checkpoint_type="internalDateMs",
+        checkpoint_value="300",
+        metadata={"messages_processed": 1},
+    )
+    still_running = store.get_sync_state("gmail", "a@example.com")
+    assert still_running is not None
+    assert still_running["status"] == "running"
+    assert still_running["last_success_at"] == last_success_at
+
+
 def test_list_threads_supports_waiting_on_and_recent_views(tmp_path):
     import datetime
 

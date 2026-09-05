@@ -155,6 +155,249 @@ Maps to: `api-design-oracle.md`.
 
 **Oracle reference:** `api-design-oracle.md` — Session Lifecycle (init → use → cleanup is explicit).
 
+### 3.4 Context Projection Provenance
+
+```
+∀context_item i: i ∈ lifeops.context.v1.sections → has(i.source_ref) ∧ read_only(context) = true
+```
+
+**Rationale:** The unified context surface is a derived transport projection,
+not a second authority. Every non-empty section item must point back to the
+source record that justified it, and the surface must not imply that it can
+write merely because it combines multiple sources.
+
+**Enforcement:** `life_context` only admits items with stable provider or
+Inbox references, returns `schema_version = lifeops.context.v1`, and marks the
+whole response `read_only = true`. Unavailable source reads become explicit
+health/limitation entries rather than empty-success claims.
+
+Property observations follow the same rule: `life_context.property_evidence`
+may contain only explicitly captured append-only events with an event
+reference. An empty property collection is an explicit not-captured state; it
+must not be presented as a surveyed or complete property model.
+
+**Oracle reference:** `api-design-oracle.md` — resource modeling, structured
+responses, and explicit versioning.
+
+### 3.5 Approved Writes Require Read-Back Verification
+
+```
+∀approved_write a: execute(a) → read_back(a) ∧ (verified(a) ∨ explicit_nonverification(a))
+```
+
+**Rationale:** A provider's successful HTTP response is not sufficient proof
+that the intended durable state exists. The LifeOps adapter must re-read the
+target using the exact approved account/resource scope and return the evidence
+and mismatches used for the conclusion. Ambiguous duplicate matches are not
+reported as verified.
+
+**Enforcement:** `execute_approved_action` returns a structured verification
+receipt. `verify_approved_action` repeats the read-only check. The current
+contracts cover Google Task creation, Calendar event updates, and local person
+notes/relationship claims; unsupported action classes return `unsupported`.
+
+**Oracle reference:** `api-design-oracle.md` — observable postconditions and
+structured responses.
+
+### 3.6 Project Evidence Preservation
+
+```
+∀ project p: evidence_count(p) ≥ 1 ∧ every(p.evidence_refs) is source-linked
+```
+
+**Rationale:** Project deduplication must not erase the captures or source
+records that justified the merge. The adapter may combine explicit project
+records under a conservative normalized name, but it must never infer a
+project from arbitrary message text.
+
+**Enforcement:** `life_context` emits `project_key`, preserves every memory,
+capture, and explicit canonical-tracker row reference in `evidence_refs` or
+`linked_source_refs`, and accepts cross-source links only when they are already
+present in project metadata or the Inbox tracker projection.
+
+### 3.7 Master Tracker Queue Projection
+
+```
+∀ q ∈ context.attention:
+  q.attention_class = "curated_email_action" → q.source_ref.source = "google_sheets"
+```
+
+The Email Action Queue is a curated review surface, not a replacement for
+Gmail. The Google Tasks Mirror is reconciliation evidence, not a second task
+authority. Both are exposed only through Inbox's bounded read-only queue
+projection.
+
+### 3.8 Persistent LifeOps Identity Resolution
+
+```
+∀ p from LifeOps People: p.identity_resolution.status ∈ {matched, unmatched, ambiguous}
+```
+
+Exact-name matching is only a labeled candidate link. The adapter preserves
+the source row and does not silently merge ambiguous people or accounts.
+
+**Oracle reference:** `data-quality-oracle.md` — record identity,
+deduplication, and provenance preservation.
+
+### 3.9 Document Metadata Is Not Document Content
+
+```
+∀d ∈ context.documents: has(d.source_ref) ∧ read_only(d) = true
+```
+
+Drive and Docs metadata may be included in the unified context, but a file
+listing is not evidence that its body was read. Body reads remain explicit,
+bounded follow-up operations through `document_evidence` and must retain the
+provider file/document ID, account, truncation state, and retrieval timestamp.
+
+### 3.10 Semantic Index Freshness
+
+```
+context.embedding_index.pending = 0 → semantic coverage complete at checkpoint
+```
+
+The local embedding status is a freshness checkpoint for the current indexed
+item set, not a permanent guarantee. A later provider sync may create pending
+work again; the context must expose the model, item counts, pending count, and
+read timestamp so callers can decide whether semantic retrieval is sufficient.
+
+### 3.11 Conservative Cross-Source Identity and Place Linking
+
+```
+∀ link: exact_or_explicit_alias → matched
+       weak_fragment → candidate
+       multiple_candidates → ambiguous
+```
+
+LifeOps People rows may carry explicit links into Actions and Projects. Contact
+resolution only upgrades to `matched` for an exact name or explicit
+parenthetical alias. A weaker unique one-word or explicit-alias fragment
+remains a review candidate; ordinary fragments from multi-word names, such as
+a shared surname, are not used as matches. Repeated place observations are
+merged only by normalized displayed address while preserving each source
+reference and per-source observation counts.
+
+Action-to-project links use the same conservative rule: only one exact
+canonical project title may produce a `matched` reference. A unique shorthand
+inside one title is labeled `candidate` without creating a reference; partial
+or ambiguous project text remains unresolved.
+
+Auxiliary workbook rows remain generic notes until a separate explicit rule
+promotes them. A value, research record, or interview question must not become
+an actionable commitment merely because it was read into the context.
+
+### 3.12 Coverage Claims Must Be Account- and Freshness-Bounded
+
+```
+∀coverage_claim c: c.account_scoped ∧ c.has_checked_at ∧ c.has_freshness_basis
+```
+
+**Rationale:** A provider-level “configured” flag cannot prove that every
+account is readable or that the local index is current. Coverage must retain
+the account, source, checkpoint timestamps, freshness policy, and explicit
+blockers or planned gaps.
+
+**Enforcement:** `coverage_report` joins provider health, capture health,
+Gmail normalization, embeddings, and the source registry into
+`lifeops.coverage.v1`. It reports provider-side completeness limits instead of
+promoting a successful probe into an exhaustive-sync claim.
+
+**Oracle reference:** `data-quality-oracle.md` — freshness, completeness, and
+lineage-aware reporting.
+
+### 3.13 Identity Review Is Not Identity Mutation
+
+```
+∀review_item r: surfaced_candidate(r) → ¬canonical_merge(r)
+```
+
+**Rationale:** A review queue may collect unresolved people, places, and
+project links, but surfacing a likely match must not silently rewrite the
+contact graph or source records.
+
+**Enforcement:** `identity_review` is read-only, retains the originating
+references, exact candidate contact IDs, and bounded disambiguation fields,
+and only exposes candidate/ambiguous/unmatched status. Any future confirmation
+must use an explicit, payload-bound approval action.
+
+`review_queue` may combine identity, project, and source-health review items for
+orchestration, but it is also read-only and cannot promote a candidate, create
+a link, or claim a planned source is connected.
+
+The durable confirmation path is `propose_person_identity_link` followed by
+explicit approval, exact execution, and a read-back from `/identity/links`.
+The resulting local link is then used by `life_context` as
+`method=approved_identity_link`; provider Contacts remain unchanged.
+
+### 3.14 System Audit Is Observational
+
+```
+system_audit() → read_only = true
+```
+
+**Rationale:** A readiness report must not mutate provider data, approve an
+action, start a worker, inspect arbitrary Mac files, or read secrets. It is a
+bounded summary of existing read contracts and must preserve known gaps
+instead of converting missing evidence into a success claim.
+
+**Enforcement:** `system_audit` delegates only to bounded read-only
+projections, returns explicit issue codes and limitations, and reports the
+write policy as proposal → explicit approval → single-use lease → execute →
+read-back. Worker-control, provider-write, secret-access, and raw-event
+mutation scope remain false until separately implemented and verified.
+
+### 3.15 Worker Evidence Packets Are Scoped
+
+```
+∀ packet p: p.read_only = true ∧
+           p.scope.provider_writes = false ∧
+           p.scope.worker_control = false ∧
+           p.scope.secret_access = false
+```
+
+**Rationale:** External workers need useful context, but they must not become
+an alternate personal-data authority or inherit Inbox credentials. A packet
+is an ephemeral projection with an explicit consumer, purpose, section
+allowlist, account scope, item bound, source health, and limitations.
+
+**Enforcement:** `evidence_packet` delegates to `life_context` with model
+execution disabled, validates requested sections, bounds each list, and
+returns only read-model data and provenance. The restricted worker stdio
+profile exposes only `evidence_packet` and `system_audit`; provider writes,
+arbitrary Inbox tools, secrets, terminal control, notes, and document metadata
+are not exposed.
+
+### 3.16 Place Resolution Is Conservative
+
+```
+place_key(a) = place_key(b) => only presentation-equivalent address strings
+                              are merged; every source observation is retained
+```
+
+**Rationale:** Calendar locations and contact addresses often differ only by
+punctuation or a street-suffix abbreviation. Merging those observations helps
+cross-source context while geocoding or fuzzy matching could incorrectly join
+distinct places.
+
+**Enforcement:** The `life_context` place projection normalizes case,
+punctuation, whitespace, and a bounded list of common street suffixes. It does
+not drop unit/address tokens, geocode, or promote a merged place to a canonical
+address; all original evidence references remain attached.
+
+### 3.17 Worker Account Scope Is Explicit
+
+```
+profile(worker) => account != "" ∧ account ∈ configured_allowlist
+```
+
+**Rationale:** A worker should receive only the account context required for
+its task. Treating an omitted account as every observed mailbox defeats data
+minimization even when the tool is read-only.
+
+**Enforcement:** The restricted launcher requires
+`LIFEOPS_WORKER_ACCOUNT_ALLOWLIST`, and `evidence_packet` rejects missing or
+non-allowlisted account values before calling `life_context`.
+
 ---
 
 ## 4. Data Integrity

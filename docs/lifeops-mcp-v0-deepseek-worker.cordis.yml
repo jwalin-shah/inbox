@@ -1,0 +1,20 @@
+# Opt-in DeepSeek Harness composition for the restricted LifeOps worker MCP.
+# The launcher exposes only evidence_packet and system_audit; it does not
+# expose LifeOps provider writes, secrets, or terminal control.
+- insert:
+    - id: lifeops-v0-worker
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: lifeops_v0
+        transport: stdio
+        command: bash
+        args:
+          - /Users/jwalinshah/projects/inbox-lifeops-mcp-v0/scripts/run_lifeops_mcp_v0_worker_stdio.sh
+        env:
+          LIFEOPS_WORKER_ACCOUNT_ALLOWLIST: jshah1331@gmail.com,jwalinshah13@gmail.com,jwalinsshah@gmail.com
+        cwd: !!js process.cwd()
+        failOnStartupError: true
+        toolCallTimeoutMs: 60000
+        reconnect:
+          enabled: true
+          maxAttempts: 5

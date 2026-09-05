@@ -31,7 +31,10 @@ def classify_thread(*, latest: sqlite3.Row, sender_freq: float = 0.0) -> ThreadC
         topic=topic,
         sender_freq=sender_freq,
     )
-    needs_reply = int(actionability in {"reply", "review"} and sender != "Me")
+    # A review candidate is not evidence that the user owes the sender a reply.
+    # Keep the reply queue conservative; opportunity/newsletter review belongs
+    # in the review/task path until an explicit reply signal is present.
+    needs_reply = int(actionability == "reply" and sender != "Me")
     open_loop = _open_loop(topic=topic, actionability=actionability, latest=latest)
     summary = _summary(latest=latest, topic=topic, actionability=actionability)
 

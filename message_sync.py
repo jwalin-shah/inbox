@@ -874,7 +874,12 @@ def incremental(store: MessageIndexStore) -> dict[str, dict[str, int]]:
 
 
 def print_summary(store: MessageIndexStore, limit: int) -> None:
-    for row in store.list_threads(limit=limit, actionable_only=True, newest_only=True):
+    rows = store.list_threads(limit=limit, actionable_only=True, newest_only=True)
+    if not rows:
+        rows = store.list_threads(limit=limit, newest_only=True)
+    if not rows:
+        rows = store.list_threads(limit=limit)
+    for row in rows:
         print(
             f"{row['latest_item_at']} | {row['source']} | {row['actionability']} | "
             f"{row['urgency']} | {row['summary']}"

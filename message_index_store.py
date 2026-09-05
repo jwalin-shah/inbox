@@ -258,11 +258,16 @@ class MessageIndexStore:
                     source, account, checkpoint_type, checkpoint_value, last_success_at,
                     last_full_sync_at, status, last_run_started_at, metadata_json, last_error
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, CASE WHEN ? = 'idle' THEN ? ELSE '' END, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, account) DO UPDATE SET
                     checkpoint_type=excluded.checkpoint_type,
                     checkpoint_value=excluded.checkpoint_value,
-                    last_success_at=excluded.last_success_at,
+                    -- A running or failed attempt must not make stale data look fresh.
+                    -- Only the successful/idle commit advances this timestamp.
+                    last_success_at=CASE
+                        WHEN excluded.status = 'idle' THEN excluded.last_success_at
+                        ELSE sync_state.last_success_at
+                    END,
                     last_full_sync_at=CASE
                         WHEN excluded.last_full_sync_at != '' THEN excluded.last_full_sync_at
                         ELSE sync_state.last_full_sync_at
@@ -280,6 +285,7 @@ class MessageIndexStore:
                     account,
                     checkpoint_type,
                     checkpoint_value,
+                    status,
                     now,
                     now if full_sync else "",
                     status,

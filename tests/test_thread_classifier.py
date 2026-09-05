@@ -46,6 +46,18 @@ def test_classify_thread_newsletter_noise_class():
     classification = classify_thread(latest=latest)
     assert classification.noise_class == "newsletter"
     assert classification.actionability == "archive"
+    assert classification.needs_reply == 0
+
+
+def test_classify_thread_review_is_not_a_reply_obligation():
+    latest = _row(
+        "opportunity@example.com",
+        subject="Persona AI seed opportunity",
+        body_text="A new opportunity you may want to review.",
+    )
+    classification = classify_thread(latest=latest)
+    assert classification.actionability == "review"
+    assert classification.needs_reply == 0
 
 
 def test_classify_thread_appointment_noise_class():
