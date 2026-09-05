@@ -540,6 +540,74 @@ class TestRemindersMethods:
             )
 
 
+class TestCalendarMethods:
+    def test_list_upcoming_calendar_events(self) -> None:
+        events = [{"event_id": "evt1", "location": "Bridgeport"}]
+        client_mock = _make_async_client_mock(response=_json_response(200, events))
+        with patch("httpx.AsyncClient", return_value=client_mock):
+            backend = InboxBackend(base_url="http://test:1234")
+            result = _run(backend.list_upcoming_calendar_events(days=3, limit=5))
+            assert result == events
+            _, kwargs = client_mock.request.call_args
+            assert kwargs["params"] == {"days": 3, "limit": 5}
+
+    def test_list_contacts(self) -> None:
+        contacts = [{"id": "alex@example.com", "addresses": [{"formatted": "1 Main St"}]}]
+        client_mock = _make_async_client_mock(response=_json_response(200, contacts))
+        with patch("httpx.AsyncClient", return_value=client_mock):
+            backend = InboxBackend(base_url="http://test:1234")
+            result = _run(backend.list_contacts(limit=5))
+            assert result == contacts
+            _, kwargs = client_mock.request.call_args
+            assert kwargs["params"] == {"q": "", "limit": 5}
+
+    def test_list_project_records_unwraps_projection(self) -> None:
+        projection = {
+            "schema_version": "inbox.project_records.v1",
+            "records": [
+                {
+                    "project": "Life Ops",
+                    "source_ref": {"source": "google_sheets", "id": "sheet:row:2"},
+                }
+            ],
+        }
+        client_mock = _make_async_client_mock(response=_json_response(200, projection))
+        with patch("httpx.AsyncClient", return_value=client_mock):
+            backend = InboxBackend(base_url="http://test:1234")
+            result = _run(backend.list_project_records(limit=5))
+            assert result == projection["records"]
+            _, kwargs = client_mock.request.call_args
+            assert kwargs["params"] == {"limit": 5}
+
+    def test_master_ops_queues_returns_projection(self) -> None:
+        projection = {
+            "schema_version": "inbox.master_ops_queues.v1",
+            "read_only": True,
+            "queues": {"email_actions": {"records": [{"email_id": "E-0001"}]}} ,
+        }
+        client_mock = _make_async_client_mock(response=_json_response(200, projection))
+        with patch("httpx.AsyncClient", return_value=client_mock):
+            backend = InboxBackend(base_url="http://test:1234")
+            result = _run(backend.master_ops_queues(limit=5))
+            assert result == projection
+            _, kwargs = client_mock.request.call_args
+            assert kwargs["params"] == {"limit": 5}
+
+    def test_lifeops_sheet_projection_returns_tabs(self) -> None:
+        projection = {
+            "schema_version": "inbox.lifeops_sheet.v1",
+            "read_only": True,
+            "tabs": {"people": {"records": [{"person_id": "P-1"}]}},
+        }
+        client_mock = _make_async_client_mock(response=_json_response(200, projection))
+        with patch("httpx.AsyncClient", return_value=client_mock):
+            backend = InboxBackend(base_url="http://test:1234")
+            result = _run(backend.lifeops_sheet_projection(limit=5))
+            assert result == projection
+            _, kwargs = client_mock.request.call_args
+            assert kwargs["params"] == {"limit": 5}
+
+
 class TestTaskMethods:
     def test_list_task_lists_no_account(self) -> None:
         client_mock = _make_async_client_mock(response=_json_response(200, []))

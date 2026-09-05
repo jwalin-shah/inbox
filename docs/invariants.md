@@ -263,7 +263,123 @@ Maps to: `lamport-tla-oracle.md`, `ostep-oracle.md`.
 
 ---
 
-## 7. Egress Audit Layer
+## 7. LifeOps Vertical Slice
+
+### 7.1 Capture Durability Before Processing
+
+```
+∀ acknowledged_capture c: ∃ row r: r.capture_id = c.id ∧ r.raw_text = c.raw_text
+```
+
+**Rationale:** Raw user input must survive extractor failure or restart. The
+capture row is committed before any extractor is called.
+
+**Enforcement:** `LifeOpsStore.create_capture()` commits `life_captures` in its
+own transaction; `process_capture()` only updates processing state afterward.
+
+### 7.2 Failed Extraction Retains Evidence
+
+```
+∀ capture c: extraction(c) = failure → persisted(c.raw_text) ∧ state(c) = FAILED
+```
+
+**Rationale:** A failed model call is a processing failure, not data loss.
+
+**Enforcement:** `process_capture()` records the bounded exception text and
+returns the capture with its original raw text.
+
+### 7.3 Extracted Entity Provenance
+
+```
+∀ extracted entity e from capture c: e.capture_id = c.id
+```
+
+**Rationale:** People and project labels extracted from a confirmed capture
+must remain evidence-backed. They are local memory records, not provider truth,
+and must be traceable to the raw capture that produced them.
+
+**Enforcement:** `MemoryStore.capture_and_process()` stores extracted people
+and projects with `metadata.capture_id`; `life_context` carries that ID into
+the memory provenance reference.
+
+### 7.4 Nonterminal Commitments Have a Next Condition
+
+```
+∀ commitment k: state(k) ≠ DONE → owner(k) ≠ "" ∧ next_condition(k) ≠ ""
+```
+
+**Rationale:** An unresolved commitment without an owner or condition cannot
+be resurfaced or acted on reliably.
+
+**Enforcement:** SQLite `CHECK` constraints plus normalization defaults for
+user-owned and other-person-owned commitments.
+
+### 7.5 Attention Query Excludes Completed Work
+
+```
+∀ k ∈ life.what_needs_me(): state(k) ≠ DONE
+```
+
+**Rationale:** The attention surface is a judgment queue, not a historical
+dump.
+
+**Enforcement:** The query selects ready/review states and expired timed
+conditions only; completion transitions the commitment to `DONE`.
+
+### 7.6 Action Envelopes Are Complete and Secret-Free
+
+```
+∀ action e: e.capability ≠ "" ∧ e.command_id ≠ "" ∧ e.risk ∈ {R0,R1,R2,R3,R4}
+             ∧ secrets(e.inputs) = ∅
+```
+
+**Rationale:** Every executor receives the same provider-neutral contract, and
+provider credentials or approval tokens must never be copied into it.
+
+**Enforcement:** `lifeops.action_envelope.ActionEnvelope.validate()` rejects
+missing identity/risk fields and secret-looking input keys.
+
+### 7.7 Route Selection Fails Closed
+
+```
+∀ selected_route r: r.capability = e.capability ∧ r.available = true
+                    when execution_mode(e) = LIVE
+```
+
+**Rationale:** A configured plugin or MCP server is not evidence that it is
+authenticated, reachable, or safe to execute.
+
+**Enforcement:** `CapabilityRegistry.resolve(..., require_available=True)`
+rejects unknown and merely configured routes.
+
+### 7.8 Live External Writes Require More Than a Local Boolean
+
+```
+∀ live e with risk(e) ≠ R0: provider_grant(e) = true
+```
+
+**Rationale:** `--live` is an operator intent, not an Inbox approval lease.
+The OpenClaw adapter blocks R1+ live execution until the underlying executor
+accepts a server-minted grant.
+
+**Enforcement:** `OpenClawExecutionAdapter.execute()` refuses R1–R4 before
+creating a subprocess.
+
+### 7.9 Action Traces Are Unique and Append-Only
+
+```
+∀ trace t: unique(t.command_id) ∧ append_only(t) ∧ secrets(t) = ∅
+```
+
+**Rationale:** A command must be traceable exactly once without turning the
+trace into a secret store.
+
+**Enforcement:** `TraceStore` rejects duplicate command IDs and secret-looking
+result fields; tests use a hermetic JSONL path.
+
+---
+
+## 8. Egress Audit Layer
 
 Maps to: `saltzer-schroeder-oracle.md`.
 
@@ -315,9 +431,180 @@ Maps to: `saltzer-schroeder-oracle.md`.
 | 5.2     | Undo capability | P2 | No | Low |
 | 6.1     | Task state machine | P1 | No | Low |
 | 6.2     | Task persistence | P1 | No | Medium |
-| 7.1     | Outbound audited | P1 | No | High |
-| 7.2     | Host allowlist | P0 | No | High |
+| 7.1-7.4 | LifeOps capture/commitment loop | P0/P1 | Yes | High |
+| 7.5-7.8 | Action envelope, route, grant, and trace boundaries | P0/P1 | Yes | High |
+| 8.1     | Outbound audited | P1 | No | High |
+| 8.2     | Host allowlist | P0 | No | High |
 
 **Key:** P0 = safety/security/data-loss invariant (hard block). P1 = provable correctness invariant. P2 = style/design preference.
+
+---
+
+## 9. LifeOps Council Layer
+
+### 9.1 Availability Is Proven, Not Inferred
+
+```
+∀ surface s selected for unattended execution: s.availability = "available"
+```
+
+Subscription status, a provider catalog entry, or a configured browser profile
+does not prove an executable route. Unknown availability remains an interactive
+handoff candidate.
+
+### 9.2 Subscription Preference Is Economic, Not Magical
+
+```
+∀ ranked surfaces: score(s) = quality(s) + subscription_bonus(s)
+  ∧ subscription_bonus(s) > 0 → subscription_sunk_cost(s) = true
+```
+
+The router prefers already-paid surfaces only after availability is proved. It
+never converts unknown quota into an unlimited quota or spends a premium route
+without an account-specific capability proof.
+
+### 9.3 Council Claims Are Single-Owner
+
+```
+∀ job j: state(j) = CLAIMED → exactly_one(claimed_by(j), claimed_surface(j))
+```
+
+Claims are appended under a local file lock. A second worker cannot claim the
+same queued job after the first claim has been recorded.
+
+### 9.4 Results Require Claim Identity
+
+```
+∀ result r: r.job_id = j ∧ r.worker_id = j.claimed_by
+  ∧ r.surface_id = j.claimed_surface
+```
+
+Workers cannot append results for another worker's claim. Result records may
+contain evidence and claims, but never raw credentials or secret-looking fields.
+
+---
+
+## 10. Agent Runtime Source Boundaries
+
+Maps to: `data-quality-oracle.md` (lineage) and `saltzer-schroeder-oracle.md`
+(fail-safe defaults, complete mediation, and least privilege).
+
+### 10.1 Runtime Presence Does Not Prove Data Readiness
+
+```
+∀runtime r: installed(r) ⇏ authenticated(r) ⇏ readable(r) ⇏ write_authorized(r)
+```
+
+**Rationale:** An installed OpenHuman or Hermes binary is only an inventory
+fact. Local state, source authentication, read access, and write authority are
+separate proof layers.
+
+**Enforcement:** The connector registry reports installation and storage state
+without enabling provider writes. Runtime MCP access must be filtered and
+verified independently.
+
+### 10.2 Agent Writes Require the LifeOps Effect Gate
+
+```
+∀agent_action a: execute(a) → approval_lease(a) ∧ readback(a) ∧ provenance(a)
+```
+
+**Rationale:** Agent runtimes are replaceable executors. They cannot bypass the
+Inbox approval, audit, and provider read-back boundary by holding their own
+memory or session state.
+
+**Enforcement:** Hermes and OpenHuman are registered as read-only runtime
+sources; the connector registry never executes provider writes for them.
+
+---
+
+## 11. Current Context Projection
+
+### 11.1 Context Items Retain Provenance
+
+```
+∀ item i ∈ life_context: i.source_ref ≠ ∅ ∨ i.local_memory_id ≠ ∅
+```
+
+**Rationale:** A useful memory projection must remain auditable. A model may
+rank or summarize an item, but it cannot turn an unreferenced claim into
+canonical personal state.
+
+**Enforcement:** `lifeops.context.build_context()` only emits source-backed
+triage items, unified contact profiles, Calendar place observations, or
+structured local-memory entries with their database ID.
+
+### 11.2 Context Is Read-Only and Honest About Gaps
+
+```
+∀ context c: c.read_only = true
+∧ unavailable(s) → s ∈ c.limitations
+```
+
+**Rationale:** Presence of one healthy connector must not be presented as
+  complete Master Ops coverage.
+
+**Enforcement:** `life_context` carries the triage source-health object and
+explicitly lists deferred or failed domains.
+
+### 11.3 Open Commitments Are Not Limited to Attention
+
+```
+∀ commitment k: k.state ≠ DONE → k may appear in context.commitments
+∀ k ∈ context.commitments: k.source_ref.kind = "life_commitment"
+```
+
+**Rationale:** A commitment can be valid without being due today. The context
+tree must preserve the open queue separately from the smaller judgment queue.
+
+**Enforcement:** `life_context` reads the durable LifeOps commitment table and
+keeps commitment and capture IDs in the emitted reference.
+
+### 11.4 Explicit Projects Preserve All Evidence
+
+```
+∀ project p ∈ context.projects: p.evidence_count ≥ 1
+∧ every(ref ∈ p.evidence_refs): ref.source ≠ ∅ ∧ ref.id ≠ ∅
+```
+
+**Rationale:** Conservative project deduplication must not discard the
+captures or source records that justified a merge. Project identity is a
+projection over explicit records, not an LLM-inferred fact.
+
+**Enforcement:** The context builder groups only explicit project memory
+entries and explicit canonical-tracker rows by a normalized name, emits
+`project_key`, retains every memory/capture reference in `evidence_refs`, and
+accepts cross-source links only from record metadata. Tracker rows come through
+Inbox's bounded read-only `/project-records` projection and retain their
+spreadsheet row reference.
+
+### 11.5 Queue Projections Do Not Create Authority
+
+```
+∀ queue item q ∈ context.attention:
+  q.attention_class = "curated_email_action" → q.source_ref.source = "google_sheets"
+```
+
+**Rationale:** The Email Action Queue and Tasks Mirror are reconciliation
+surfaces. They may explain a review candidate, but they must not be treated as
+the Gmail or Google Tasks authority.
+
+**Enforcement:** Queue rows enter `life_context` only through Inbox's bounded
+`/master-ops/queues` read route and remain read-only, source-linked attention
+items.
+
+### 11.6 Persistent LifeOps Identity Resolution Is Conservative
+
+```
+∀ person p from LifeOps People:
+  identity_resolution.status ∈ {matched, unmatched, ambiguous}
+```
+
+**Rationale:** Exact-name matching can provide useful links, but it is not
+enough to justify a silent merge across people or accounts.
+
+**Enforcement:** The projection labels exact-name matches and ambiguity,
+retains the LifeOps sheet row as provenance, and leaves unresolved identities
+separate until stronger evidence is available.
 
 ---

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+from lifeops_store import LifeOpsStore
 
 BASE_DIR = Path(__file__).parent
 DEFAULT_MEMORY_DB = BASE_DIR / ".inbox_memory.sqlite3"
@@ -37,6 +40,7 @@ class MemoryStore:
         self.db_path = db_path or DEFAULT_MEMORY_DB
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self.lifeops = LifeOpsStore(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -196,6 +200,91 @@ class MemoryStore:
 
     def close_commitment(self, entry_id: int) -> dict[str, object]:
         return self.update_entry(entry_id, status="closed")
+
+    def capture_and_process(
+        self,
+        raw_text: str,
+        source: str,
+        extractor: Callable[[str], dict[str, object]],
+    ) -> dict[str, object]:
+        capture = self.lifeops.create_capture(raw_text, source)
+        capture_id = str(capture["capture_id"])
+        saved_entries: list[dict[str, object]] = []
+
+        def extract_and_persist(text: str) -> dict[str, object]:
+            extracted = extractor(text) or {}
+            saved_entries.extend(
+                self._persist_extracted_entities(
+                    extracted=extracted,
+                    source=source,
+                    capture_id=capture_id,
+                )
+            )
+            return extracted
+
+        result = self.lifeops.process_capture(capture_id, extract_and_persist)
+        if saved_entries:
+            result["memory_entries"] = saved_entries
+        return result
+
+    def _persist_extracted_entities(
+        self,
+        *,
+        extracted: dict[str, object],
+        source: str,
+        capture_id: str,
+    ) -> list[dict[str, object]]:
+        """Persist extracted people/projects with raw-capture provenance."""
+        saved: list[dict[str, object]] = []
+        for value in extracted.get("people", []) or []:
+            if not isinstance(value, dict):
+                continue
+            name = str(value.get("name") or "").strip()
+            if not name:
+                continue
+            saved.append(
+                self.save_entry(
+                    memory_type="person",
+                    subject=name,
+                    content=str(value.get("context") or "").strip(),
+                    source=source,
+                    confidence=0.8,
+                    metadata={
+                        "capture_id": capture_id,
+                        "relationship": str(value.get("relationship") or ""),
+                    },
+                )
+            )
+
+        for value in extracted.get("projects", []) or []:
+            if not isinstance(value, dict):
+                continue
+            name = str(value.get("name") or "").strip()
+            if not name:
+                continue
+            saved.append(
+                self.save_entry(
+                    memory_type="project",
+                    subject=name,
+                    content=str(value.get("description") or "").strip(),
+                    source=source,
+                    confidence=0.85,
+                    metadata={
+                        "capture_id": capture_id,
+                        "status": str(value.get("status") or "active"),
+                    },
+                )
+            )
+        return saved
+
+    def what_needs_me(self, limit: int = 25) -> dict[str, object]:
+        return self.lifeops.what_needs_me(limit)
+
+    def list_open_life_commitments(self, limit: int = 25) -> list[dict[str, object]]:
+        return self.lifeops.list_open_commitments(limit)
+
+    def complete_life_commitment(self, commitment_id: str) -> dict[str, object]:
+        return self.lifeops.complete_commitment(commitment_id)
 
     def _row_to_entry(self, row: sqlite3.Row) -> MemoryEntry:
         return MemoryEntry(

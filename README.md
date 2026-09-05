@@ -83,6 +83,25 @@ POST /reminders  {"title", "list_name", "due_date"}
 POST /reminders/{id}/complete
 ```
 
+**LifeOps v0:**
+```
+POST /life/capture  {"text": "I need to call Yadel.", "source": "chatgpt"}
+GET  /life/what-needs-me
+POST /life/commitments/{commitment_id}/complete
+```
+
+**Action coordination (plan-only by default):**
+```bash
+scripts/lifeops capabilities sync
+scripts/lifeops routes task.create
+scripts/lifeops execute task.create --title "Call Nathan"
+scripts/lifeops trace <command_id>
+```
+
+The action envelope and route registry belong to LifeOps; OpenClaw owns plugin,
+MCP, browser, and provider execution. `--live` is intentionally fail-closed
+for R1+ until the underlying executor accepts a server-minted approval grant.
+
 **GitHub:**
 ```
 GET  /github/notifications?all=false

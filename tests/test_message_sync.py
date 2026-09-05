@@ -2,6 +2,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1900,13 +1901,14 @@ def test_bootstrap_rebuilds_all_sources_combined(tmp_path, monkeypatch):
 def test_print_summary_with_threads(tmp_path, capsys):
     """print_summary prints ordered rows from the store."""
     store = MessageIndexStore(tmp_path / "index.sqlite3")
+    recent = datetime.now(UTC)
     store.upsert_item(
         _indexed_item(
             source="gmail",
             account="acct@x.com",
             external_id="m1",
             thread_id="t1",
-            created_at="2026-07-01T10:00:00+00:00",
+            created_at=recent.isoformat(),
             subject="Team lunch",
         )
     )
@@ -1916,7 +1918,7 @@ def test_print_summary_with_threads(tmp_path, capsys):
             account="local",
             external_id="m2",
             thread_id="t2",
-            created_at="2026-07-01T11:00:00+00:00",
+            created_at=(recent + timedelta(minutes=1)).isoformat(),
             subject="Hey",
         )
     )

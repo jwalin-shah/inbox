@@ -50,6 +50,7 @@ class ConnectorDefinition:
     label: str
     binary: str
     category: str
+    install_paths: tuple[str, ...] = ()
     storage_paths: tuple[str, ...] = ()
     auth_command: tuple[str, ...] = ()
     search_command: tuple[str, ...] = ()
@@ -301,6 +302,93 @@ CONNECTORS: tuple[ConnectorDefinition, ...] = (
         notes="Local LinkedIn scanner/export backing store; disabled by default and read-only from Inbox.",
     ),
     ConnectorDefinition(
+        id="openhuman",
+        label="OpenHuman local memory",
+        binary="openhuman",
+        category="agent_runtime",
+        install_paths=("/Applications/OpenHuman.app",),
+        storage_paths=(
+            "~/.openhuman",
+            "~/.openhuman-staging",
+        ),
+        required_permissions=(
+            "OpenHuman local workspace access; provider OAuth remains owned by OpenHuman",
+        ),
+        accounts=(
+            ConnectorAccountScope(
+                id="openhuman:local",
+                label="OpenHuman local workspace",
+                subject_ref="OpenHuman local workspace identity",
+                read_scopes=(
+                    "openhuman.local_memory.read",
+                    "openhuman.export.read",
+                ),
+                credential_refs=(
+                    CredentialReference(
+                        id="openhuman_workspace",
+                        label="OpenHuman workspace reference",
+                        kind="local_workspace",
+                        encrypted_ref="file://~/.openhuman",
+                        scopes=("openhuman.local_memory",),
+                        notes="LifeOps reads exported/local stores only; OpenHuman owns OAuth credentials.",
+                    ),
+                ),
+            ),
+        ),
+        remediation=(
+            "Install OpenHuman through its signed/native distribution and complete its own onboarding.",
+            "Verify the local workspace exists before enabling any LifeOps sync.",
+            "Keep OpenHuman provider OAuth in OpenHuman; do not copy credentials into Inbox.",
+        ),
+        notes=(
+            "Read-only runtime inventory. Existing WhatsApp and LinkedIn readers use explicit "
+            "OpenHuman database paths; this entry does not grant agent or provider write access."
+        ),
+    ),
+    ConnectorDefinition(
+        id="hermes",
+        label="Hermes Agent local runtime",
+        binary="hermes",
+        category="agent_runtime",
+        storage_paths=(
+            "~/.hermes",
+            "~/.hermes/state.db",
+        ),
+        required_permissions=(
+            "Hermes local state access; MCP tools must be explicitly allowlisted",
+        ),
+        accounts=(
+            ConnectorAccountScope(
+                id="hermes:local",
+                label="Hermes local runtime",
+                subject_ref="Hermes local agent state",
+                read_scopes=(
+                    "hermes.sessions.read",
+                    "hermes.mcp.read",
+                ),
+                credential_refs=(
+                    CredentialReference(
+                        id="hermes_local_state",
+                        label="Hermes local state reference",
+                        kind="local_runtime",
+                        encrypted_ref="file://~/.hermes",
+                        scopes=("hermes.sessions", "hermes.mcp"),
+                        notes="Runtime state is inspected by path only; credentials are not exported to Inbox.",
+                    ),
+                ),
+            ),
+        ),
+        remediation=(
+            "Install Hermes Agent through the official NousResearch distribution.",
+            "Run Hermes setup separately; preview any OpenClaw migration before accepting it.",
+            "Connect LifeOps through a filtered read-only MCP server before considering writes.",
+        ),
+        notes=(
+            "Read-only runtime inventory. Hermes is an executor/client, not the personal-data "
+            "authority; LifeOps remains the source of truth."
+        ),
+    ),
+    ConnectorDefinition(
         id="discord",
         label="Discord",
         binary="discrawl",
@@ -416,9 +504,20 @@ def _safe_command_preview(command: tuple[str, ...]) -> list[str]:
     return list(command)
 
 
-def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
+def _resolve_install_path(connector: ConnectorDefinition) -> str:
     binary_path = shutil.which(connector.binary)
-    installed = binary_path is not None
+    if binary_path:
+        return binary_path
+    for raw_path in connector.install_paths:
+        path = Path(raw_path).expanduser()
+        if path.exists():
+            return str(path)
+    return ""
+
+
+def connector_status(connector: ConnectorDefinition) -> dict[str, Any]:
+    binary_path = _resolve_install_path(connector)
+    installed = bool(binary_path)
     auth_state = "not_installed"
     auth_detail: Any = None
     auth_error = ""

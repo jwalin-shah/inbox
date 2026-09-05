@@ -294,6 +294,17 @@ def _route_rule(
 
 APPROVAL_ROUTE_RULES: tuple[ApprovalRouteRule, ...] = (
     _route_rule(
+        "POST", r"^/life/capture$", "lifeops", "capture", "inbox.life.capture", "local_write"
+    ),
+    _route_rule(
+        "POST",
+        r"^/life/commitments/[^/]+/complete$",
+        "lifeops",
+        "complete_commitment",
+        "inbox.life.complete_commitment",
+        "local_write",
+    ),
+    _route_rule(
         "POST", r"^/messages/send$", "imessage_gmail", "send_message", "inbox.messages.send"
     ),
     _route_rule(
@@ -1515,6 +1526,11 @@ class SummarizeRequest(BaseModel):
 
 class ExtractActionsRequest(BaseModel):
     text: str
+
+
+class LifeCaptureRequest(BaseModel):
+    text: str
+    source: str = "manual"
 
 
 class BulkUnsubscribeRequest(BaseModel):
@@ -6295,6 +6311,41 @@ async def check_calendar_conflicts(start: str, end: str, account: str = ""):
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.post("/life/capture")
+async def life_capture(req: LifeCaptureRequest):
+    """Durably capture raw LifeOps text before extracting commitments."""
+    try:
+        return await asyncio.to_thread(
+            memory_store.capture_and_process,
+            req.text,
+            req.source,
+            ai_extract_memory,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/life/what-needs-me")
+async def life_what_needs_me(limit: int = 25):
+    """Return only LifeOps commitments that currently need human judgment."""
+    try:
+        return await asyncio.to_thread(memory_store.what_needs_me, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/life/commitments/{commitment_id}/complete")
+async def life_complete_commitment(commitment_id: str):
+    """Mark one durable LifeOps commitment DONE."""
+    try:
+        return await asyncio.to_thread(
+            memory_store.complete_life_commitment,
+            commitment_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/memory/extract")

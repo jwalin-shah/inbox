@@ -58,6 +58,16 @@ class InboxBackend:
     async def health(self) -> dict[str, Any]:
         return await self._request("GET", "/health")
 
+    async def inbox_now(
+        self, *, limit: int = 20, workflow: str = "", account: str = ""
+    ) -> dict[str, Any]:
+        """Read the primary Inbox projection without performing any writes."""
+        return await self._request(
+            "GET",
+            "/inbox/now",
+            params={"limit": limit, "workflow": workflow, "account": account},
+        )
+
     async def list_inbox_threads(self, limit: int = 20, account: str = "") -> list[dict[str, Any]]:
         return await self._request(
             "GET",
@@ -286,6 +296,55 @@ class InboxBackend:
         if origin:
             params["origin"] = origin
         return await self._request("GET", "/calendar/departure-times", params=params)
+
+    async def list_upcoming_calendar_events(
+        self, days: int = 7, limit: int = 50, account: str = ""
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"days": days, "limit": limit}
+        if account:
+            params["account"] = account
+        return await self._request("GET", "/calendar/upcoming", params=params)
+
+    async def list_contacts(self, query: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        """Read bounded Apple/Google/contact-index records through Inbox."""
+        return await self._request(
+            "GET",
+            "/contacts/search",
+            params={"q": query, "limit": max(1, min(limit, 100))},
+        )
+
+    async def list_project_records(
+        self, account: str = "", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Read explicit project rows from Inbox's canonical tracker projection."""
+        params: dict[str, Any] = {"limit": max(1, min(limit, 200))}
+        if account:
+            params["account"] = account
+        result = await self._request("GET", "/project-records", params=params)
+        if isinstance(result, dict):
+            records = result.get("records")
+            return records if isinstance(records, list) else []
+        return result if isinstance(result, list) else []
+
+    async def master_ops_queues(
+        self, account: str = "", limit: int = 100
+    ) -> dict[str, Any]:
+        """Read Master Tracker queue projections without treating them as authorities."""
+        params: dict[str, Any] = {"limit": max(1, min(limit, 200))}
+        if account:
+            params["account"] = account
+        result = await self._request("GET", "/master-ops/queues", params=params)
+        return result if isinstance(result, dict) else {}
+
+    async def lifeops_sheet_projection(
+        self, account: str = "", limit: int = 100
+    ) -> dict[str, Any]:
+        """Read explicit People/Actions/Projects rows from the LifeOps sheet."""
+        params: dict[str, Any] = {"limit": max(1, min(limit, 200))}
+        if account:
+            params["account"] = account
+        result = await self._request("GET", "/lifeops-sheet/projection", params=params)
+        return result if isinstance(result, dict) else {}
 
     async def travel_time(
         self, origin: str, destination: str, mode: str = "driving"

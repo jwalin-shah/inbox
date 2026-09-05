@@ -24,25 +24,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 import time
-import uuid
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+from playwright.async_api import async_playwright
+
 from connectors.base import (
     INBOX_DATA,
     PROFILES_DIR,
-    RAW_DIR,
     AuthStatus,
     BaseConnector,
     JobStatus,
     SyncResult,
 )
-from loguru import logger
-from playwright.async_api import async_playwright
 
 CLAUDE_BASE = "https://claude.ai"
 CLAUDE_API = "https://claude.ai/api"

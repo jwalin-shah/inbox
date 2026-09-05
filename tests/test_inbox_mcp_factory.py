@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -142,6 +142,9 @@ class TestBuildMcp:
         assert "read_daily_note" in mcp.tools
         assert "get_memory" in mcp.tools
         assert "list_open_commitments" in mcp.tools
+        assert "life_what_needs_me" in mcp.tools
+        assert "life_triage" in mcp.tools
+        assert "life_context" in mcp.tools
 
     def test_readonly_omits_write_tools(self):
         mcp, _, _ = _build_with_mocks(readonly=True)
@@ -149,6 +152,8 @@ class TestBuildMcp:
         assert "save_memory_note" not in mcp.tools
         assert "update_memory" not in mcp.tools
         assert "close_commitment" not in mcp.tools
+        assert "life_capture" not in mcp.tools
+        assert "life_complete_commitment" not in mcp.tools
 
     def test_non_readonly_registers_write_tools(self):
         mcp, _, _ = _build_with_mocks(readonly=False)
@@ -156,6 +161,8 @@ class TestBuildMcp:
         assert "save_memory_note" in mcp.tools
         assert "update_memory" in mcp.tools
         assert "close_commitment" in mcp.tools
+        assert "life_capture" in mcp.tools
+        assert "life_complete_commitment" in mcp.tools
 
     def test_calls_register_registry_tools(self):
         from unittest.mock import ANY
@@ -199,6 +206,141 @@ class TestToolBodies:
         monkeypatch.setattr(inbox_mcp_factory.ambient_notes, "_today_file", lambda: fake)
         result = await fn()
         assert result == {"ok": False, "path": str(fake), "content": ""}
+
+    @pytest.mark.anyio
+    async def test_life_capture_durably_projects_commitments(self, captured, monkeypatch):
+        mcp, _, memory = captured
+        memory.capture_and_process.return_value = {
+            "capture": {"capture_id": "cap_test", "processing_state": "PROCESSED"},
+            "commitments": [],
+        }
+        monkeypatch.setattr(
+            inbox_mcp_factory,
+            "ai_extract_memory",
+            lambda _text: {"action_items": ["Call Yadel"]},
+        )
+
+        result = await mcp.tools["life_capture"]("I need to call Yadel.", confirm=True)
+
+        assert result["capture"]["capture_id"] == "cap_test"
+        memory.capture_and_process.assert_called_once()
+        args = memory.capture_and_process.call_args.args
+        assert args[0] == "I need to call Yadel."
+        assert args[1] == "chatgpt"
+        assert args[2] is inbox_mcp_factory.ai_extract_memory
+
+    @pytest.mark.anyio
+    async def test_life_capture_requires_confirmation(self, captured):
+        mcp, _, _ = captured
+
+        with pytest.raises(ValueError, match="life_capture requires explicit confirmation"):
+            await mcp.tools["life_capture"]("Call Yadel")
+
+    @pytest.mark.anyio
+    async def test_life_what_needs_me_delegates_to_store(self, captured):
+        mcp, _, memory = captured
+        memory.what_needs_me.return_value = {"message": "Nothing needs you.", "items": []}
+
+        result = await mcp.tools["life_what_needs_me"](limit=3)
+
+        assert result["message"] == "Nothing needs you."
+        memory.what_needs_me.assert_called_once_with(3)
+
+    @pytest.mark.anyio
+    async def test_life_triage_reads_inbox_and_merges_local_state(self, captured):
+        mcp, backend, memory = captured
+        memory.what_needs_me.return_value = {"items": [], "capture_failures": []}
+        backend.inbox_now = AsyncMock(
+            return_value={"now_items": [], "waiting_threads": [], "reasons": []}
+        )
+
+        result = await mcp.tools["life_triage"](limit=3)
+
+        assert result["read_only"] is True
+        backend.inbox_now.assert_awaited_once_with(limit=3, workflow="", account="")
+
+    @pytest.mark.anyio
+    async def test_life_context_reads_existing_models_without_writes(self, captured):
+        mcp, backend, memory = captured
+        memory.what_needs_me.return_value = {"items": [], "capture_failures": []}
+        memory.query_entries.return_value = [
+            {
+                "id": 7,
+                "memory_type": "person",
+                "subject": "Harsh",
+                "content": "Pickup contact",
+                "source": "manual",
+                "confidence": 0.9,
+                "status": "active",
+                "created_at": "2026-08-25T12:00:00+00:00",
+                "updated_at": "2026-08-25T12:00:00+00:00",
+                "expires_at": None,
+                "metadata": {},
+            }
+        ]
+        memory.list_open_life_commitments.return_value = []
+        backend.inbox_now = AsyncMock(
+            return_value={"now_items": [], "waiting_threads": [], "reasons": []}
+        )
+        backend.list_upcoming_calendar_events = AsyncMock(return_value=[])
+        backend.list_contacts = AsyncMock(return_value=[])
+        with patch(
+            "inbox_mcp_factory.build_unified_profiles",
+            return_value=([], {"schema": "inbox.unified_contacts.v1", "source_status": {}}),
+        ) as profiles:
+            result = await mcp.tools["life_context"](limit=3, section_limit=4)
+
+        assert result["read_only"] is True
+        assert result["sections"]["people"][0]["title"] == "Harsh"
+        backend.inbox_now.assert_awaited_once_with(limit=3, workflow="", account="")
+        memory.query_entries.assert_called_once_with(
+            query="", memory_type="", subject="", status="", limit=32
+        )
+        memory.list_open_life_commitments.assert_called_once_with(4)
+        profiles.assert_called_once_with(gmail_limit=24, include_gmail=False, limit=4)
+        backend.list_upcoming_calendar_events.assert_awaited_once_with(
+            days=7, limit=16, account=""
+        )
+        backend.list_contacts.assert_awaited_once_with(limit=16)
+
+    @pytest.mark.anyio
+    async def test_life_context_can_include_live_gmail_for_people(self, captured):
+        mcp, backend, memory = captured
+        memory.what_needs_me.return_value = {"items": [], "capture_failures": []}
+        memory.query_entries.return_value = []
+        backend.inbox_now = AsyncMock(
+            return_value={"now_items": [], "waiting_threads": [], "reasons": []}
+        )
+        backend.list_upcoming_calendar_events = AsyncMock(return_value=[])
+        backend.list_contacts = AsyncMock(return_value=[])
+        with patch(
+            "inbox_mcp_factory.build_unified_profiles",
+            return_value=([], {"schema": "inbox.unified_contacts.v1", "source_status": {}}),
+        ) as profiles:
+            await mcp.tools["life_context"](
+                limit=2, section_limit=3, include_live_gmail=True
+            )
+
+        profiles.assert_called_once_with(gmail_limit=18, include_gmail=True, limit=3)
+
+    @pytest.mark.anyio
+    async def test_life_context_reports_calendar_failure(self, captured):
+        mcp, backend, memory = captured
+        memory.what_needs_me.return_value = {"items": [], "capture_failures": []}
+        memory.query_entries.return_value = []
+        backend.inbox_now = AsyncMock(
+            return_value={"now_items": [], "waiting_threads": [], "reasons": []}
+        )
+        backend.list_upcoming_calendar_events = AsyncMock(side_effect=RuntimeError("down"))
+        backend.list_contacts = AsyncMock(return_value=[])
+        with patch(
+            "inbox_mcp_factory.build_unified_profiles",
+            return_value=([], {"schema": "inbox.unified_contacts.v1", "source_status": {}}),
+        ):
+            result = await mcp.tools["life_context"](limit=2, section_limit=3)
+
+        assert result["source_health"]["calendar"]["status"] == "unavailable"
+        assert "calendar_read_unavailable" in result["limitations"]
 
     @pytest.mark.anyio
     async def test_tool_read_daily_note_specific_date(self, captured, monkeypatch, tmp_path):

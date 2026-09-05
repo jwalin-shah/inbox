@@ -154,3 +154,37 @@ def test_save_entry_with_metadata_and_expires(tmp_path):
     )
     assert saved["metadata"] == {"ui": "dark", "version": 2}
     assert saved["expires_at"] == "2027-01-01T00:00:00+00:00"
+
+
+def test_capture_persists_people_and_projects_with_capture_provenance(tmp_path):
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+
+    result = store.capture_and_process(
+        "Discuss the street-play project with Harsh.",
+        "chatgpt",
+        lambda _text: {
+            "people": [{"name": "Harsh", "context": "Practice pickup", "relationship": "friend"}],
+            "projects": [{"name": "Street play", "description": "Practice logistics", "status": "active"}],
+            "commitments": [],
+            "action_items": [],
+        },
+    )
+
+    assert result["capture"]["processing_state"] == "PROCESSED"
+    assert {entry["memory_type"] for entry in result["memory_entries"]} == {"person", "project"}
+    projects = store.query_entries(memory_type="project")
+    assert projects[0]["subject"] == "Street play"
+    assert projects[0]["metadata"]["capture_id"] == result["capture"]["capture_id"]
+
+
+def test_lists_open_life_commitments_separately_from_memory_entries(tmp_path):
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+    capture = store.lifeops.create_capture("Do thing", source="test")
+    store.lifeops.process_capture(
+        capture["capture_id"],
+        lambda _text: {"commitments": [{"text": "Do thing"}], "action_items": []},
+    )
+
+    result = store.list_open_life_commitments()
+    assert len(result) == 1
+    assert result[0]["title"] == "Do thing"

@@ -39,18 +39,21 @@ flaky tests. The codebase layout is consistent (no split between root and
 - MCP server: stdio-based, exposes all inbox functionality to agents
 - Agent slash commands: `/inbox morning-brief`, `triage`, `followup`, `batch`,
   `health` — all working
+- LifeOps action coordination: local capability inventory, deterministic
+  `task.create` route selection, plan-only trace creation, and read-back were
+  verified on 2026-08-31 (`cmd_a139357706c64e06a0ad386c72bbc65d`); provider
+  state was not changed
 - LLM stack: Qwen3.5-0.8B-MLX-4bit for extraction + autocomplete, Outlines for
   constrained generation
 - Ambient audio: capture → ASR → extraction → Obsidian notes pipeline
 - Scheduler: background task runner with persistent SQLite state
-- Test suite: 1888 passing, 1 failing (`test_print_summary_with_threads` in
-  `test_message_sync.py`)
-- Overall coverage: 82% (25,758/30,904 statements missed → mostly uncovered
-  utility scripts and error paths)
+- Test suite: 2,029 passing in the repository-local `.venv` on 2026-08-31
+- Overall coverage: 84% in that same local run
 
 **Broken:**
-- One test failure: `test_print_summary_with_threads` — assertion error,
-  likely a stale expected value after a code change in the gnhf series
+- No current full-suite failure was observed in the repository-local `.venv`.
+  This is a local reproducibility result, not proof of deployment or live
+  provider access.
 - `unsubscribe_bulk.py` at 6% coverage, `unsubscribe_interactive.py` at 6%
   — these are the lowest-coverage files and were skipped in the gnhf push
 - `docs/agents/` stubs were removed in the most recent commit (087b294) but
@@ -64,6 +67,11 @@ flaky tests. The codebase layout is consistent (no split between root and
   the gnhf refactors (it was tested to 98% but only with mocks)
 
 ## Decisions so far
+
+- 2026-08-31: **Local full-suite verification.** The repository-local `.venv`
+  passed 2,029 tests with 84% coverage. The result is recorded as local test
+  evidence only; deployment, live provider access, and external writes remain
+  separate gates.
 
 - 2026-07-17: **Memjuice strip + cleanup.** Removed auto-generated `docs/agents/`
   stubs, stripped memjuice context from AGENTS.md, added `__init__.py` files,

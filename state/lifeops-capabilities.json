@@ -1,0 +1,507 @@
+{
+  "errors": [],
+  "openclaw": {
+    "command": "openclaw",
+    "mcp_servers": {
+      "bridge_intake": {
+        "configured": true
+      },
+      "capture_item": {
+        "configured": true
+      },
+      "inbox_attention": {
+        "configured": true
+      },
+      "inbox_full": {
+        "configured": true
+      },
+      "inbox_tasks_approval": {
+        "configured": true
+      },
+      "lifeops_attention": {
+        "configured": true
+      },
+      "lifeops_capture": {
+        "configured": true
+      },
+      "lifeops_v0": {
+        "configured": true
+      }
+    },
+    "plugin_count": 69,
+    "plugins": [
+      {
+        "enabled": false,
+        "id": "active-memory",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "admin-http-rpc",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "alibaba",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "anthropic",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "azure-speech",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "bonjour",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "browser",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "byteplus",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "canvas",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "clawrouter",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "codex-supervisor",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "cohere",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "comfy",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "copilot-proxy",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "deepgram",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "device-pair",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "document-extract",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "duckduckgo",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "elevenlabs",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "fal",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "file-transfer",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "github-copilot",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "google",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "huggingface",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "imessage",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "litellm",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "llm-task",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "lmstudio",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "logbook",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "memory-core",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "memory-wiki",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "meta",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "microsoft",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "microsoft-foundry",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "migrate-claude",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "migrate-hermes",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "minimax",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "mistral",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "novita",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "nvidia",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "oc-path",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "ollama",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "open-prose",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "openai",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "opencode",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "opencode-go",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "openrouter",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "phone-control",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "policy",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "runway",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "senseaudio",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "sglang",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "synthetic",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "talk-voice",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "telegram",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "thread-ownership",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "together",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "tts-local-cli",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "vllm",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "volcengine",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "voyage",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "vydra",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "web-readability",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "webhooks",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": false,
+        "id": "workboard",
+        "status": "disabled",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "xai",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "xiaomi",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "codex",
+        "status": "loaded",
+        "tool_names": []
+      },
+      {
+        "enabled": true,
+        "id": "whatsapp",
+        "status": "loaded",
+        "tool_names": []
+      }
+    ],
+    "version": "OpenClaw 2026.7.1-2 (0790d9f)"
+  },
+  "readiness": "configured_only",
+  "routes": [
+    {
+      "authenticated": null,
+      "available": null,
+      "capability": "task.create",
+      "installed": true,
+      "notes": "Configured OpenClaw Inbox task surface; live lease handoff remains unproven.",
+      "priority": 10,
+      "provider": "google_tasks",
+      "required_mcp_server": "inbox_tasks_approval",
+      "risk": "R1",
+      "route_id": "openclaw/inbox_tasks_approval",
+      "transport": "mcp"
+    },
+    {
+      "authenticated": null,
+      "available": null,
+      "capability": "task.create",
+      "installed": false,
+      "notes": "Fallback candidate; requires an explicit OpenClaw route and read-back proof.",
+      "priority": 20,
+      "provider": "apple_reminders",
+      "required_mcp_server": "apple_reminders",
+      "risk": "R1",
+      "route_id": "openclaw/apple_reminders",
+      "transport": "mcp"
+    },
+    {
+      "authenticated": null,
+      "available": null,
+      "capability": "task.create",
+      "installed": null,
+      "notes": "Provider-backed agent fallback; availability is never inferred from model config.",
+      "priority": 30,
+      "provider": "gemini",
+      "required_mcp_server": null,
+      "risk": "R1",
+      "route_id": "openclaw/agent_gemini",
+      "transport": "agent"
+    },
+    {
+      "authenticated": null,
+      "available": null,
+      "capability": "task.create",
+      "installed": null,
+      "notes": "Last-resort browser route; requires a separate authenticated read-back proof.",
+      "priority": 40,
+      "provider": "browser",
+      "required_mcp_server": null,
+      "risk": "R1",
+      "route_id": "openclaw/browser_google_tasks",
+      "transport": "browser"
+    }
+  ],
+  "schema_version": "lifeops.capability_registry.v1",
+  "synced_at": "2026-08-31T19:58:08.086341+00:00"
+}

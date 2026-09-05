@@ -1,0 +1,147 @@
+{
+  "readiness": "unprobed",
+  "schema_version": "lifeops.council_surfaces.v1",
+  "surfaces": [
+    {
+      "automatic_enabled": true,
+      "automation_level": "interactive",
+      "availability": "unknown",
+      "best_for": "source-backed web research and landscape scans",
+      "capabilities": [
+        "research.search",
+        "research.synthesis"
+      ],
+      "last_verified_at": null,
+      "latency": "medium",
+      "marginal_cost": 0.0,
+      "provider": "perplexity",
+      "quality": 0.92,
+      "quota_remaining": null,
+      "quota_reset_at": null,
+      "quota_status": "unknown",
+      "rate_limit_type": "account_probe_required",
+      "status_source": "account_probe_required",
+      "subscription_sunk_cost": true,
+      "surface": "Best",
+      "surface_id": "perplexity/best"
+    },
+    {
+      "automatic_enabled": true,
+      "automation_level": "interactive",
+      "availability": "unknown",
+      "best_for": "deep research when the question warrants premium depth",
+      "capabilities": [
+        "research.search",
+        "research.synthesis"
+      ],
+      "last_verified_at": null,
+      "latency": "slow",
+      "marginal_cost": 0.0,
+      "provider": "perplexity",
+      "quality": 0.95,
+      "quota_remaining": null,
+      "quota_reset_at": null,
+      "quota_status": "unknown",
+      "rate_limit_type": "account_probe_required",
+      "status_source": "account_probe_required",
+      "subscription_sunk_cost": true,
+      "surface": "Research",
+      "surface_id": "perplexity/research"
+    },
+    {
+      "automatic_enabled": false,
+      "automation_level": "local_mcp",
+      "availability": "unknown",
+      "best_for": "subscription research through the signed-in Mac app and curated local MCP tools",
+      "capabilities": [
+        "research.search",
+        "research.synthesis"
+      ],
+      "last_verified_at": null,
+      "latency": "medium",
+      "marginal_cost": 0.0,
+      "provider": "perplexity",
+      "quality": 0.92,
+      "quota_remaining": null,
+      "quota_reset_at": null,
+      "quota_status": "unknown",
+      "rate_limit_type": "app_and_connector_probe_required",
+      "status_source": "app_and_connector_probe_required",
+      "subscription_sunk_cost": true,
+      "surface": "Perplexity Mac app / local MCP",
+      "surface_id": "perplexity/mac-local-mcp"
+    },
+    {
+      "automatic_enabled": false,
+      "automation_level": "interactive",
+      "availability": "unknown",
+      "best_for": "cross-model synthesis, critique, and final decision framing",
+      "capabilities": [
+        "reasoning.synthesis",
+        "research.synthesis",
+        "reasoning.critique"
+      ],
+      "last_verified_at": null,
+      "latency": "medium",
+      "marginal_cost": 0.0,
+      "provider": "chatgpt",
+      "quality": 0.93,
+      "quota_remaining": null,
+      "quota_reset_at": null,
+      "quota_status": "unknown",
+      "rate_limit_type": "account_probe_required",
+      "status_source": "account_probe_required",
+      "subscription_sunk_cost": true,
+      "surface": "ChatGPT / Sol",
+      "surface_id": "chatgpt/sol"
+    },
+    {
+      "automatic_enabled": true,
+      "automation_level": "interactive",
+      "availability": "unknown",
+      "best_for": "repository and implementation work through the existing Bridge boundary",
+      "capabilities": [
+        "code.implement",
+        "reasoning.critique"
+      ],
+      "last_verified_at": null,
+      "latency": "medium",
+      "marginal_cost": 0.0,
+      "provider": "chatgpt",
+      "quality": 0.94,
+      "quota_remaining": null,
+      "quota_reset_at": null,
+      "quota_status": "unknown",
+      "rate_limit_type": "account_probe_required",
+      "status_source": "account_probe_required",
+      "subscription_sunk_cost": true,
+      "surface": "Codex",
+      "surface_id": "chatgpt/codex"
+    },
+    {
+      "automatic_enabled": true,
+      "automation_level": "local",
+      "availability": "unknown",
+      "best_for": "classification, cheap first-pass critique, and transformations",
+      "capabilities": [
+        "classification",
+        "reasoning.critique",
+        "research.synthesis"
+      ],
+      "last_verified_at": null,
+      "latency": "fast",
+      "marginal_cost": null,
+      "provider": "local",
+      "quality": 0.65,
+      "quota_remaining": null,
+      "quota_reset_at": null,
+      "quota_status": "unknown",
+      "rate_limit_type": "local_config_required",
+      "status_source": "local_probe_required",
+      "subscription_sunk_cost": false,
+      "surface": "TokenRouter / local",
+      "surface_id": "tokenrouter/local"
+    }
+  ],
+  "synced_at": "2026-08-23T07:30:19.581001+00:00"
+}

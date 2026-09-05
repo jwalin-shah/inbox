@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -72,6 +73,33 @@ def test_status_includes_linkedin_scanner_readiness(monkeypatch):
     assert linkedin["required_env"] == [{"name": "INBOX_ENABLE_LINKEDIN_SCRAPER", "present": True}]
     assert linkedin["sync_ready"] is False
     assert any("LinkedIn" in step for step in linkedin["remediation"])
+
+
+def test_status_registers_agent_runtimes_without_granting_writes(monkeypatch):
+    from connector_registry import connectors_status
+
+    monkeypatch.setattr(
+        "connector_registry.shutil.which",
+        lambda binary: "/usr/local/bin/hermes" if binary == "hermes" else None,
+    )
+
+    result = connectors_status()
+    openhuman = next(item for item in result["connectors"] if item["id"] == "openhuman")
+    hermes = next(item for item in result["connectors"] if item["id"] == "hermes")
+
+    assert openhuman["installed"] is Path("/Applications/OpenHuman.app").exists()
+    assert openhuman["auth_state"] in {"unknown", "not_installed"}
+    assert openhuman["supports_search"] is False
+    assert openhuman["write_policy"] == "read-only"
+    assert hermes["installed"] is True
+    assert hermes["auth_state"] == "unknown"
+    assert hermes["storage"][0]["path"].endswith("/.hermes")
+    assert hermes["accounts"][0]["read_scopes"] == [
+        "hermes.sessions.read",
+        "hermes.mcp.read",
+    ]
+    assert hermes["write_capable"] is False
+    assert hermes["action_policy"]["registry_executes_provider_writes"] is False
 
 
 def test_search_connectors_normalizes_json_results():
