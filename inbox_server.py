@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import compare_digest, token_urlsafe
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
@@ -32,6 +32,7 @@ import egress_audit
 import google_account_resolution as _gacct
 from capability_inventory import build_capability_inventory
 from capture_health import CaptureHealthRecord, CaptureHealthStore, capture_summary, utc_now_iso
+from event_store import CaptureEvent, EventStore, EventStoreConflict, EventStoreValidationError
 from connector_registry import (
     connector_sync_plan,
     connectors_status,
@@ -1322,6 +1323,36 @@ class CaptureHealthOut(CaptureStatusOut):
     reasons: list[str]
 
 
+class CaptureEventRequest(BaseModel):
+    source: str
+    event_type: str = "manual.capture"
+    source_object_id: str
+    observed_at: str
+    occurred_at: str
+    payload: Any
+    provenance: dict[str, Any]
+    event_id: str = ""
+
+
+class CapturedEventOut(BaseModel):
+    event_id: str
+    source: str
+    source_object_id: str
+    observed_at: str
+    occurred_at: str
+    event_type: str
+    payload: Any
+    provenance: dict[str, Any]
+    ingested_at: str
+    schema_version: str
+
+
+class CaptureEventOut(BaseModel):
+    result: Literal["created", "already_exists", "error"]
+    event: CapturedEventOut | None = None
+    error: str | None = None
+
+
 class ProviderStatusOut(BaseModel):
     provider: str
     category: str
@@ -1585,6 +1616,7 @@ class ServerState:
         self.approvals: ApprovalStore = ApprovalStore()
         self.index_store: MessageIndexStore = MessageIndexStore()
         self.capture_health_store: CaptureHealthStore = CaptureHealthStore()
+        self.event_store: EventStore = EventStore()
         self.source_adapters: SourceAdapters = SourceAdapters()
 
 
@@ -2916,6 +2948,44 @@ async def get_capture_health():
         healthy=not reasons,
         reasons=reasons,
     )
+
+
+@app.post("/events/capture")
+async def capture_event(req: CaptureEventRequest):
+    """Append one raw observation. Local evidence only. Not a grant."""
+    try:
+        event = CaptureEvent.create(
+            source=req.source,
+            source_object_id=req.source_object_id,
+            observed_at=req.observed_at,
+            occurred_at=req.occurred_at,
+            event_type=req.event_type,
+            payload=req.payload,
+            provenance=req.provenance,
+            event_id=req.event_id or None,
+        )
+        stored, result = await asyncio.to_thread(state.event_store.append, event)
+    except EventStoreConflict as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"result": "error", "error": str(exc), "event": None},
+        )
+    except EventStoreValidationError as exc:
+        code = (
+            status.HTTP_413_CONTENT_TOO_LARGE
+            if "oversized" in str(exc)
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        return JSONResponse(
+            status_code=code,
+            content={"result": "error", "error": str(exc), "event": None},
+        )
+    payload = CaptureEventOut(
+        result=result,
+        event=CapturedEventOut(**stored.to_dict()),
+    )
+    status_code = status.HTTP_201_CREATED if result == "created" else status.HTTP_200_OK
+    return JSONResponse(status_code=status_code, content=payload.model_dump())
 
 
 # ── Egress Audit ─────────────────────────────────────────────────────────────
