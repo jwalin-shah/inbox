@@ -72,16 +72,22 @@ def test_oversized_payload_is_rejected():
 
 def test_conflicting_same_id_payload_is_rejected(tmp_path):
     store = EventStore(tmp_path / "events.sqlite3")
-    first = _event(event_id="evt_fixed_conflict_0000000000000001")
-    store.append(first)
+    first, _ = store.append(_event())
     with pytest.raises(EventStoreConflict):
         store.append(
             _event(
-                event_id="evt_fixed_conflict_0000000000000001",
+                event_id=first.event_id,
                 payload={"text": "different observation"},
             )
         )
     assert store.count() == 1
+
+
+def test_supplied_event_id_digest_mismatch_is_rejected(tmp_path):
+    store = EventStore(tmp_path / "events.sqlite3")
+    with pytest.raises(EventStoreValidationError, match="event_id"):
+        store.append(_event(event_id="evt_deadbeefdeadbeefdeadbeefdeadbeef"))
+    assert store.count() == 0
 
 
 def test_interrupted_retry_does_not_duplicate(tmp_path):

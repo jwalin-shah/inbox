@@ -94,8 +94,8 @@ def test_exact_duplicate_retry_is_already_exists(client):
 
 def test_conflicting_same_id_payload_is_error(client):
     http, state = client
-    event_id = "evt_fixed_conflict_0000000000000001"
-    first = http.post("/events/capture", json=_valid_body(event_id=event_id))
+    first = http.post("/events/capture", json=_valid_body())
+    event_id = first.json()["event"]["event_id"]
     second = http.post(
         "/events/capture",
         json=_valid_body(event_id=event_id, payload={"text": "other payload"}),
@@ -104,6 +104,17 @@ def test_conflicting_same_id_payload_is_error(client):
     assert second.status_code == 409
     assert second.json()["result"] == "error"
     assert state.event_store.count() == 1
+
+
+def test_idempotency_key_payload_digest_mismatch_is_error(client):
+    http, state = client
+    response = http.post(
+        "/events/capture",
+        json=_valid_body(event_id="evt_deadbeefdeadbeefdeadbeefdeadbeef"),
+    )
+    assert response.status_code == 422
+    assert response.json()["result"] == "error"
+    assert state.event_store.count() == 0
 
 
 def test_oversized_payload_is_error(client):

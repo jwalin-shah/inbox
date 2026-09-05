@@ -231,6 +231,12 @@ class EventStore:
     def append(
         self, event: CaptureEvent
     ) -> tuple[CaptureEvent, Literal["created", "already_exists"]]:
+        computed_id = f"evt_{event.identity_digest[:32]}"
+        if event.event_id != computed_id:
+            existing = self.get(event.event_id)
+            if existing is not None and existing.identity_digest != event.identity_digest:
+                raise EventStoreConflict("event_id already belongs to a different event")
+            raise EventStoreValidationError("event_id does not match identity digest")
         values = {
             "event_id": event.event_id,
             "identity_digest": event.identity_digest,
