@@ -173,3 +173,78 @@ def test_capture_does_not_start_mcp_or_set_spawn_flag(client):
     http.post("/events/capture", json=_valid_body())
     assert os.getenv("INBOX_CONTROL_PLANE_SPAWN", "0") == "0"
     assert not (ROOT / "mcp_server.py").read_text().count("events/capture")
+
+
+def test_same_key_same_digest_replays_original_http_receipt(client):
+    http, state = client
+    body = _valid_body()
+    first = http.post("/events/capture", json=body)
+    second = http.post("/events/capture", json=body)
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.status_code != 403
+    assert first.json()["event"] == second.json()["event"]
+    assert first.json()["event"]["payload"] == body["payload"]
+    assert first.json()["event"]["provenance"] == body["provenance"]
+    assert state.event_store.count() == 1
+
+
+def test_same_key_different_digest_is_409_not_403_and_does_not_overwrite(client):
+    http, state = client
+    first = http.post("/events/capture", json=_valid_body())
+    original = first.json()["event"]
+    conflict = http.post(
+        "/events/capture",
+        json=_valid_body(
+            event_id=original["event_id"],
+            payload={"text": "other payload"},
+        ),
+    )
+    assert conflict.status_code == 409
+    assert conflict.status_code != 403
+    assert conflict.json()["result"] == "error"
+    assert conflict.json()["event"] is None
+    stored = state.event_store.get(original["event_id"])
+    assert stored is not None
+    assert stored.payload == original["payload"]
+    assert state.event_store.count() == 1
+
+
+def test_http_correction_creates_history_without_mutating_original(client):
+    http, state = client
+    first = http.post("/events/capture", json=_valid_body())
+    original_id = first.json()["event"]["event_id"]
+    correction = http.post(
+        "/events/capture",
+        json=_valid_body(payload={"text": "later correction"}),
+    )
+    assert first.status_code == 201
+    assert correction.status_code == 201
+    assert correction.json()["event"]["event_id"] != original_id
+    assert state.event_store.count() == 2
+    assert state.event_store.get(original_id).payload == first.json()["event"]["payload"]
+
+
+def test_capture_handler_has_no_approval_lookup_or_provider_call():
+    import ast
+
+    server = (ROOT / "inbox_server.py").read_text()
+    tree = ast.parse(server)
+    capture_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "capture_event"
+    )
+    called: set[str] = set()
+    for node in ast.walk(capture_fn):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                called.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                called.add(func.attr)
+    assert "mint_local_approval_lease" not in called
+    assert "_approval_decision_for_request" not in called
+    assert "gmail_compose_send" not in called
+    assert "sheets_values_update" not in called
+    assert "spawn" not in called

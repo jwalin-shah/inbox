@@ -115,7 +115,36 @@ def test_sqlite_rejects_update_and_delete(tmp_path):
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
-def test_event_store_module_does_not_call_bridge_or_spawn():
+def test_exact_retry_replays_original_receipt_and_payload(tmp_path):
+    store = EventStore(tmp_path / "events.sqlite3")
+    event = _event(payload={"z": 1, "text": "keep me", "a": True})
+    first, _ = store.append(event)
+    retry, result = store.append(event)
+    stored = store.get(first.event_id)
+    assert result == "already_exists"
+    assert store.count() == 1
+    assert stored is not None
+    assert stored.payload == {"z": 1, "text": "keep me", "a": True}
+    assert stored.provenance == {"source_ref": "manual:test/capture-1"}
+    assert stored.ingested_at == first.ingested_at
+    assert retry.ingested_at == first.ingested_at
+    assert retry.event_id == first.event_id == event.event_id
+
+
+def test_correction_appends_new_event_and_preserves_original(tmp_path):
+    store = EventStore(tmp_path / "events.sqlite3")
+    original, _ = store.append(_event())
+    with pytest.raises(EventStoreConflict):
+        store.append(_event(event_id=original.event_id, payload={"text": "corrected in place"}))
+    correction, result = store.append(_event(payload={"text": "corrected in place"}))
+    assert result == "created"
+    assert correction.event_id != original.event_id
+    assert store.count() == 2
+    assert store.get(original.event_id).payload == original.payload
+    assert store.get(correction.event_id).payload == {"text": "corrected in place"}
+
+
+def test_event_store_has_no_scheduler_or_authority_surface():
     source = (
         __import__("pathlib").Path(__file__).resolve().parents[1] / "event_store.py"
     ).read_text()
@@ -123,3 +152,7 @@ def test_event_store_module_does_not_call_bridge_or_spawn():
     assert "bridge" not in lowered
     assert "spawn" not in lowered
     assert "subprocess" not in lowered
+    assert "lease_expires" not in lowered
+    assert "in_flight" not in lowered
+    assert "fencing" not in lowered
+    assert "approval" not in lowered

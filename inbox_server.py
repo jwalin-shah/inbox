@@ -2952,7 +2952,13 @@ async def get_capture_health():
 
 @app.post("/events/capture")
 async def capture_event(req: CaptureEventRequest):
-    """Append one raw observation. Local evidence only. Not a grant."""
+    """Append one raw observation. Local evidence only. Not a grant.
+
+    201 created. 200 already_exists (same id and digest; original receipt).
+    409 when the same id is reused with a different digest.
+    422 malformed, untrusted locator, or unused id that is not the digest identity.
+    413 oversized payload.
+    """
     try:
         event = CaptureEvent.create(
             source=req.source,
