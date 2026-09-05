@@ -155,6 +155,40 @@ Maps to: `api-design-oracle.md`.
 
 **Oracle reference:** `api-design-oracle.md` — Session Lifecycle (init → use → cleanup is explicit).
 
+### 3.4 Control-plane authority boundary (P0)
+
+```
+∀call ∈ {submit_work, cancel_work, run_shortcut, verify_work}:
+  executed(call) = 0
+  ∧ spawn_default = 0
+  ∧ ¬∃credential ∈ call.args: model_supplied_authority(credential)
+  ∧ result(call) ∈ {accepted_for_intake, DENIED}
+  ∧ authority(call) = lookup(ApprovalStore)  // server-side only
+```
+
+`confirm = true` is intent, not a lease, capability, or approval.
+
+```
+∀call: confirm(call) = true ↛ authority(call)
+```
+
+Capture reuses EventStore identity; it is not a grant.
+
+```
+capture_mcp(obs) = EventStore.append(obs)
+∧ capture_mcp(obs) ↛ approval_lease
+```
+
+Auth fails closed:
+
+```
+INBOX_CONTROL_PLANE_TOKEN = "" → ¬authorized(/mcp)
+```
+
+**Enforcement:** `mcp_control_plane.py` on `127.0.0.1:8002`. Seven frozen tools. No Bridge spawn, no model-supplied tokens, no epistemic MCP tool.
+
+**Oracle reference:** `saltzer-schroeder-oracle.md` Principle 2 (Fail-Safe Defaults) and Principle 3 (Complete Mediation).
+
 ---
 
 ## 4. Data Integrity

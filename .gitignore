@@ -42,7 +42,6 @@ htmlcov/
 .inbox_egress_audit.sqlite3*
 .inbox_approvals.sqlite3*
 .inbox_event_log.sqlite3*
-.inbox_event_log.sqlite3*
 .inbox_runtime/
 .factory/runtime/
 .factory/outputs/
