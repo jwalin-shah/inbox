@@ -1,11 +1,12 @@
-"""Ingest-only Inbox MCP control plane (PR-1).
+"""Ingest-only Inbox MCP control plane (PR-1 + PR-2B Bridge intake).
 
 Bind: 127.0.0.1:8002
 Frozen tools: resolve, capture, submit_work, get_work, cancel_work,
 verify_work, run_shortcut.
 
-This surface can accept and capture work. It cannot mint authority or execute
-workers, providers, or Shortcuts. confirm=true is intent, not a lease.
+This surface can accept and capture work and forward submit_work to Bridge
+`ingest`. It cannot mint authority or execute workers, providers, or
+Shortcuts. confirm=true is intent, not a lease. Bridge intake ≠ spawn.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from secrets import compare_digest
 from typing import Any
@@ -23,6 +25,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from approval_store import ApprovalStore
+from bridge_work_client import (
+    BridgeIngestError,
+    BridgeWorkClient,
+    BridgeWorkClientProtocol,
+    build_submit_work_envelope,
+)
 from event_store import CaptureEvent, EventStore, EventStoreConflict, EventStoreValidationError
 
 CONTROL_PLANE_HOST = "127.0.0.1"
@@ -227,10 +235,14 @@ class ControlPlane:
         event_store: EventStore,
         approval_store: ApprovalStore,
         shortcut_registry: dict[str, Any] | None = None,
+        bridge_client: BridgeWorkClientProtocol | None = None,
     ) -> None:
         self.event_store = event_store
         self.approval_store = approval_store
         self.shortcut_registry = shortcut_registry or load_shortcut_registry()
+        # Default: real Bridge ingest client (fail-closed when env unset).
+        # Tests inject a stub; never a spawn/orchestrator client.
+        self.bridge_client: BridgeWorkClientProtocol = bridge_client or BridgeWorkClient.from_env()
         self.work: dict[str, dict[str, Any]] = {}
         self.execution_log: list[dict[str, Any]] = []
 
@@ -256,8 +268,10 @@ class ControlPlane:
         operation: str,
         body: dict[str, Any],
         resource_ref: str,
+        work_id: str | None = None,
+        bridge: dict[str, Any] | None = None,
     ) -> str:
-        work_id = _now_work_id()
+        work_id = work_id or _now_work_id()
         created = self.approval_store.create_request(
             method="MCP",
             path=f"/control-plane/{operation}",
@@ -281,13 +295,20 @@ class ControlPlane:
             "server_authority": self._lookup_unused_approval(operation),
             "body": body,
         }
+        if bridge:
+            record["bridge"] = bridge
         self.work[work_id] = record
         self.approval_store.log_event(
             "control_plane_intake",
             request_id=created["request_id"],
             operation=operation,
             result="accepted_for_intake",
-            detail={"work_id": work_id, "executed": False, "spawn_flag": spawn_flag()},
+            detail={
+                "work_id": work_id,
+                "executed": False,
+                "spawn_flag": spawn_flag(),
+                "bridge": bridge,
+            },
         )
         return work_id
 
@@ -403,7 +424,39 @@ class ControlPlane:
         invalid = self._validate_evidence_refs(evidence_refs)
         if invalid:
             return _denied(invalid)
-        work_id = self._record_intake(
+
+        # Allocate id before Bridge so the EventEnvelope external_id is stable.
+        # Bridge reject → no local work record and no executor invocation.
+        work_id = _now_work_id()
+        envelope = build_submit_work_envelope(
+            work_id=work_id,
+            summary=summary,
+            evidence_refs=list(evidence_refs or []),
+            occurred_at=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        )
+        try:
+            receipt = self.bridge_client.ingest_event(envelope)
+        except BridgeIngestError as exc:
+            self.approval_store.log_event(
+                "control_plane_denied",
+                operation="submit_work",
+                result="DENIED",
+                detail={
+                    "reason": str(exc) or "bridge_rejected",
+                    "confirm": confirm,
+                    "executed": False,
+                },
+            )
+            return _denied(str(exc) or "bridge_rejected", confirm_is_authority=False)
+
+        bridge_meta = {
+            "result_id": receipt.result_id,
+            "work_packet_id": receipt.work_packet_id,
+            "intake_path": receipt.intake_path,
+            "status": receipt.status,
+            "summary": receipt.summary,
+        }
+        self._record_intake(
             operation="submit_work",
             body={
                 "evidence_refs": evidence_refs,
@@ -411,11 +464,16 @@ class ControlPlane:
                 "summary": summary,
             },
             resource_ref="submit_work",
+            work_id=work_id,
+            bridge=bridge_meta,
         )
         return _intake(
             work_id,
             confirm_is_authority=False,
             server_authority_present=bool(self.work[work_id]["server_authority"]),
+            bridge_intake_path=receipt.intake_path,
+            bridge_result_id=receipt.result_id,
+            bridge_work_packet_id=receipt.work_packet_id,
         )
 
     def get_work(self, work_id: str = "") -> dict[str, Any]:
@@ -585,11 +643,13 @@ def make_control_plane(
     event_db: Path | None = None,
     approval_db: Path | None = None,
     shortcut_registry: dict[str, Any] | None = None,
+    bridge_client: BridgeWorkClientProtocol | None = None,
 ) -> ControlPlane:
     return ControlPlane(
         event_store=EventStore(event_db),
         approval_store=ApprovalStore(approval_db),
         shortcut_registry=shortcut_registry,
+        bridge_client=bridge_client,
     )
 
 

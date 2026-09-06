@@ -42,6 +42,8 @@ Run the private inbox backend and the MCP layers separately:
    - Fail-closed `INBOX_CONTROL_PLANE_TOKEN` (unlike `mcp_gateway.py`, an
      empty token is unauthorized)
    - `INBOX_CONTROL_PLANE_SPAWN` defaults to `0`; `confirm=true` is not authority
+   - `submit_work` forwards to Bridge `ingest` via `bridge_work_client.py`
+     (argv allowlist, `shell=False`); stores intake path/ids only — not spawn
    - Does not wrap the REST `tools_registry.py` surface and does not mint leases
 
 ## Which Path To Use
