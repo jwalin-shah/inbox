@@ -1,11 +1,12 @@
-"""Ingest-only Inbox MCP control plane (PR-1).
+"""Ingest-only Inbox MCP control plane (PR-1 + PR-2B Bridge intake).
 
 Bind: 127.0.0.1:8002
 Frozen tools: resolve, capture, submit_work, get_work, cancel_work,
 verify_work, run_shortcut.
 
-This surface can accept and capture work. It cannot mint authority or execute
-workers, providers, or Shortcuts. confirm=true is intent, not a lease.
+This surface can accept and capture work and forward submit_work to Bridge
+`ingest`. It cannot mint authority or execute workers, providers, or
+Shortcuts. confirm=true is intent, not a lease. Bridge intake ≠ spawn.
 """
 
 from __future__ import annotations
@@ -13,24 +14,30 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from secrets import compare_digest
 from typing import Any
 
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
 
 from approval_store import ApprovalStore
+from bridge_work_client import (
+    BridgeIngestError,
+    BridgeWorkClient,
+    BridgeWorkClientProtocol,
+    build_submit_work_envelope,
+)
 from event_store import CaptureEvent, EventStore, EventStoreConflict, EventStoreValidationError
 
 CONTROL_PLANE_HOST = "127.0.0.1"
 CONTROL_PLANE_PORT = 8002
 CONTROL_PLANE_TOKEN_ENV = "INBOX_CONTROL_PLANE_TOKEN"
 SPAWN_ENV = "INBOX_CONTROL_PLANE_SPAWN"
+TRUST_LOOPBACK_ENV = "INBOX_CONTROL_PLANE_TRUST_LOOPBACK"
 CONTROL_PLANE_TOOL_NAMES = (
     "resolve",
     "capture",
@@ -90,6 +97,16 @@ def spawn_flag() -> int:
     return 1 if raw in {"1", "true", "TRUE", "yes"} else 0
 
 
+def trust_loopback() -> bool:
+    """ChatGPT Secure MCP Tunnel cannot paste our Bearer into Apps.
+
+    OpenAI authenticates the tunnel. Requests then arrive on 127.0.0.1.
+    Direct TestClient/curl still need the Bearer unless this flag is on.
+    """
+    raw = os.getenv(TRUST_LOOPBACK_ENV, "0").strip() or "0"
+    return raw in {"1", "true", "TRUE", "yes"}
+
+
 def _now_work_id() -> str:
     return f"wrk_{uuid.uuid4().hex}"
 
@@ -139,12 +156,51 @@ def load_shortcut_registry(path: Path | None = None) -> dict[str, Any]:
     return {"entries": entries, "unknown_id": "DENIED"}
 
 
+def server_discovery_response(request_id: Any) -> dict[str, Any]:
+    """Sessionless card for ChatGPT Secure MCP Tunnel `server/discover`.
+
+    FastMCP still serves initialize/tools/list. The tunnel validator probes
+    discover first and does not send our bearer (connector headers override
+    tunnel extra_headers). Discover advertises identity only; it cannot execute.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {
+            "resultType": "complete",
+            "supportedVersions": ["2025-06-18"],
+            "capabilities": {"tools": {}},
+            "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                    "name": "Inbox Control Plane",
+                    "version": "1.27.0",
+                }
+            },
+            "instructions": (
+                "Ingest-only control plane. Propose work with submit_work. "
+                "confirm=true is not authority. This surface does not spawn "
+                "workers, send mail, or run Shortcuts."
+            ),
+            "ttlMs": 300000,
+            "cacheScope": "private",
+        },
+    }
+
+
 class FailClosedAuthMiddleware(BaseHTTPMiddleware):
     """Bearer auth that denies when the control-plane token is unset."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/health":
+        path = request.url.path
+        if path == "/health" or path.startswith("/.well-known/"):
             return await call_next(request)
+        if request.method == "POST" and path.rstrip("/") == "/mcp":
+            try:
+                payload = json.loads((await request.body()).decode("utf-8") or "null")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("method") == "server/discover":
+                return JSONResponse(server_discovery_response(payload.get("id")))
         token = os.getenv(CONTROL_PLANE_TOKEN_ENV, "").strip()
         if not token:
             return JSONResponse(
@@ -152,6 +208,9 @@ class FailClosedAuthMiddleware(BaseHTTPMiddleware):
                 status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        client_host = request.client.host if request.client else ""
+        if trust_loopback() and client_host in {"127.0.0.1", "::1"}:
+            return await call_next(request)
         auth_header = request.headers.get("authorization", "")
         provided = ""
         if auth_header.lower().startswith("bearer "):
@@ -176,10 +235,14 @@ class ControlPlane:
         event_store: EventStore,
         approval_store: ApprovalStore,
         shortcut_registry: dict[str, Any] | None = None,
+        bridge_client: BridgeWorkClientProtocol | None = None,
     ) -> None:
         self.event_store = event_store
         self.approval_store = approval_store
         self.shortcut_registry = shortcut_registry or load_shortcut_registry()
+        # Default: real Bridge ingest client (fail-closed when env unset).
+        # Tests inject a stub; never a spawn/orchestrator client.
+        self.bridge_client: BridgeWorkClientProtocol = bridge_client or BridgeWorkClient.from_env()
         self.work: dict[str, dict[str, Any]] = {}
         self.execution_log: list[dict[str, Any]] = []
 
@@ -205,8 +268,10 @@ class ControlPlane:
         operation: str,
         body: dict[str, Any],
         resource_ref: str,
+        work_id: str | None = None,
+        bridge: dict[str, Any] | None = None,
     ) -> str:
-        work_id = _now_work_id()
+        work_id = work_id or _now_work_id()
         created = self.approval_store.create_request(
             method="MCP",
             path=f"/control-plane/{operation}",
@@ -230,13 +295,20 @@ class ControlPlane:
             "server_authority": self._lookup_unused_approval(operation),
             "body": body,
         }
+        if bridge:
+            record["bridge"] = bridge
         self.work[work_id] = record
         self.approval_store.log_event(
             "control_plane_intake",
             request_id=created["request_id"],
             operation=operation,
             result="accepted_for_intake",
-            detail={"work_id": work_id, "executed": False, "spawn_flag": spawn_flag()},
+            detail={
+                "work_id": work_id,
+                "executed": False,
+                "spawn_flag": spawn_flag(),
+                "bridge": bridge,
+            },
         )
         return work_id
 
@@ -352,7 +424,39 @@ class ControlPlane:
         invalid = self._validate_evidence_refs(evidence_refs)
         if invalid:
             return _denied(invalid)
-        work_id = self._record_intake(
+
+        # Allocate id before Bridge so the EventEnvelope external_id is stable.
+        # Bridge reject → no local work record and no executor invocation.
+        work_id = _now_work_id()
+        envelope = build_submit_work_envelope(
+            work_id=work_id,
+            summary=summary,
+            evidence_refs=list(evidence_refs or []),
+            occurred_at=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        )
+        try:
+            receipt = self.bridge_client.ingest_event(envelope)
+        except BridgeIngestError as exc:
+            self.approval_store.log_event(
+                "control_plane_denied",
+                operation="submit_work",
+                result="DENIED",
+                detail={
+                    "reason": str(exc) or "bridge_rejected",
+                    "confirm": confirm,
+                    "executed": False,
+                },
+            )
+            return _denied(str(exc) or "bridge_rejected", confirm_is_authority=False)
+
+        bridge_meta = {
+            "result_id": receipt.result_id,
+            "work_packet_id": receipt.work_packet_id,
+            "intake_path": receipt.intake_path,
+            "status": receipt.status,
+            "summary": receipt.summary,
+        }
+        self._record_intake(
             operation="submit_work",
             body={
                 "evidence_refs": evidence_refs,
@@ -360,11 +464,16 @@ class ControlPlane:
                 "summary": summary,
             },
             resource_ref="submit_work",
+            work_id=work_id,
+            bridge=bridge_meta,
         )
         return _intake(
             work_id,
             confirm_is_authority=False,
             server_authority_present=bool(self.work[work_id]["server_authority"]),
+            bridge_intake_path=receipt.intake_path,
+            bridge_result_id=receipt.result_id,
+            bridge_work_packet_id=receipt.work_packet_id,
         )
 
     def get_work(self, work_id: str = "") -> dict[str, Any]:
@@ -460,6 +569,9 @@ def build_control_plane_mcp(plane: ControlPlane):
         "Inbox Control Plane",
         stateless_http=True,
         json_response=True,
+        host=CONTROL_PLANE_HOST,
+        port=CONTROL_PLANE_PORT,
+        streamable_http_path="/mcp",
     )
 
     @mcp.tool()
@@ -531,11 +643,13 @@ def make_control_plane(
     event_db: Path | None = None,
     approval_db: Path | None = None,
     shortcut_registry: dict[str, Any] | None = None,
+    bridge_client: BridgeWorkClientProtocol | None = None,
 ) -> ControlPlane:
     return ControlPlane(
         event_store=EventStore(event_db),
         approval_store=ApprovalStore(approval_db),
         shortcut_registry=shortcut_registry,
+        bridge_client=bridge_client,
     )
 
 
@@ -552,17 +666,21 @@ def make_control_plane_app(plane: ControlPlane | None = None) -> Starlette:
                 "spawn_flag": spawn_flag(),
                 "execution_enabled": False,
                 "auth_fail_closed": True,
+                "trust_loopback": trust_loopback(),
                 "tools": list(CONTROL_PLANE_TOOL_NAMES),
             }
         )
 
-    return Starlette(
-        routes=[
-            Route("/health", endpoint=health),
-            Mount("/mcp", app=mcp.streamable_http_app()),
-        ],
-        middleware=[Middleware(FailClosedAuthMiddleware)],
-    )
+    # Native FastMCP Streamable HTTP app owns session_manager.run() lifespan.
+    # Do not nest that app under a /mcp prefix — that double-prefixes the path
+    # and drops the session-manager lifespan.
+    mcp.custom_route("/health", methods=["GET"])(health)
+    # Do not serve RFC 9728 here. LifeOps 404s these paths and ChatGPT
+    # Auth=None create succeeds. A 200 PRMD with bearer_methods_supported
+    # makes Create Connector fail even when discover returns 200.
+    app = mcp.streamable_http_app()
+    app.add_middleware(FailClosedAuthMiddleware)
+    return app
 
 
 def main() -> None:
