@@ -4019,8 +4019,12 @@ def task_create(
     list_id: str = "@default",
     due: str = "",
     notes: str = "",
-) -> bool:
-    """Create a Google Task."""
+) -> dict[str, Any]:
+    """Create a Google Task and return exact provider identity.
+
+    Returns ``{"ok": bool, "task_id": str, "list_id": str}``. ``list_id`` is the
+    concrete Google Tasks list id (``@default`` is resolved when possible).
+    """
     _assert_live_write_allowed("create Google Task")
     try:
         body = {"title": title}
@@ -4028,11 +4032,23 @@ def task_create(
             body["notes"] = notes
         if due:
             body["due"] = due
-        service.tasks().insert(tasklist=list_id, body=body).execute()
-        return True
+        created = service.tasks().insert(tasklist=list_id, body=body).execute() or {}
+        task_id = str(created.get("id") or "")
+        resolved_list_id = str(list_id or "@default")
+        if resolved_list_id == "@default":
+            try:
+                list_meta = service.tasklists().get(tasklist="@default").execute() or {}
+                resolved_list_id = str(list_meta.get("id") or resolved_list_id)
+            except Exception:
+                self_link = str(created.get("selfLink") or "")
+                # .../lists/{listId}/tasks/{taskId}
+                marker = "/lists/"
+                if marker in self_link:
+                    resolved_list_id = self_link.split(marker, 1)[1].split("/", 1)[0]
+        return {"ok": bool(task_id), "task_id": task_id, "list_id": resolved_list_id}
     except Exception:
         _log_service_failure("task_create", title=title, list_id=list_id)
-        return False
+        return {"ok": False, "task_id": "", "list_id": str(list_id or "@default")}
 
 
 def task_complete(service, task_id: str, list_id: str = "@default") -> bool:
