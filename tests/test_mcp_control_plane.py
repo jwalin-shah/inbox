@@ -21,10 +21,12 @@ from mcp_control_plane import (
     CONTROL_PLANE_TOKEN_ENV,
     CONTROL_PLANE_TOOL_NAMES,
     SPAWN_ENV,
+    TRUST_LOOPBACK_ENV,
     ControlPlane,
     build_control_plane_mcp,
     make_control_plane_app,
     spawn_flag,
+    trust_loopback,
 )
 from tools_registry import TOOLS, include_names
 
@@ -112,6 +114,62 @@ def test_auth_rejects_missing_and_invalid_token(plane, monkeypatch):
     assert invalid.status_code == 401
     assert valid.status_code != 401
     assert health.status_code == 200
+
+
+def test_trust_loopback_defaults_off(monkeypatch):
+    monkeypatch.delenv(TRUST_LOOPBACK_ENV, raising=False)
+    assert trust_loopback() is False
+    monkeypatch.setenv(TRUST_LOOPBACK_ENV, "1")
+    assert trust_loopback() is True
+
+
+def test_oauth_protected_resource_is_absent_like_lifeops(plane, monkeypatch):
+    """ChatGPT Auth=None create matches LifeOps: no RFC 9728 card."""
+    monkeypatch.setenv(CONTROL_PLANE_TOKEN_ENV, "control-secret")
+    app = make_control_plane_app(plane)
+    with TestClient(app) as client:
+        root = client.get("/.well-known/oauth-protected-resource")
+        nested = client.get("/.well-known/oauth-protected-resource/mcp")
+    assert root.status_code == 404
+    assert nested.status_code == 404
+
+
+def test_server_discover_does_not_require_token(plane, monkeypatch):
+    """ChatGPT Secure MCP Tunnel refresh probes server/discover without our bearer."""
+    monkeypatch.setenv(CONTROL_PLANE_TOKEN_ENV, "control-secret")
+    app = make_control_plane_app(plane)
+    with TestClient(app) as client:
+        response = client.post(
+            "/mcp",
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": "openai-mcp-discover",
+                "method": "server/discover",
+                "params": {},
+            },
+        )
+        initialize = client.post(
+            "/mcp",
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "openai-mcp-discover"
+    assert payload["result"]["resultType"] == "complete"
+    assert payload["result"]["supportedVersions"] == ["2025-06-18"]
+    assert (
+        payload["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"]
+        == "Inbox Control Plane"
+    )
+    assert initialize.status_code == 401
 
 
 def test_capture_reuses_pr0_event_store_identity(plane):

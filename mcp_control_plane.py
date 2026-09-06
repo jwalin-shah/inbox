@@ -29,6 +29,7 @@ CONTROL_PLANE_HOST = "127.0.0.1"
 CONTROL_PLANE_PORT = 8002
 CONTROL_PLANE_TOKEN_ENV = "INBOX_CONTROL_PLANE_TOKEN"
 SPAWN_ENV = "INBOX_CONTROL_PLANE_SPAWN"
+TRUST_LOOPBACK_ENV = "INBOX_CONTROL_PLANE_TRUST_LOOPBACK"
 CONTROL_PLANE_TOOL_NAMES = (
     "resolve",
     "capture",
@@ -88,6 +89,16 @@ def spawn_flag() -> int:
     return 1 if raw in {"1", "true", "TRUE", "yes"} else 0
 
 
+def trust_loopback() -> bool:
+    """ChatGPT Secure MCP Tunnel cannot paste our Bearer into Apps.
+
+    OpenAI authenticates the tunnel. Requests then arrive on 127.0.0.1.
+    Direct TestClient/curl still need the Bearer unless this flag is on.
+    """
+    raw = os.getenv(TRUST_LOOPBACK_ENV, "0").strip() or "0"
+    return raw in {"1", "true", "TRUE", "yes"}
+
+
 def _now_work_id() -> str:
     return f"wrk_{uuid.uuid4().hex}"
 
@@ -137,12 +148,51 @@ def load_shortcut_registry(path: Path | None = None) -> dict[str, Any]:
     return {"entries": entries, "unknown_id": "DENIED"}
 
 
+def server_discovery_response(request_id: Any) -> dict[str, Any]:
+    """Sessionless card for ChatGPT Secure MCP Tunnel `server/discover`.
+
+    FastMCP still serves initialize/tools/list. The tunnel validator probes
+    discover first and does not send our bearer (connector headers override
+    tunnel extra_headers). Discover advertises identity only; it cannot execute.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {
+            "resultType": "complete",
+            "supportedVersions": ["2025-06-18"],
+            "capabilities": {"tools": {}},
+            "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                    "name": "Inbox Control Plane",
+                    "version": "1.27.0",
+                }
+            },
+            "instructions": (
+                "Ingest-only control plane. Propose work with submit_work. "
+                "confirm=true is not authority. This surface does not spawn "
+                "workers, send mail, or run Shortcuts."
+            ),
+            "ttlMs": 300000,
+            "cacheScope": "private",
+        },
+    }
+
+
 class FailClosedAuthMiddleware(BaseHTTPMiddleware):
     """Bearer auth that denies when the control-plane token is unset."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/health":
+        path = request.url.path
+        if path == "/health" or path.startswith("/.well-known/"):
             return await call_next(request)
+        if request.method == "POST" and path.rstrip("/") == "/mcp":
+            try:
+                payload = json.loads((await request.body()).decode("utf-8") or "null")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("method") == "server/discover":
+                return JSONResponse(server_discovery_response(payload.get("id")))
         token = os.getenv(CONTROL_PLANE_TOKEN_ENV, "").strip()
         if not token:
             return JSONResponse(
@@ -150,6 +200,9 @@ class FailClosedAuthMiddleware(BaseHTTPMiddleware):
                 status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        client_host = request.client.host if request.client else ""
+        if trust_loopback() and client_host in {"127.0.0.1", "::1"}:
+            return await call_next(request)
         auth_header = request.headers.get("authorization", "")
         provided = ""
         if auth_header.lower().startswith("bearer "):
@@ -553,6 +606,7 @@ def make_control_plane_app(plane: ControlPlane | None = None) -> Starlette:
                 "spawn_flag": spawn_flag(),
                 "execution_enabled": False,
                 "auth_fail_closed": True,
+                "trust_loopback": trust_loopback(),
                 "tools": list(CONTROL_PLANE_TOOL_NAMES),
             }
         )
@@ -561,6 +615,9 @@ def make_control_plane_app(plane: ControlPlane | None = None) -> Starlette:
     # Do not nest that app under a /mcp prefix — that double-prefixes the path
     # and drops the session-manager lifespan.
     mcp.custom_route("/health", methods=["GET"])(health)
+    # Do not serve RFC 9728 here. LifeOps 404s these paths and ChatGPT
+    # Auth=None create succeeds. A 200 PRMD with bearer_methods_supported
+    # makes Create Connector fail even when discover returns 200.
     app = mcp.streamable_http_app()
     app.add_middleware(FailClosedAuthMiddleware)
     return app
