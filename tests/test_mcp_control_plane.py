@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 from pathlib import Path
 
+import httpx
 import pytest
+import uvicorn
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from starlette.testclient import TestClient
 
 from approval_store import ApprovalStore
@@ -283,3 +288,109 @@ def test_control_plane_source_cannot_import_spawn_or_bridge():
     assert "epistemic" not in source.lower()
     assert "PublicAuthMiddleware" not in source
     assert "_is_publicly_authorized" not in source
+    assert 'Mount("/mcp"' not in source
+    assert "streamable_http_app()" in source
+
+
+def _tool_payload(result) -> dict:
+    if getattr(result, "structuredContent", None) is not None:
+        payload = result.structuredContent
+        if (
+            isinstance(payload, dict)
+            and set(payload) == {"result"}
+            and isinstance(payload["result"], dict)
+        ):
+            payload = payload["result"]
+        if isinstance(payload, dict):
+            return payload
+    texts = []
+    for block in getattr(result, "content", []) or []:
+        text = getattr(block, "text", None)
+        if text:
+            texts.append(text)
+    if len(texts) == 1:
+        try:
+            parsed = json.loads(texts[0])
+        except json.JSONDecodeError:
+            return {"text": texts[0]}
+        if isinstance(parsed, dict):
+            return parsed
+    return {"isError": getattr(result, "isError", None), "content": texts}
+
+
+async def _serve_control_plane(app):
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(200):
+            if server.started:
+                break
+            await asyncio.sleep(0.025)
+        else:
+            raise RuntimeError("control plane uvicorn did not start")
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        await task
+
+
+def test_real_mcp_client_initialize_lists_tools_and_resolve(plane, monkeypatch):
+    """Official Streamable HTTP client against the production ASGI topology."""
+    monkeypatch.setenv(CONTROL_PLANE_TOKEN_ENV, "control-secret")
+    monkeypatch.setenv(SPAWN_ENV, "0")
+    app = make_control_plane_app(plane)
+    token = "control-secret"
+
+    async def scenario():
+        agen = _serve_control_plane(app)
+        base = await anext(agen)
+        try:
+            url = f"{base}/mcp"
+            headers = {"Authorization": f"Bearer {token}"}
+            async with (
+                httpx.AsyncClient(
+                    headers=headers,
+                    timeout=httpx.Timeout(30.0, read=60.0),
+                    follow_redirects=False,
+                ) as http,
+                streamable_http_client(url, http_client=http) as streams,
+            ):
+                read, write = streams[0], streams[1]
+                async with ClientSession(read, write) as session:
+                    init = await session.initialize()
+                    listed = await session.list_tools()
+                    resolved = await session.call_tool("resolve", {"worlds": ["control_plane"]})
+                    return init, listed, resolved
+        finally:
+            await agen.aclose()
+
+    init, listed, resolved = asyncio.run(scenario())
+    names = tuple(tool.name for tool in listed.tools)
+    payload = _tool_payload(resolved)
+    assert init.serverInfo is not None
+    assert init.serverInfo.name == "Inbox Control Plane"
+    assert names == CONTROL_PLANE_TOOL_NAMES
+    assert resolved.isError is False
+    assert payload["result"] == "ok"
+    assert payload["executed"] is False
+    assert payload["spawn_flag"] == 0
+    assert payload["missing_filled_from_memory"] is False
+
+
+def test_mcp_post_does_not_307_and_does_not_500_without_session_manager(plane, monkeypatch):
+    monkeypatch.setenv(CONTROL_PLANE_TOKEN_ENV, "control-secret")
+    app = make_control_plane_app(plane)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/mcp",
+            headers={
+                "Authorization": "Bearer control-secret",
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        )
+    assert response.status_code not in {307, 404, 500}
+    assert response.status_code != 401

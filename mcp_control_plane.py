@@ -18,11 +18,9 @@ from secrets import compare_digest
 from typing import Any
 
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
 
 from approval_store import ApprovalStore
 from event_store import CaptureEvent, EventStore, EventStoreConflict, EventStoreValidationError
@@ -460,6 +458,9 @@ def build_control_plane_mcp(plane: ControlPlane):
         "Inbox Control Plane",
         stateless_http=True,
         json_response=True,
+        host=CONTROL_PLANE_HOST,
+        port=CONTROL_PLANE_PORT,
+        streamable_http_path="/mcp",
     )
 
     @mcp.tool()
@@ -556,13 +557,13 @@ def make_control_plane_app(plane: ControlPlane | None = None) -> Starlette:
             }
         )
 
-    return Starlette(
-        routes=[
-            Route("/health", endpoint=health),
-            Mount("/mcp", app=mcp.streamable_http_app()),
-        ],
-        middleware=[Middleware(FailClosedAuthMiddleware)],
-    )
+    # Native FastMCP Streamable HTTP app owns session_manager.run() lifespan.
+    # Do not nest that app under a /mcp prefix — that double-prefixes the path
+    # and drops the session-manager lifespan.
+    mcp.custom_route("/health", methods=["GET"])(health)
+    app = mcp.streamable_http_app()
+    app.add_middleware(FailClosedAuthMiddleware)
+    return app
 
 
 def main() -> None:

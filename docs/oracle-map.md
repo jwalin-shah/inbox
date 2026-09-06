@@ -13,7 +13,7 @@ Each inbox subsystem maps to orbit oracles from `~/projects/orbit/docs/research/
 | Connectors (`connectors/`) | `saltzer-schroeder-oracle.md` | `envoy.md` | Fail-safe defaults, economy of mechanism, least privilege; circuit breaker, retry budget |
 | Connector registry (`connector_registry.py`) | `saltzer-schroeder-oracle.md` | `sicp-oracle.md` | Complete mediation, fail-safe defaults; data abstraction, narrow interfaces |
 | MCP gateway (`mcp_gateway.py`) | `api-design-oracle.md` | `ousterhout-oracle.md` | Protocol conformance, session lifecycle, input validation; deep modules |
-| MCP control plane (`mcp_control_plane.py`) | `saltzer-schroeder-oracle.md` | `api-design-oracle.md` | Fail-closed auth, complete mediation via ApprovalStore lookup, ingest-only spawn=0; frozen seven-tool surface |
+| MCP control plane (`mcp_control_plane.py`) | `saltzer-schroeder-oracle.md` | `api-design-oracle.md` | Fail-closed auth, complete mediation via ApprovalStore lookup, ingest-only spawn=0; frozen seven-tool surface; FastMCP Streamable HTTP lifespan/session init |
 | MCP backend (`mcp_backend.py`) | `api-design-oracle.md` | `fowler-oracle.md` | HTTP client patterns, error mapping; adapter pattern |
 | Message sync (`message_sync.py`) | `data-quality-oracle.md` | `lamport-tla-oracle.md` | Record identity, idempotent sync, deduplication; state machine, safety |
 | Message index store (`message_index_store.py`) | `data-quality-oracle.md` | `ostep-oracle.md` | Index consistency, checkpoint integrity; persistence |
