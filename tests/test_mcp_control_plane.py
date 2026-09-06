@@ -1,10 +1,11 @@
-"""PR-1 ingest-only MCP control plane. No Bridge, no spawn, no epistemic tool."""
+"""PR-2B MCP control plane: Bridge ingest only. No spawn, no epistemic tool."""
 
 from __future__ import annotations
 
 import ast
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import httpx
@@ -15,6 +16,15 @@ from mcp.client.streamable_http import streamable_http_client
 from starlette.testclient import TestClient
 
 from approval_store import ApprovalStore
+from bridge_work_client import (
+    BRIDGE_BIN_ENV,
+    BRIDGE_REPO_ENV,
+    BridgeIngestError,
+    BridgeIngestReceipt,
+    BridgeWorkClient,
+    build_ingest_argv,
+    build_submit_work_envelope,
+)
 from event_store import CaptureEvent, EventStore, identity_digest_for
 from mcp_control_plane import (
     CONTROL_PLANE_PORT,
@@ -33,6 +43,29 @@ from tools_registry import TOOLS, include_names
 pytestmark = pytest.mark.safe
 
 ROOT = Path(__file__).resolve().parents[1]
+BRIDGE_BIN = shutil.which("bridge")
+
+
+class StubBridgeClient:
+    """Test double: records envelopes; never executes workers."""
+
+    def __init__(self, *, fail_with: str | None = None) -> None:
+        self.calls: list[dict] = []
+        self.fail_with = fail_with
+        self.executor_invocations = 0
+
+    def ingest_event(self, envelope: dict) -> BridgeIngestReceipt:
+        self.calls.append(envelope)
+        if self.fail_with:
+            raise BridgeIngestError(self.fail_with)
+        work_id = envelope.get("external_id") or "wrk_stub"
+        return BridgeIngestReceipt(
+            result_id=f"result:workpacket:inbox:control_plane:{work_id}",
+            work_packet_id=f"workpacket:inbox:control_plane:{work_id}",
+            status="accepted_for_intake",
+            summary="event accepted for intake; execution authority was not granted",
+            intake_path=f"/tmp/.bridge/intake/{work_id}.json",
+        )
 
 
 def _evidence_refs(**overrides) -> list[dict]:
@@ -61,10 +94,16 @@ def _capture_body(**overrides) -> dict:
 
 
 @pytest.fixture
-def plane(tmp_path) -> ControlPlane:
+def bridge_stub() -> StubBridgeClient:
+    return StubBridgeClient()
+
+
+@pytest.fixture
+def plane(tmp_path, bridge_stub) -> ControlPlane:
     return ControlPlane(
         event_store=EventStore(tmp_path / "events.sqlite3"),
         approval_store=ApprovalStore(tmp_path / "approvals.sqlite3"),
+        bridge_client=bridge_stub,
     )
 
 
@@ -211,21 +250,27 @@ def test_capture_matches_direct_eventstore_append(tmp_path):
     assert mcp["event"]["event_id"] == stored.event_id
 
 
-def test_submit_work_confirm_true_is_intake_not_execution(plane, monkeypatch):
+def test_submit_work_confirm_true_is_intake_not_execution(plane, bridge_stub, monkeypatch):
     monkeypatch.setenv(SPAWN_ENV, "0")
     result = plane.submit_work(_evidence_refs(), confirm=True, summary="do the thing")
     assert result["result"] == "accepted_for_intake"
     assert result["executed"] is False
     assert result["confirm_is_authority"] is False
     assert result["spawn_flag"] == 0
+    assert result["bridge_intake_path"]
+    assert result["bridge_result_id"]
+    assert result["bridge_work_packet_id"]
     assert plane.execution_log == []
+    assert bridge_stub.executor_invocations == 0
+    assert len(bridge_stub.calls) == 1
     listed = plane.get_work()
     assert listed["result"] == "ok"
     assert listed["work"][0]["work_id"] == result["work_id"]
     assert listed["work"][0]["executed"] is False
+    assert listed["work"][0]["bridge"]["intake_path"] == result["bridge_intake_path"]
 
 
-def test_submit_work_cannot_supply_lease_or_capability(plane):
+def test_submit_work_cannot_supply_lease_or_capability(plane, bridge_stub):
     for kwargs in (
         {"lease": "lease_fake"},
         {"lease_token": "tok"},
@@ -241,6 +286,7 @@ def test_submit_work_cannot_supply_lease_or_capability(plane):
         assert result["executed"] is False
     assert plane.execution_log == []
     assert plane.work == {}
+    assert bridge_stub.calls == []
 
 
 def test_submit_work_spawn_flag_one_still_does_not_execute(plane, monkeypatch):
@@ -253,9 +299,115 @@ def test_submit_work_spawn_flag_one_still_does_not_execute(plane, monkeypatch):
     assert plane.execution_log == []
 
 
-def test_submit_work_requires_evidence_refs(plane):
+def test_submit_work_requires_evidence_refs(plane, bridge_stub):
     assert plane.submit_work([])["result"] == "DENIED"
     assert plane.submit_work(None)["result"] == "DENIED"
+    assert bridge_stub.calls == []
+
+
+def test_submit_work_bridge_reject_does_not_invoke_executor(tmp_path):
+    stub = StubBridgeClient(fail_with="bridge_rejected")
+    plane = ControlPlane(
+        event_store=EventStore(tmp_path / "events.sqlite3"),
+        approval_store=ApprovalStore(tmp_path / "approvals.sqlite3"),
+        bridge_client=stub,
+    )
+    result = plane.submit_work(_evidence_refs(), confirm=True, summary="should fail closed")
+    assert result["result"] == "DENIED"
+    assert result["reason"] == "bridge_rejected"
+    assert result["executed"] is False
+    assert plane.work == {}
+    assert plane.execution_log == []
+    assert stub.executor_invocations == 0
+    assert len(stub.calls) == 1
+
+
+def test_submit_work_missing_bridge_authority_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.delenv(BRIDGE_BIN_ENV, raising=False)
+    monkeypatch.delenv(BRIDGE_REPO_ENV, raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    plane = ControlPlane(
+        event_store=EventStore(tmp_path / "events.sqlite3"),
+        approval_store=ApprovalStore(tmp_path / "approvals.sqlite3"),
+        bridge_client=BridgeWorkClient.from_env(),
+    )
+    result = plane.submit_work(_evidence_refs(), confirm=True)
+    assert result["result"] == "DENIED"
+    assert result["executed"] is False
+    assert result["reason"] in {
+        "bridge_binary_missing",
+        "bridge_repo_missing",
+        "bridge_binary_not_allowlisted",
+    }
+    assert plane.work == {}
+    assert plane.execution_log == []
+
+
+def test_bridge_work_client_argv_is_allowlisted_ingest_only(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    bridge = bin_dir / "bridge"
+    bridge.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    bridge.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    argv = build_ingest_argv(bridge_bin=bridge.resolve(), repo=repo.resolve())
+    assert argv == [str(bridge.resolve()), "ingest", "-", "--repo", str(repo.resolve())]
+    assert "spawn" not in argv
+    assert "shell" not in "".join(argv).lower()
+
+
+def test_bridge_work_client_rejects_non_bridge_binary_name(tmp_path):
+    impostor = tmp_path / "not-bridge"
+    impostor.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    impostor.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(BridgeIngestError, match="bridge_binary_not_allowlisted"):
+        build_ingest_argv(bridge_bin=impostor.resolve(), repo=repo.resolve())
+
+
+@pytest.mark.skipif(not BRIDGE_BIN, reason="local bridge binary not installed")
+def test_submit_work_integration_against_local_bridge(tmp_path, monkeypatch):
+    """Real `bridge ingest` handshake; stores intake path/id only."""
+    bridge_bin = Path(BRIDGE_BIN).resolve()
+    assert bridge_bin.name == "bridge"
+    repo = tmp_path / "bridge-repo"
+    repo.mkdir()
+    client = BridgeWorkClient(bridge_bin=bridge_bin, repo=repo)
+    plane = ControlPlane(
+        event_store=EventStore(tmp_path / "events.sqlite3"),
+        approval_store=ApprovalStore(tmp_path / "approvals.sqlite3"),
+        bridge_client=client,
+    )
+    monkeypatch.setenv(SPAWN_ENV, "0")
+    result = plane.submit_work(
+        _evidence_refs(),
+        confirm=True,
+        summary="LA-03 integration against local Bridge ingest",
+    )
+    assert result["result"] == "accepted_for_intake"
+    assert result["executed"] is False
+    assert result["spawn_flag"] == 0
+    assert result["confirm_is_authority"] is False
+    intake_path = Path(result["bridge_intake_path"])
+    assert intake_path.is_file()
+    assert str(repo.resolve()) in str(intake_path.resolve())
+    assert result["bridge_work_packet_id"].startswith("workpacket:")
+    assert result["bridge_result_id"].startswith("result:")
+    stored = json.loads(intake_path.read_text(encoding="utf-8"))
+    assert "event" in stored and "work_packet" in stored
+    assert plane.execution_log == []
+    # Adversarial: reject path does not write executor state
+    bad = StubBridgeClient(fail_with="bridge_rejected")
+    denied_plane = ControlPlane(
+        event_store=EventStore(tmp_path / "events2.sqlite3"),
+        approval_store=ApprovalStore(tmp_path / "approvals2.sqlite3"),
+        bridge_client=bad,
+    )
+    denied = denied_plane.submit_work(_evidence_refs(), confirm=True)
+    assert denied["result"] == "DENIED"
+    assert denied_plane.execution_log == []
 
 
 def test_server_side_approval_lookup_is_not_execution(plane):
@@ -329,7 +481,7 @@ def test_cancel_and_verify_do_not_execute(plane):
     assert plane.verify_work("wrk_missing")["result"] == "DENIED"
 
 
-def test_control_plane_source_cannot_import_spawn_or_bridge():
+def test_control_plane_source_cannot_import_spawn_or_subprocess():
     source = (ROOT / "mcp_control_plane.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     imported = set()
@@ -338,16 +490,42 @@ def test_control_plane_source_cannot_import_spawn_or_bridge():
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
+    # PR-2B: thin bridge_work_client is allowed; subprocess/spawn stay out.
+    assert "bridge_work_client" in imported
     assert "subprocess" not in imported
-    assert "bridge" not in imported
+    assert "bridge" not in imported  # no Go package / spawn module
     assert "inbox_bridge_adapter" not in imported
-    assert "bridge_work_client" not in source
     assert "run_shell" not in source
     assert "epistemic" not in source.lower()
     assert "PublicAuthMiddleware" not in source
     assert "_is_publicly_authorized" not in source
     assert 'Mount("/mcp"' not in source
     assert "streamable_http_app()" in source
+    assert "bridge spawn" not in source.lower()
+    assert "promote-approval" not in source.lower()
+    # Client itself must not allowlist spawn.
+    client_src = (ROOT / "bridge_work_client.py").read_text(encoding="utf-8")
+    assert 'ALLOWED_VERBS = frozenset({"ingest"})' in client_src
+    assert "shell=False" in client_src
+    assert '"spawn"' not in client_src
+    assert '"promote-approval"' not in client_src
+
+
+def test_build_submit_work_envelope_is_bridge_contracts_v1():
+    envelope = build_submit_work_envelope(
+        work_id="wrk_abc",
+        summary="hello",
+        evidence_refs=_evidence_refs(),
+        occurred_at="2026-09-06T06:00:00Z",
+    )
+    assert envelope["version"] == "bridge.contracts.v1"
+    assert envelope["id"] == "inbox:control_plane:wrk_abc"
+    assert envelope["kind"] == "inbox.control_plane.submit_work"
+    assert envelope["source"] == "inbox"
+    assert envelope["payload"]["text"] == "hello"
+    assert "role" not in envelope
+    assert "lease" not in envelope
+    assert "capability" not in envelope
 
 
 def _tool_payload(result) -> dict:

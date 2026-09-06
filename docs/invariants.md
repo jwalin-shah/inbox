@@ -185,7 +185,10 @@ Auth fails closed:
 INBOX_CONTROL_PLANE_TOKEN = "" → ¬authorized(/mcp)
 ```
 
-**Enforcement:** `mcp_control_plane.py` on `127.0.0.1:8002`. Seven frozen tools. No Bridge spawn, no model-supplied tokens, no epistemic MCP tool.
+**Enforcement:** `mcp_control_plane.py` on `127.0.0.1:8002`. Seven frozen tools.
+`submit_work` may call Bridge `ingest` via allowlisted `bridge_work_client.py`
+(`shell=False`, verb=`ingest` only) and stores intake path/ids. No Bridge spawn,
+no model-supplied tokens, no epistemic MCP tool. Bridge reject → DENIED ∧ ¬executor.
 
 **Oracle reference:** `saltzer-schroeder-oracle.md` Principle 2 (Fail-Safe Defaults) and Principle 3 (Complete Mediation).
 
