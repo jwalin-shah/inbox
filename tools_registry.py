@@ -14,7 +14,7 @@ the full and readonly MCP servers, so they cannot drift.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import quote
@@ -107,10 +107,28 @@ def _build_handler(tool: Tool, backend: Any) -> Callable[..., Any]:
     return handler
 
 
-def register_all(mcp: Any, backend: Any, *, readonly_only: bool) -> list[str]:
+def include_names(names: Iterable[str], tools: Iterable[Tool] | None = None) -> list[Tool]:
+    """Select registry tools by name, preserving caller order. Unknown names fail closed."""
+    catalog = list(tools) if tools is not None else TOOLS
+    index = {tool.name: tool for tool in catalog}
+    wanted = list(names)
+    missing = [name for name in wanted if name not in index]
+    if missing:
+        raise ValueError(f"unknown tool names: {missing}")
+    return [index[name] for name in wanted]
+
+
+def register_all(
+    mcp: Any,
+    backend: Any,
+    *,
+    readonly_only: bool,
+    names: Iterable[str] | None = None,
+) -> list[str]:
     """Register every applicable tool from TOOLS onto `mcp`. Returns names registered."""
+    selected = include_names(names) if names is not None else list(TOOLS)
     registered: list[str] = []
-    for tool in TOOLS:
+    for tool in selected:
         if readonly_only and not tool.readonly:
             continue
         handler = _build_handler(tool, backend)

@@ -155,6 +155,67 @@ Maps to: `api-design-oracle.md`.
 
 **Oracle reference:** `api-design-oracle.md` — Session Lifecycle (init → use → cleanup is explicit).
 
+### 3.4 Control-plane authority boundary (P0)
+
+```
+∀call ∈ {submit_work, cancel_work, run_shortcut, verify_work}:
+  executed(call) = 0
+  ∧ spawn_default = 0
+  ∧ ¬∃credential ∈ call.args: model_supplied_authority(credential)
+  ∧ result(call) ∈ {accepted_for_intake, DENIED}
+  ∧ authority(call) = lookup(ApprovalStore)  // server-side only
+```
+
+`confirm = true` is intent, not a lease, capability, or approval.
+
+```
+∀call: confirm(call) = true ↛ authority(call)
+```
+
+Capture reuses EventStore identity; it is not a grant.
+
+```
+capture_mcp(obs) = EventStore.append(obs)
+∧ capture_mcp(obs) ↛ approval_lease
+```
+
+Auth fails closed:
+
+```
+INBOX_CONTROL_PLANE_TOKEN = "" → ¬authorized(/mcp)
+```
+
+**Enforcement:** `mcp_control_plane.py` on `127.0.0.1:8002`. Seven frozen tools.
+`submit_work` may call Bridge `ingest` via allowlisted `bridge_work_client.py`
+(`shell=False`, verb=`ingest` only) and stores intake path/ids. No Bridge spawn,
+no model-supplied tokens, no epistemic MCP tool. Bridge reject → DENIED ∧ ¬executor.
+
+**Oracle reference:** `saltzer-schroeder-oracle.md` Principle 2 (Fail-Safe Defaults) and Principle 3 (Complete Mediation).
+
+### 3.5 Control-plane Streamable HTTP session lifecycle (P0)
+
+```
+make_control_plane_app = FastMCP.streamable_http_app
+∧ lifespan(app) = session_manager.run()
+∧ ¬Mount("/mcp", streamable_http_app())
+∧ POST /mcp ↛ 307
+∧ initialize(streamable_http_client, /mcp) → session
+```
+
+Transport repair must not change authority semantics:
+
+```
+transport_fix ↛ executed
+∧ spawn_default = 0
+∧ tools = {resolve, capture, submit_work, get_work, cancel_work, verify_work, run_shortcut}
+```
+
+**Rationale:** Nested `Mount("/mcp", mcp.streamable_http_app())` placed the handler at `/mcp/mcp` and never started `StreamableHTTPSessionManager.run()`, so a standards-compliant client could not `initialize`. FastMCP's own Streamable HTTP app is the native lifespan owner.
+
+**Enforcement:** Integration test uses the official MCP Python client against uvicorn serving `make_control_plane_app()`.
+
+**Oracle reference:** `api-design-oracle.md` — Session Lifecycle (init → use → cleanup is explicit).
+
 ---
 
 ## 4. Data Integrity
@@ -307,7 +368,8 @@ Maps to: `saltzer-schroeder-oracle.md`.
 | 2.4     | External API safety | P1 | No | High |
 | 3.1     | JSON-RPC structure | P1 | No | Medium |
 | 3.2     | Tool call validation | P1 | No | High |
-| 3.3     | Session lifecycle | P1 | No | Medium |
+| 3.4     | Control-plane authority | P0 | Yes | High |
+| 3.5     | Control-plane Streamable HTTP lifecycle | P0 | Yes | High |
 | 4.1     | Unique message ID | P0 | No | High |
 | 4.2     | No sync duplicates | P1 | No | High |
 | 4.3     | Approval store consistency | P0 | No | High |

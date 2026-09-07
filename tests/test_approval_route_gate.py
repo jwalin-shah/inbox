@@ -253,6 +253,9 @@ MUTATING_METHOD_EXCEPTION_POLICY = {
     ),
     ("POST", "/llm/warmup"): ApprovalExceptionPolicy("llm_call", True, "LLM warmup call; no provider write"),
     ("POST", "/memory/extract"): ApprovalExceptionPolicy("local_write", True, "optional local memory file save; no provider write"),
+    ("POST", "/events/capture"): ApprovalExceptionPolicy(
+        "local_write", True, "append-only local evidence capture; no provider write"
+    ),
     ("PUT", "/notifications/config"): ApprovalExceptionPolicy(
         "local_write", True, "local notification config file update; no provider write"
     ),

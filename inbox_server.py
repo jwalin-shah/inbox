@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import compare_digest, token_urlsafe
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
@@ -30,6 +30,7 @@ from pydantic import BaseModel, StrictBool
 import ambient_notes
 import egress_audit
 import google_account_resolution as _gacct
+from approval_store import ApprovalStore
 from capability_inventory import build_capability_inventory
 from capture_health import CaptureHealthRecord, CaptureHealthStore, capture_summary, utc_now_iso
 from connector_registry import (
@@ -39,6 +40,7 @@ from connector_registry import (
     partition_search_sources,
     search_connectors,
 )
+from event_store import CaptureEvent, EventStore, EventStoreConflict, EventStoreValidationError
 from gmail_triage import (
     KIND_PREFIX as _KIND_PREFIX,
 )
@@ -74,7 +76,6 @@ from memory_store import MemoryStore
 from message_index_store import MessageIndexStore
 from message_sync import bootstrap as index_bootstrap_sync
 from message_sync import incremental as index_incremental_sync
-from approval_store import ApprovalStore
 from scheduler import SchedulerStore
 from service_models import ApprovalGateDecision, ApprovalLease
 from services import (
@@ -1570,6 +1571,36 @@ class SourceAdapters:
     )
 
 
+class CaptureEventRequest(BaseModel):
+    source: str
+    event_type: str = "manual.capture"
+    source_object_id: str
+    observed_at: str
+    occurred_at: str
+    payload: Any
+    provenance: dict[str, Any]
+    event_id: str = ""
+
+
+class CapturedEventOut(BaseModel):
+    event_id: str
+    source: str
+    source_object_id: str
+    observed_at: str
+    occurred_at: str
+    event_type: str
+    payload: Any
+    provenance: dict[str, Any]
+    ingested_at: str
+    schema_version: str
+
+
+class CaptureEventOut(BaseModel):
+    result: Literal["created", "already_exists", "error"]
+    event: CapturedEventOut | None = None
+    error: str | None = None
+
+
 class ServerState:
     def __init__(self) -> None:
         self.gmail_services: dict[str, object] = {}
@@ -1588,6 +1619,7 @@ class ServerState:
         self.approvals: ApprovalStore = ApprovalStore()
         self.index_store: MessageIndexStore = MessageIndexStore()
         self.capture_health_store: CaptureHealthStore = CaptureHealthStore()
+        self.event_store: EventStore = EventStore()
         self.source_adapters: SourceAdapters = SourceAdapters()
 
 
@@ -2928,6 +2960,50 @@ async def get_capture_health():
 
 
 # ── Egress Audit ─────────────────────────────────────────────────────────────
+
+
+@app.post("/events/capture")
+async def capture_event(req: CaptureEventRequest):
+    """Append one raw observation. Local evidence only. Not a grant.
+
+    201 created. 200 already_exists (same id and digest; original receipt).
+    409 when the same id is reused with a different digest.
+    422 malformed, untrusted locator, or unused id that is not the digest identity.
+    413 oversized payload.
+    """
+    try:
+        event = CaptureEvent.create(
+            source=req.source,
+            source_object_id=req.source_object_id,
+            observed_at=req.observed_at,
+            occurred_at=req.occurred_at,
+            event_type=req.event_type,
+            payload=req.payload,
+            provenance=req.provenance,
+            event_id=req.event_id or None,
+        )
+        stored, result = await asyncio.to_thread(state.event_store.append, event)
+    except EventStoreConflict as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"result": "error", "error": str(exc), "event": None},
+        )
+    except EventStoreValidationError as exc:
+        code = (
+            status.HTTP_413_CONTENT_TOO_LARGE
+            if "oversized" in str(exc)
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        return JSONResponse(
+            status_code=code,
+            content={"result": "error", "error": str(exc), "event": None},
+        )
+    payload = CaptureEventOut(
+        result=result,
+        event=CapturedEventOut(**stored.to_dict()),
+    )
+    status_code = status.HTTP_201_CREATED if result == "created" else status.HTTP_200_OK
+    return JSONResponse(status_code=status_code, content=payload.model_dump())
 
 
 @app.get("/egress/status")

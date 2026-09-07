@@ -1,0 +1,17 @@
+{
+  "schema": "agent_os.shortcut_registry.v1",
+  "description": "Local-only map. Public MCP accepts shortcut_id (SC-NNN), never the stored name. argv is not executed while INBOX_CONTROL_PLANE_SPAWN=0.",
+  "entries": {
+    "SC-014": {
+      "shortcut_id": "SC-014",
+      "stored_name": "EXAMPLE_ONLY_replace_with_live_Shortcuts_name",
+      "risk_class": "consequential",
+      "requires_approval_store": true,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false
+      }
+    }
+  },
+  "unknown_id": "DENIED"
+}

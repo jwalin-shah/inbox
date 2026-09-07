@@ -35,6 +35,17 @@ Run the private inbox backend and the MCP layers separately:
    - Local subprocess entrypoint for the read-only tool surface
    - Useful if you want a second local MCP server with fewer capabilities
 
+6. `mcp_control_plane.py`
+   - Ingest-only LifeOps control plane on `127.0.0.1:8002`
+   - Frozen tools: `resolve`, `capture`, `submit_work`, `get_work`,
+     `cancel_work`, `verify_work`, `run_shortcut`
+   - Fail-closed `INBOX_CONTROL_PLANE_TOKEN` (unlike `mcp_gateway.py`, an
+     empty token is unauthorized)
+   - `INBOX_CONTROL_PLANE_SPAWN` defaults to `0`; `confirm=true` is not authority
+   - `submit_work` forwards to Bridge `ingest` via `bridge_work_client.py`
+     (argv allowlist, `shell=False`); stores intake path/ids only — not spawn
+   - Does not wrap the REST `tools_registry.py` surface and does not mint leases
+
 ## Which Path To Use
 
 Use local `stdio` when the assistant runs on the same machine as Inbox.
