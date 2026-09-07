@@ -1055,6 +1055,9 @@ class TaskCreateRequest(BaseModel):
     list_id: str = "@default"
     due: str = ""
     notes: str = ""
+    # Optional canary/client identity. When set, a successful create binds
+    # provider list_id+task_id so retries of the same key cannot insert again.
+    idempotency_key: str = ""
 
 
 class TaskUpdateRequest(BaseModel):
@@ -1882,8 +1885,13 @@ async def _process_followup_reminders() -> None:
                         try:
                             _, tasks_svc = _get_tasks_service_for_account("")
                             due_iso = datetime.now().strftime("%Y-%m-%dT00:00:00.000Z")
-                            ok = await asyncio.to_thread(
+                            created = await asyncio.to_thread(
                                 task_create, tasks_svc, title, "@default", due_iso, notes
+                            )
+                            ok = (
+                                bool(created.get("ok"))
+                                if isinstance(created, dict)
+                                else bool(created)
                             )
                             if ok:
                                 task_created_via = "google_tasks"
@@ -1956,9 +1964,10 @@ async def _process_departure_alerts() -> None:
                     try:
                         _, tasks_svc = _get_tasks_service_for_account("")
                         due_iso = dep.departure_time.strftime("%Y-%m-%dT00:00:00.000Z")
-                        ok = await asyncio.to_thread(
+                        created = await asyncio.to_thread(
                             task_create, tasks_svc, title, "@default", due_iso, notes
                         )
+                        ok = bool(created.get("ok")) if isinstance(created, dict) else bool(created)
                     except Exception:
                         pass
                 if not ok:
@@ -3627,9 +3636,34 @@ async def list_tasks(
 
 @app.post("/tasks")
 async def create_task(req: TaskCreateRequest, account: str = ""):
+    from task_create_bindings import get_binding, put_binding
+
+    idem = str(req.idempotency_key or "").strip()
+    if idem:
+        existing = await asyncio.to_thread(get_binding, idem)
+        if existing:
+            return {
+                "ok": True,
+                "task_id": existing["task_id"],
+                "list_id": existing["list_id"],
+                "idempotent_replay": True,
+                "idempotency_key": idem,
+            }
+
     _, svc = _get_tasks_service_for_account(account)
-    ok = await asyncio.to_thread(task_create, svc, req.title, req.list_id, req.due, req.notes)
-    return {"ok": ok}
+    result = await asyncio.to_thread(task_create, svc, req.title, req.list_id, req.due, req.notes)
+    if not isinstance(result, dict):
+        result = {"ok": bool(result), "task_id": "", "list_id": req.list_id}
+    if result.get("ok") and idem and result.get("task_id"):
+        await asyncio.to_thread(
+            put_binding,
+            idem,
+            list_id=str(result["list_id"]),
+            task_id=str(result["task_id"]),
+            title=req.title,
+        )
+        result = {**result, "idempotent_replay": False, "idempotency_key": idem}
+    return result
 
 
 @app.post("/tasks/{task_id}/complete")
@@ -3913,13 +3947,10 @@ async def create_task_from_message(req: TaskFromMessageRequest):
         notes = req.notes
         if req.message_source == "gmail":
             notes = f"{notes}\n\nFrom email: {req.message_id}".strip()
-        ok = await asyncio.to_thread(task_create, svc, req.title, req.list_id, "", notes)
-        if not ok:
+        created = await asyncio.to_thread(task_create, svc, req.title, req.list_id, "", notes)
+        if not (isinstance(created, dict) and created.get("ok") and created.get("task_id")):
             raise HTTPException(500, "Failed to create Google Task")
-        # Query newly-created task id (Google Tasks API doesn't return it from task_create)
-        tasks = await asyncio.to_thread(tasks_list, svc, req.list_id, False, 10)
-        latest = next((t for t in tasks if t.title == req.title), None)
-        task_id = latest.id if latest else ""
+        task_id = str(created["task_id"])
     elif req.task_type == "reminders":
         notes = req.notes
         if req.message_source == "gmail":
