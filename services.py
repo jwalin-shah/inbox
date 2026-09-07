@@ -4013,20 +4013,97 @@ def tasks_list(
         return []
 
 
+# Provider-native idempotency marker embedded as a whole notes line.
+# Correlation lives on the Google Tasks projection itself — not a local DB.
+_TASK_IDEMPOTENCY_MARKER_PREFIX = "lifeops_idempotency:"
+
+
+def task_idempotency_marker(idempotency_key: str) -> str:
+    """Return the exact notes line used to correlate one stable request identity."""
+    key = str(idempotency_key or "").strip()
+    if not key or "\n" in key or "\r" in key:
+        raise ValueError("idempotency_key must be a non-empty single-line string")
+    return f"{_TASK_IDEMPOTENCY_MARKER_PREFIX}{key}"
+
+
+def _notes_contain_idempotency_marker(notes: str, marker: str) -> bool:
+    return any(line.strip() == marker for line in str(notes or "").splitlines())
+
+
+def _notes_with_idempotency_marker(notes: str, marker: str) -> str:
+    base = str(notes or "").rstrip()
+    if _notes_contain_idempotency_marker(base, marker):
+        return base
+    return f"{base}\n{marker}" if base else marker
+
+
+def _resolve_task_list_id(service, list_id: str, created: dict[str, Any] | None = None) -> str:
+    resolved = str(list_id or "@default")
+    if resolved != "@default":
+        return resolved
+    try:
+        list_meta = service.tasklists().get(tasklist="@default").execute() or {}
+        resolved = str(list_meta.get("id") or resolved)
+    except Exception:
+        self_link = str((created or {}).get("selfLink") or "")
+        marker = "/lists/"
+        if marker in self_link:
+            resolved = self_link.split(marker, 1)[1].split("/", 1)[0]
+    return resolved
+
+
+def find_task_by_idempotency_key(
+    service,
+    idempotency_key: str,
+    list_id: str = "@default",
+    *,
+    limit: int = 100,
+) -> dict[str, Any] | None:
+    """Bounded provider read: exact notes-line marker match on one task list."""
+    marker = task_idempotency_marker(idempotency_key)
+    existing = tasks_list(service, list_id=list_id, show_completed=True, limit=limit)
+    for task in existing:
+        if _notes_contain_idempotency_marker(getattr(task, "notes", "") or "", marker):
+            resolved_list = str(getattr(task, "list_id", "") or list_id or "@default")
+            if resolved_list == "@default":
+                resolved_list = _resolve_task_list_id(service, resolved_list)
+            return {
+                "ok": True,
+                "task_id": str(task.id),
+                "list_id": resolved_list,
+                "idempotent_replay": True,
+                "idempotency_key": str(idempotency_key).strip(),
+            }
+    return None
+
+
 def task_create(
     service,
     title: str,
     list_id: str = "@default",
     due: str = "",
     notes: str = "",
+    idempotency_key: str = "",
 ) -> dict[str, Any]:
     """Create a Google Task and return exact provider identity.
 
-    Returns ``{"ok": bool, "task_id": str, "list_id": str}``. ``list_id`` is the
-    concrete Google Tasks list id (``@default`` is resolved when possible).
+    Returns ``{"ok": bool, "task_id": str, "list_id": str, ...}``. ``list_id`` is
+    the concrete Google Tasks list id (``@default`` is resolved when possible).
+
+    When ``idempotency_key`` is set, durability is the provider projection:
+    a whole-line notes marker is written on create, and retries read that
+    marker before insert (no local binding database).
     """
     _assert_live_write_allowed("create Google Task")
+    idem = str(idempotency_key or "").strip()
     try:
+        if idem:
+            found = find_task_by_idempotency_key(service, idem, list_id=list_id)
+            if found is not None:
+                return found
+            marker = task_idempotency_marker(idem)
+            notes = _notes_with_idempotency_marker(notes, marker)
+
         body = {"title": title}
         if notes:
             body["notes"] = notes
@@ -4034,21 +4111,27 @@ def task_create(
             body["due"] = due
         created = service.tasks().insert(tasklist=list_id, body=body).execute() or {}
         task_id = str(created.get("id") or "")
-        resolved_list_id = str(list_id or "@default")
-        if resolved_list_id == "@default":
-            try:
-                list_meta = service.tasklists().get(tasklist="@default").execute() or {}
-                resolved_list_id = str(list_meta.get("id") or resolved_list_id)
-            except Exception:
-                self_link = str(created.get("selfLink") or "")
-                # .../lists/{listId}/tasks/{taskId}
-                marker = "/lists/"
-                if marker in self_link:
-                    resolved_list_id = self_link.split(marker, 1)[1].split("/", 1)[0]
-        return {"ok": bool(task_id), "task_id": task_id, "list_id": resolved_list_id}
+        resolved_list_id = _resolve_task_list_id(service, list_id, created)
+        result: dict[str, Any] = {
+            "ok": bool(task_id),
+            "task_id": task_id,
+            "list_id": resolved_list_id,
+        }
+        if idem:
+            result["idempotent_replay"] = False
+            result["idempotency_key"] = idem
+        return result
     except Exception:
         _log_service_failure("task_create", title=title, list_id=list_id)
-        return {"ok": False, "task_id": "", "list_id": str(list_id or "@default")}
+        out: dict[str, Any] = {
+            "ok": False,
+            "task_id": "",
+            "list_id": str(list_id or "@default"),
+        }
+        if idem:
+            out["idempotent_replay"] = False
+            out["idempotency_key"] = idem
+        return out
 
 
 def task_complete(service, task_id: str, list_id: str = "@default") -> bool:

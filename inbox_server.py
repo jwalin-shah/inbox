@@ -1055,8 +1055,8 @@ class TaskCreateRequest(BaseModel):
     list_id: str = "@default"
     due: str = ""
     notes: str = ""
-    # Optional canary/client identity. When set, a successful create binds
-    # provider list_id+task_id so retries of the same key cannot insert again.
+    # Optional stable request identity. When set, create embeds a provider-native
+    # notes marker and retries read that marker before insert (no local binding DB).
     idempotency_key: str = ""
 
 
@@ -3636,33 +3636,18 @@ async def list_tasks(
 
 @app.post("/tasks")
 async def create_task(req: TaskCreateRequest, account: str = ""):
-    from task_create_bindings import get_binding, put_binding
-
-    idem = str(req.idempotency_key or "").strip()
-    if idem:
-        existing = await asyncio.to_thread(get_binding, idem)
-        if existing:
-            return {
-                "ok": True,
-                "task_id": existing["task_id"],
-                "list_id": existing["list_id"],
-                "idempotent_replay": True,
-                "idempotency_key": idem,
-            }
-
     _, svc = _get_tasks_service_for_account(account)
-    result = await asyncio.to_thread(task_create, svc, req.title, req.list_id, req.due, req.notes)
+    result = await asyncio.to_thread(
+        task_create,
+        svc,
+        req.title,
+        req.list_id,
+        req.due,
+        req.notes,
+        req.idempotency_key,
+    )
     if not isinstance(result, dict):
         result = {"ok": bool(result), "task_id": "", "list_id": req.list_id}
-    if result.get("ok") and idem and result.get("task_id"):
-        await asyncio.to_thread(
-            put_binding,
-            idem,
-            list_id=str(result["list_id"]),
-            task_id=str(result["task_id"]),
-            title=req.title,
-        )
-        result = {**result, "idempotent_replay": False, "idempotency_key": idem}
     return result
 
 
