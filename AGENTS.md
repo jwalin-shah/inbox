@@ -11,6 +11,7 @@ Inbox invariants are formalized as tensor equations in `docs/invariants.md`, eac
 | Server API (`inbox_server.py`) | `api-design-oracle.md` | X-Request-ID, structured errors, timeouts, connection pool hygiene |
 | Connectors (`connectors/`) | `saltzer-schroeder-oracle.md` | Auth check before use, 429 backoff, non-blocking sync, circuit breaker |
 | MCP gateway (`mcp_gateway.py`) | `api-design-oracle.md` | JSON-RPC 2.0 conformance, tool call validation, session lifecycle |
+| MCP control plane (`mcp_control_plane.py`) | `saltzer-schroeder-oracle.md` | Fail-closed auth, ApprovalStore lookup, ingest-only spawn=0, confirm≠authority |
 | Message sync (`message_sync.py`) | `data-quality-oracle.md` | Unique message IDs, no sync duplicates, idempotent sync |
 | Approval store (`approval_store.py`) | `saltzer-schroeder-oracle.md` | State machine consistency, complete mediation, audit logging |
 | Egress audit (`egress_audit.py`) | `saltzer-schroeder-oracle.md` | Host allowlist, all outbound traffic logged |
