@@ -144,6 +144,45 @@ def test_correction_appends_new_event_and_preserves_original(tmp_path):
     assert store.get(correction.event_id).payload == {"text": "corrected in place"}
 
 
+def test_list_by_event_type_filters_by_type_and_optional_object_id(tmp_path):
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.append(_event(source_object_id="ref-a", event_type="execution.intent.v1"))
+    store.append(
+        _event(
+            source_object_id="ref-a",
+            event_type="execution.intent.v1",
+            occurred_at="2026-09-05T18:00:01+00:00",
+            payload={"text": "second declaration for ref-a"},
+        )
+    )
+    store.append(_event(source_object_id="ref-b", event_type="execution.intent.v1"))
+    store.append(_event(source_object_id="ref-a", event_type="manual.capture"))
+
+    scoped = store.list_by_event_type("execution.intent.v1", source_object_id="ref-a")
+    assert len(scoped) == 2
+    assert {e.source_object_id for e in scoped} == {"ref-a"}
+
+    unscoped = store.list_by_event_type("execution.intent.v1")
+    assert len(unscoped) == 3
+    assert {e.source_object_id for e in unscoped} == {"ref-a", "ref-b"}
+
+    empty = store.list_by_event_type("execution.intent.v1", source_object_id="ref-missing")
+    assert empty == []
+
+
+def test_list_by_event_type_requires_event_type(tmp_path):
+    store = EventStore(tmp_path / "events.sqlite3")
+    with pytest.raises(EventStoreValidationError, match="event_type"):
+        store.list_by_event_type("")
+
+
+def test_list_by_event_type_is_read_only(tmp_path):
+    store = EventStore(tmp_path / "events.sqlite3")
+    store.append(_event())
+    store.list_by_event_type("manual.capture")
+    assert store.count() == 1
+
+
 def test_event_store_has_no_scheduler_or_authority_surface():
     source = (
         __import__("pathlib").Path(__file__).resolve().parents[1] / "event_store.py"

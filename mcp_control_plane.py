@@ -1,12 +1,30 @@
-"""Ingest-only Inbox MCP control plane (PR-1 + PR-2B Bridge intake).
+"""Ingest-only Inbox MCP control plane (PR-1 + PR-2B Bridge intake, PR-3
+ExecutionIntent declaration, PR-4 execution-adapter runtime exposure).
 
 Bind: 127.0.0.1:8002
 Frozen tools: resolve, capture, submit_work, get_work, cancel_work,
-verify_work, run_shortcut.
+verify_work, run_shortcut, execution_submit, execution_status,
+execution_events, execution_inspect, execution_start, execution_run_status,
+execution_cancel, execution_verify_close.
 
 This surface can accept and capture work and forward submit_work to Bridge
 `ingest`. It cannot mint authority or execute workers, providers, or
 Shortcuts. confirm=true is intent, not a lease. Bridge intake ≠ spawn.
+
+execution_submit declares an ExecutionIntent (work/proposal reference +
+bounded mode + optional backend) for future Mac-controller consumption
+(prop-448205ebb3b8). It is a durable declaration only -- never a lease,
+never a provider selection, never a live worker launch.
+
+execution_inspect/execution_start/execution_run_status/execution_cancel/
+execution_verify_close are the same `execution_adapter.ExecutionAdapter`
+from the prior slice, registered directly on this canonical MCP surface --
+not a second server, not a second authority store. `ControlPlane` builds one
+`ExecutionAdapter` sharing this same `event_store`/`approval_store` unless a
+caller injects one (tests only). `execution_start` stays denied by default:
+the only shipped `AdmissionAuthority` is `MissingAuthorityInterface`, which
+always returns `granted=False`, so there is still no code path here that
+reaches `subprocess.run()`.
 """
 
 from __future__ import annotations
@@ -32,6 +50,18 @@ from bridge_work_client import (
     build_submit_work_envelope,
 )
 from event_store import CaptureEvent, EventStore, EventStoreConflict, EventStoreValidationError
+from execution_adapter import (
+    EXECUTION_ADAPTER_TOOL_NAMES,
+    AdmissionAuthority,
+    ExecutionAdapter,
+    OrcaTerminalClientProtocol,
+)
+from execution_intent import (
+    EXECUTION_INTENT_EVENT_TYPE,
+    ExecutionIntentValidationError,
+    build_execution_intent_event,
+    validate_work_ref,
+)
 
 CONTROL_PLANE_HOST = "127.0.0.1"
 CONTROL_PLANE_PORT = 8002
@@ -46,6 +76,10 @@ CONTROL_PLANE_TOOL_NAMES = (
     "cancel_work",
     "verify_work",
     "run_shortcut",
+    "execution_submit",
+    "execution_status",
+    "execution_events",
+    *EXECUTION_ADAPTER_TOOL_NAMES,
 )
 AUTHORITY_TYPES = frozenset(
     {
@@ -236,6 +270,9 @@ class ControlPlane:
         approval_store: ApprovalStore,
         shortcut_registry: dict[str, Any] | None = None,
         bridge_client: BridgeWorkClientProtocol | None = None,
+        execution_adapter: ExecutionAdapter | None = None,
+        execution_authority: AdmissionAuthority | None = None,
+        orca_client: OrcaTerminalClientProtocol | None = None,
     ) -> None:
         self.event_store = event_store
         self.approval_store = approval_store
@@ -245,6 +282,16 @@ class ControlPlane:
         self.bridge_client: BridgeWorkClientProtocol = bridge_client or BridgeWorkClient.from_env()
         self.work: dict[str, dict[str, Any]] = {}
         self.execution_log: list[dict[str, Any]] = []
+        # Same event_store/approval_store -- one authority store, not a
+        # second one. Default authority is MissingAuthorityInterface (see
+        # execution_adapter.py); execution_authority/orca_client exist only
+        # so tests can inject doubles without standing up a second adapter.
+        self.execution_adapter: ExecutionAdapter = execution_adapter or ExecutionAdapter(
+            event_store=self.event_store,
+            approval_store=self.approval_store,
+            authority=execution_authority,
+            orca_client=orca_client,
+        )
 
     def _reject_model_authority(self, payload: Any) -> dict[str, Any] | None:
         keys = _collect_mapping_keys(payload)
@@ -558,6 +605,158 @@ class ControlPlane:
             argv_executed=False,
         )
 
+    def execution_submit(
+        self,
+        work_ref: str = "",
+        *,
+        execution_mode: str = "",
+        requested_backend: str = "unspecified",
+        note: str = "",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Declare an ExecutionIntent. Never executes; fails closed on any
+        unknown field, unknown backend, or unbounded mode -- including a
+        stray `confirm`, which this tool does not accept as a field at all."""
+        payload = {
+            "work_ref": work_ref,
+            "execution_mode": execution_mode,
+            "requested_backend": requested_backend,
+            "note": note,
+            **kwargs,
+        }
+        denied = self._reject_model_authority(payload)
+        if denied:
+            return denied
+        if kwargs:
+            return _denied("unknown_field", fields=sorted(kwargs))
+        try:
+            event = build_execution_intent_event(
+                work_ref=work_ref,
+                execution_mode=execution_mode,
+                requested_backend=requested_backend,
+                note=note,
+            )
+        except ExecutionIntentValidationError as exc:
+            return _denied(str(exc))
+        try:
+            stored, result = self.event_store.append(event)
+        except EventStoreConflict as exc:
+            return _denied("intent_conflict", detail=str(exc))
+        self.approval_store.log_event(
+            "execution_intent_declared",
+            operation="execution_submit",
+            resource=stored.source_object_id,
+            result=result,
+            detail={
+                "execution_mode": stored.payload.get("execution_mode"),
+                "requested_backend": stored.payload.get("requested_backend"),
+                "executed": False,
+            },
+        )
+        return {
+            "result": result,
+            "intent": stored.to_dict(),
+            "executed": False,
+            "execution_claimed": False,
+            "spawn_flag": spawn_flag(),
+        }
+
+    def execution_status(self, work_ref: str = "", **kwargs: Any) -> dict[str, Any]:
+        """Report the durable intent history for one work/proposal reference.
+        Never reports a live run state -- only whether an intent was recorded."""
+        payload = {"work_ref": work_ref, **kwargs}
+        denied = self._reject_model_authority(payload)
+        if denied:
+            return denied
+        if kwargs:
+            return _denied("unknown_field", fields=sorted(kwargs))
+        try:
+            ref = validate_work_ref(work_ref)
+        except ExecutionIntentValidationError as exc:
+            return _denied(str(exc))
+        intents = self.event_store.list_by_event_type(
+            EXECUTION_INTENT_EVENT_TYPE, source_object_id=ref
+        )
+        latest = intents[0].to_dict() if intents else None
+        return {
+            "result": "ok",
+            "work_ref": ref,
+            "status": "intent_recorded" if intents else "no_intent_recorded",
+            "intents_recorded": len(intents),
+            "latest_intent": latest,
+            "executed": False,
+            "spawn_flag": spawn_flag(),
+        }
+
+    def execution_events(
+        self, work_ref: str = "", *, limit: int = 50, **kwargs: Any
+    ) -> dict[str, Any]:
+        """List declared ExecutionIntents from the same durable EventStore
+        `capture` writes to. Optionally scoped to one work/proposal reference."""
+        payload = {"work_ref": work_ref, "limit": limit, **kwargs}
+        denied = self._reject_model_authority(payload)
+        if denied:
+            return denied
+        if kwargs:
+            return _denied("unknown_field", fields=sorted(kwargs))
+        bounded_limit = max(1, min(int(limit or 50), 200))
+        ref = ""
+        text = str(work_ref or "").strip()
+        if text:
+            try:
+                ref = validate_work_ref(text)
+            except ExecutionIntentValidationError as exc:
+                return _denied(str(exc))
+        events = self.event_store.list_by_event_type(
+            EXECUTION_INTENT_EVENT_TYPE,
+            source_object_id=ref or None,
+            limit=bounded_limit,
+        )
+        return {
+            "result": "ok",
+            "work_ref": ref or None,
+            "events": [event.to_dict() for event in events],
+            "count": len(events),
+            "executed": False,
+            "spawn_flag": spawn_flag(),
+        }
+
+    # -- execution adapter delegation (PR-4) ---------------------------------
+    # Thin pass-throughs to the one shared ExecutionAdapter constructed in
+    # __init__. Field/unknown-kwarg validation lives in ExecutionAdapter
+    # itself (see execution_adapter.py) so it is not duplicated here.
+
+    def execution_inspect(self, work_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        """Read-only intent/start-attempt/run history for a work_id. Never spawns."""
+        return self.execution_adapter.execution_inspect(work_id, **kwargs)
+
+    def execution_start(
+        self,
+        work_id: str = "",
+        *,
+        admission_ref: str = "",
+        idempotency_key: str = "",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Validate admission/idempotency/worktree/provider before ever
+        spawning. Denied by default: MissingAuthorityInterface is still the
+        only shipped AdmissionAuthority, so this never reaches subprocess.run()."""
+        return self.execution_adapter.execution_start(
+            work_id, admission_ref=admission_ref, idempotency_key=idempotency_key, **kwargs
+        )
+
+    def execution_run_status(self, run_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        """Durable run status by run_id -- distinct from execution_status(work_ref)."""
+        return self.execution_adapter.execution_run_status(run_id, **kwargs)
+
+    def execution_cancel(self, run_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        """Cancel a run if one exists. unknown_run when none was ever created."""
+        return self.execution_adapter.execution_cancel(run_id, **kwargs)
+
+    def execution_verify_close(self, run_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        """Confirm a run actually exited. unknown_run when none was ever created."""
+        return self.execution_adapter.execution_verify_close(run_id, **kwargs)
+
 
 def build_control_plane_mcp(plane: ControlPlane):
     try:
@@ -635,6 +834,64 @@ def build_control_plane_mcp(plane: ControlPlane):
         """Accept an opaque shortcut_id for intake. Never runs Shortcuts."""
         return plane.run_shortcut(shortcut_id, confirm=confirm, shortcut_input=shortcut_input)
 
+    @mcp.tool()
+    async def execution_submit(
+        work_ref: str,
+        execution_mode: str,
+        requested_backend: str = "unspecified",
+        note: str = "",
+    ) -> dict:
+        """Declare an ExecutionIntent for a known work/proposal reference.
+        Fails closed on unknown backend/mode. Never executes; not a lease."""
+        return plane.execution_submit(
+            work_ref,
+            execution_mode=execution_mode,
+            requested_backend=requested_backend,
+            note=note,
+        )
+
+    @mcp.tool()
+    async def execution_status(work_ref: str) -> dict:
+        """Durable intent history for one work/proposal reference. Reports
+        whether intent was recorded -- never a live execution state."""
+        return plane.execution_status(work_ref)
+
+    @mcp.tool()
+    async def execution_events(work_ref: str = "", limit: int = 50) -> dict:
+        """List declared ExecutionIntents from the durable EventStore.
+        Optionally scoped to one work/proposal reference."""
+        return plane.execution_events(work_ref, limit=limit)
+
+    @mcp.tool()
+    async def execution_inspect(work_id: str) -> dict:
+        """Read-only intent/start-attempt/run history for a work_id. Never spawns."""
+        return plane.execution_inspect(work_id)
+
+    @mcp.tool()
+    async def execution_start(work_id: str, admission_ref: str, idempotency_key: str) -> dict:
+        """Validate HomeBase admission, Portfolio lease, exact worktree, and
+        provider allowlist before ever spawning. No shipped authority client
+        grants today, so this always fails closed before any subprocess runs."""
+        return plane.execution_start(
+            work_id, admission_ref=admission_ref, idempotency_key=idempotency_key
+        )
+
+    @mcp.tool()
+    async def execution_run_status(run_id: str) -> dict:
+        """Durable run status by run_id. Distinct from execution_status(work_ref),
+        which reports intent-declaration history, not run state."""
+        return plane.execution_run_status(run_id)
+
+    @mcp.tool()
+    async def execution_cancel(run_id: str) -> dict:
+        """Cancel a run if one exists. unknown_run when none was ever created."""
+        return plane.execution_cancel(run_id)
+
+    @mcp.tool()
+    async def execution_verify_close(run_id: str) -> dict:
+        """Confirm a run actually exited. unknown_run when none was ever created."""
+        return plane.execution_verify_close(run_id)
+
     return mcp
 
 
@@ -644,12 +901,18 @@ def make_control_plane(
     approval_db: Path | None = None,
     shortcut_registry: dict[str, Any] | None = None,
     bridge_client: BridgeWorkClientProtocol | None = None,
+    execution_adapter: ExecutionAdapter | None = None,
+    execution_authority: AdmissionAuthority | None = None,
+    orca_client: OrcaTerminalClientProtocol | None = None,
 ) -> ControlPlane:
     return ControlPlane(
         event_store=EventStore(event_db),
         approval_store=ApprovalStore(approval_db),
         shortcut_registry=shortcut_registry,
         bridge_client=bridge_client,
+        execution_adapter=execution_adapter,
+        execution_authority=execution_authority,
+        orca_client=orca_client,
     )
 
 
@@ -665,6 +928,14 @@ def make_control_plane_app(plane: ControlPlane | None = None) -> Starlette:
                 "bind": f"{CONTROL_PLANE_HOST}:{CONTROL_PLANE_PORT}",
                 "spawn_flag": spawn_flag(),
                 "execution_enabled": False,
+                # Truthful, not aspirational: execution_inspect/start/
+                # run_status/cancel/verify_close are registered and callable
+                # on this surface (see "tools" below), but execution_start
+                # is authority-gated -- MissingAuthorityInterface is still
+                # the only shipped AdmissionAuthority, so it always denies
+                # before any subprocess runs. This is not a live canary.
+                "execution_tools_exposed": True,
+                "execution_authority_gated": True,
                 "auth_fail_closed": True,
                 "trust_loopback": trust_loopback(),
                 "tools": list(CONTROL_PLANE_TOOL_NAMES),

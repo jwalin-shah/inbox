@@ -34,6 +34,7 @@ from mcp_control_plane import (
     TRUST_LOOPBACK_ENV,
     ControlPlane,
     build_control_plane_mcp,
+    make_control_plane,
     make_control_plane_app,
     spawn_flag,
     trust_loopback,
@@ -93,9 +94,39 @@ def _capture_body(**overrides) -> dict:
     return body
 
 
+class SpyOrcaTerminalClient:
+    """Test double: records every call, never shells out to a real orca
+    binary. Asserting zero calls after execution_start is the zero-spawn
+    proof at the canonical MCP surface, not just inside execution_adapter.py."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def create(self, **_kwargs) -> dict:
+        self.calls.append("create")
+        return {"terminal": "term_shouldneverhappen"}
+
+    def show(self, **_kwargs) -> dict:
+        self.calls.append("show")
+        return {}
+
+    def close(self, **_kwargs) -> dict:
+        self.calls.append("close")
+        return {}
+
+    def wait(self, **_kwargs) -> dict:
+        self.calls.append("wait")
+        return {}
+
+
 @pytest.fixture
 def bridge_stub() -> StubBridgeClient:
     return StubBridgeClient()
+
+
+@pytest.fixture
+def orca_spy() -> SpyOrcaTerminalClient:
+    return SpyOrcaTerminalClient()
 
 
 @pytest.fixture
@@ -107,6 +138,20 @@ def plane(tmp_path, bridge_stub) -> ControlPlane:
     )
 
 
+@pytest.fixture
+def plane_with_orca_spy(tmp_path, bridge_stub, orca_spy) -> ControlPlane:
+    """Same ControlPlane construction as `plane`, plus an injected Orca spy
+    -- DI added only so tests can prove zero Orca calls; production callers
+    of make_control_plane/make_control_plane_app get the real, lazily
+    resolved OrcaTerminalClient by default."""
+    return ControlPlane(
+        event_store=EventStore(tmp_path / "events.sqlite3"),
+        approval_store=ApprovalStore(tmp_path / "approvals.sqlite3"),
+        bridge_client=bridge_stub,
+        orca_client=orca_spy,
+    )
+
+
 def test_frozen_tools_are_not_rest_registry_names():
     with pytest.raises(ValueError, match="unknown tool names"):
         include_names(CONTROL_PLANE_TOOL_NAMES)
@@ -114,11 +159,28 @@ def test_frozen_tools_are_not_rest_registry_names():
     assert rest_names.isdisjoint(CONTROL_PLANE_TOOL_NAMES)
 
 
-def test_seven_tools_enumerate(plane):
+def test_fifteen_tools_enumerate(plane):
     mcp = build_control_plane_mcp(plane)
     names = tuple(tool.name for tool in asyncio.run(mcp.list_tools()))
     assert names == CONTROL_PLANE_TOOL_NAMES
-    assert len(names) == 7
+    assert len(names) == 15
+
+
+def test_execution_adapter_tools_are_on_the_canonical_surface(plane):
+    """The five execution-adapter tools are registered on the same
+    ControlPlane MCP surface as the original ten -- not a second server."""
+    mcp = build_control_plane_mcp(plane)
+    names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert {
+        "execution_inspect",
+        "execution_start",
+        "execution_run_status",
+        "execution_cancel",
+        "execution_verify_close",
+    }.issubset(names)
+    # And the pre-existing tools, including execution_status(work_ref) from
+    # the prior slice, are untouched and still present alongside them.
+    assert {"resolve", "capture", "submit_work", "execution_status"}.issubset(names)
 
 
 def test_no_epistemic_mcp_tool(plane):
@@ -479,6 +541,250 @@ def test_cancel_and_verify_do_not_execute(plane):
     assert verified["verifier_executed"] is False
     assert plane.cancel_work("wrk_missing")["result"] == "DENIED"
     assert plane.verify_work("wrk_missing")["result"] == "DENIED"
+
+
+def test_execution_submit_declares_intent_not_execution(plane):
+    submitted = plane.submit_work(_evidence_refs(), confirm=True)
+    work_ref = submitted["work_id"]
+    result = plane.execution_submit(
+        work_ref, execution_mode="dry_run", requested_backend="mac_controller", note="prep"
+    )
+    assert result["result"] == "created"
+    assert result["executed"] is False
+    assert result["execution_claimed"] is False
+    assert result["intent"]["payload"]["work_ref"] == work_ref
+    assert result["intent"]["payload"]["execution_mode"] == "dry_run"
+    assert result["intent"]["payload"]["requested_backend"] == "mac_controller"
+    assert result["intent"]["event_type"] == "execution.intent.v1"
+    assert plane.execution_log == []
+
+
+def test_execution_submit_defaults_backend_to_unspecified(plane):
+    result = plane.execution_submit("wrk_abc123def456", execution_mode="supervised")
+    assert result["result"] == "created"
+    assert result["intent"]["payload"]["requested_backend"] == "unspecified"
+
+
+def test_execution_submit_rejects_unknown_backend_and_mode(plane):
+    unknown_backend = plane.execution_submit(
+        "wrk_abc123def456", execution_mode="dry_run", requested_backend="ssh_shell"
+    )
+    unknown_mode = plane.execution_submit("wrk_abc123def456", execution_mode="autonomous")
+    assert unknown_backend["result"] == "DENIED"
+    assert unknown_backend["reason"] == "requested_backend is not a known backend"
+    assert unknown_backend["executed"] is False
+    assert unknown_mode["result"] == "DENIED"
+    assert unknown_mode["reason"] == "execution_mode is not a bounded mode"
+    assert plane.event_store.count() == 0
+
+
+def test_execution_submit_rejects_bad_work_ref_formats(plane):
+    for bad_ref in ("", "../etc/passwd", "shell:rm -rf", "totally-made-up-id", "wrk_short"):
+        result = plane.execution_submit(bad_ref, execution_mode="dry_run")
+        assert result["result"] == "DENIED"
+        assert "work_ref" in result["reason"]
+    assert plane.event_store.count() == 0
+
+
+def test_execution_submit_rejects_unknown_and_confirm_fields(plane):
+    for kwargs in ({"confirm": True}, {"lease_id": "lease_fake"}, {"stray_field": "x"}):
+        result = plane.execution_submit("wrk_abc123def456", execution_mode="dry_run", **kwargs)
+        assert result["result"] == "DENIED"
+        assert result["executed"] is False
+    assert plane.event_store.count() == 0
+    assert plane.execution_log == []
+
+
+def test_execution_status_reports_no_intent_then_latest_intent(plane):
+    ref = "wrk_abc123def456"
+    empty = plane.execution_status(ref)
+    assert empty["result"] == "ok"
+    assert empty["status"] == "no_intent_recorded"
+    assert empty["intents_recorded"] == 0
+    assert empty["latest_intent"] is None
+    assert empty["executed"] is False
+
+    plane.execution_submit(ref, execution_mode="dry_run")
+    plane.execution_submit(ref, execution_mode="supervised", note="second declaration")
+
+    status = plane.execution_status(ref)
+    assert status["status"] == "intent_recorded"
+    assert status["intents_recorded"] == 2
+    assert status["latest_intent"]["payload"]["execution_mode"] == "supervised"
+    assert status["executed"] is False
+
+
+def test_execution_status_rejects_malformed_ref_and_unknown_field(plane):
+    bad = plane.execution_status("not-a-real-ref")
+    assert bad["result"] == "DENIED"
+    extra = plane.execution_status("wrk_abc123def456", surprise="field")
+    assert extra["result"] == "DENIED"
+    assert extra["reason"] == "unknown_field"
+
+
+def test_execution_events_lists_across_and_within_work_refs(plane):
+    ref_a = "wrk_aaaaaaaaaaaaaaaa"
+    ref_b = "wrk_bbbbbbbbbbbbbbbb"
+    plane.execution_submit(ref_a, execution_mode="dry_run")
+    plane.execution_submit(ref_b, execution_mode="supervised")
+
+    scoped = plane.execution_events(ref_a)
+    assert scoped["result"] == "ok"
+    assert scoped["count"] == 1
+    assert scoped["events"][0]["payload"]["work_ref"] == ref_a
+
+    unscoped = plane.execution_events()
+    assert unscoped["count"] == 2
+    assert {e["payload"]["work_ref"] for e in unscoped["events"]} == {ref_a, ref_b}
+    assert unscoped["executed"] is False
+
+
+def test_execution_intent_survives_across_control_plane_instances(tmp_path, bridge_stub):
+    """Durable means it outlives the process, not just the ControlPlane object."""
+    event_db = tmp_path / "shared_events.sqlite3"
+    approval_db = tmp_path / "shared_approvals.sqlite3"
+    first = ControlPlane(
+        event_store=EventStore(event_db),
+        approval_store=ApprovalStore(approval_db),
+        bridge_client=bridge_stub,
+    )
+    submitted = first.execution_submit("wrk_durable1234567", execution_mode="dry_run")
+    assert submitted["result"] == "created"
+
+    second = ControlPlane(
+        event_store=EventStore(event_db),
+        approval_store=ApprovalStore(approval_db),
+        bridge_client=bridge_stub,
+    )
+    status = second.execution_status("wrk_durable1234567")
+    assert status["status"] == "intent_recorded"
+    assert status["intents_recorded"] == 1
+
+
+def _direct_call_payload(blocks) -> dict:
+    """mcp.call_tool() (no session) returns raw ContentBlocks, not a
+    CallToolResult -- unlike the session-based helper `_tool_payload` above."""
+    return json.loads(blocks[0].text)
+
+
+def test_execution_tools_reach_control_plane_over_mcp(plane):
+    mcp = build_control_plane_mcp(plane)
+
+    async def scenario():
+        submit = await mcp.call_tool(
+            "execution_submit",
+            {"work_ref": "wrk_mcpwired1234567", "execution_mode": "dry_run"},
+        )
+        status = await mcp.call_tool("execution_status", {"work_ref": "wrk_mcpwired1234567"})
+        events = await mcp.call_tool("execution_events", {})
+        return submit, status, events
+
+    submit_result, status_result, events_result = asyncio.run(scenario())
+    submit_payload = _direct_call_payload(submit_result)
+    status_payload = _direct_call_payload(status_result)
+    events_payload = _direct_call_payload(events_result)
+    assert submit_payload["result"] == "created"
+    assert submit_payload["executed"] is False
+    assert status_payload["status"] == "intent_recorded"
+    assert events_payload["count"] == 1
+
+
+def test_execution_adapter_tools_reach_control_plane_over_mcp(plane_with_orca_spy, orca_spy):
+    """The new execution_inspect/start/run_status/cancel/verify_close tools,
+    called the same way as execution_submit/status/events above, actually
+    reach ControlPlane's shared ExecutionAdapter -- and execution_start
+    still denies with zero Orca calls even over the full MCP call path."""
+    mcp = build_control_plane_mcp(plane_with_orca_spy)
+
+    async def scenario():
+        inspect = await mcp.call_tool("execution_inspect", {"work_id": "wrk_abc123def456"})
+        start = await mcp.call_tool(
+            "execution_start",
+            {
+                "work_id": "wrk_abc123def456",
+                "admission_ref": "adm-ref-mcp-001",
+                "idempotency_key": "idem-mcp-001",
+            },
+        )
+        run_status = await mcp.call_tool("execution_run_status", {"run_id": "run_" + "d" * 32})
+        cancel = await mcp.call_tool("execution_cancel", {"run_id": "run_" + "d" * 32})
+        verify = await mcp.call_tool("execution_verify_close", {"run_id": "run_" + "d" * 32})
+        return inspect, start, run_status, cancel, verify
+
+    inspect_r, start_r, status_r, cancel_r, verify_r = asyncio.run(scenario())
+    assert _direct_call_payload(inspect_r)["result"] == "ok"
+    assert _direct_call_payload(start_r)["result"] == "DENIED"
+    assert _direct_call_payload(start_r)["reason"] == "authority_interface_missing"
+    assert _direct_call_payload(status_r)["status"] == "not_found"
+    assert _direct_call_payload(cancel_r)["reason"] == "unknown_run"
+    assert _direct_call_payload(verify_r)["reason"] == "unknown_run"
+    assert orca_spy.calls == []
+
+
+def test_execution_start_denied_by_default_zero_orca_calls(plane_with_orca_spy, orca_spy):
+    """Direct-call form of the zero-spawn proof: MissingAuthorityInterface
+    is still the only shipped AdmissionAuthority on the canonical
+    ControlPlane, so execution_start denies before ever reaching Orca."""
+    result = plane_with_orca_spy.execution_start(
+        "wrk_abc123def456", admission_ref="adm-ref-001", idempotency_key="idem-canonical-001"
+    )
+    assert result["result"] == "DENIED"
+    assert result["reason"] == "authority_interface_missing"
+    assert result["executed"] is False
+    assert orca_spy.calls == []
+
+
+def test_execution_start_replay_and_conflict_reach_canonical_control_plane(plane):
+    """Idempotency semantics (proved at the adapter level in
+    tests/test_execution_adapter.py) also hold through ControlPlane's thin
+    delegation -- not reimplemented, not bypassed."""
+    first = plane.execution_start(
+        "wrk_abc123def456", admission_ref="adm-ref-001", idempotency_key="idem-replay-001"
+    )
+    second = plane.execution_start(
+        "wrk_abc123def456", admission_ref="adm-ref-001", idempotency_key="idem-replay-001"
+    )
+    assert first["result"] == "DENIED"
+    assert second["idempotent_replay"] is True
+
+    conflict = plane.execution_start(
+        "wrk_abc123def456", admission_ref="adm-ref-DIFFERENT", idempotency_key="idem-replay-001"
+    )
+    assert conflict["reason"] == "idempotency_key_conflict"
+
+
+def test_health_advertises_execution_tools_as_authority_gated_not_a_live_canary(monkeypatch):
+    monkeypatch.setenv(CONTROL_PLANE_TOKEN_ENV, "control-secret")
+    app = make_control_plane_app()
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+    assert set(CONTROL_PLANE_TOOL_NAMES).issubset(set(health["tools"]))
+    for name in (
+        "execution_inspect",
+        "execution_start",
+        "execution_run_status",
+        "execution_cancel",
+        "execution_verify_close",
+    ):
+        assert name in health["tools"]
+    assert health["execution_tools_exposed"] is True
+    assert health["execution_authority_gated"] is True
+    # Not a live-canary claim: no grant path exists in this repo today.
+    assert health["execution_enabled"] is False
+
+
+def test_make_control_plane_injects_execution_adapter_dependencies_for_tests(tmp_path, orca_spy):
+    """DI added to make_control_plane only as needed for tests: a caller can
+    inject an ExecutionAdapter, an AdmissionAuthority, or an Orca client
+    double without standing up a second store or a second authority."""
+    plane = make_control_plane(
+        event_db=tmp_path / "events.sqlite3",
+        approval_db=tmp_path / "approvals.sqlite3",
+        orca_client=orca_spy,
+    )
+    assert plane.execution_adapter.orca_client is orca_spy
+    assert plane.execution_adapter.event_store is plane.event_store
+    assert plane.execution_adapter.approval_store is plane.approval_store
 
 
 def test_control_plane_source_cannot_import_spawn_or_subprocess():
