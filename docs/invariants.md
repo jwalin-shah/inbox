@@ -200,6 +200,32 @@ Maps to: `data-quality-oracle.md` (see `docs/oracle-map.md` for mapping rational
 
 **Oracle reference:** `data-quality-oracle.md` — State Machine Consistency (every state transition produces a valid and consistent next state).
 
+### 4.4 Drive Reconciliation Proof Safety
+
+```
+∀proof P: P.read_only ∧ P.mutation_applied = false
+∀proof P: P.status = ZERO_UNIQUE_PROVEN →
+  P.account is explicit ∧ P.source_root_id ≠ P.canonical_root_id ∧
+  P.snapshot.stable ∧ P.counts.unmatched_unique = 0 ∧
+  P.counts.unresolved = 0 ∧ P.proof_digest = sha256(canonical(P.without_digest_and_id))
+∀walk W: traversed(W) ⊆ descendants(W.source_root_id) ∪ descendants(W.canonical_root_id)
+∀shortcut S: encountered(S) → not_followed(S)
+```
+
+**Rationale:** A Drive proof may authorize a later review only when account and
+both roots are explicit, the provider snapshot did not change during the
+read-only inventory, every source object is matched by the canonical relative
+path and metadata comparison, and no unresolved condition remains. A shortcut,
+scope escape, malformed object, or provider mutation is never guessed through.
+
+**Enforcement:** `drive_reconciliation.py` uses only Drive metadata reads and
+returns `UNRESOLVED` for uncertainty. `inbox_server.py` requires the explicit
+account before resolving the account-specific Drive service. No cleanup or
+deletion capability is part of this invariant.
+
+**Oracle reference:** `api-design-oracle.md` — Input Validation and
+`saltzer-schroeder-oracle.md` — Fail-Safe Defaults and Least Privilege.
+
 ---
 
 ## 5. TUI Layer

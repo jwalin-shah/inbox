@@ -30,6 +30,7 @@ from pydantic import BaseModel, StrictBool
 import ambient_notes
 import egress_audit
 import google_account_resolution as _gacct
+from approval_store import ApprovalStore
 from capability_inventory import build_capability_inventory
 from capture_health import CaptureHealthRecord, CaptureHealthStore, capture_summary, utc_now_iso
 from connector_registry import (
@@ -38,6 +39,12 @@ from connector_registry import (
     merge_connector_search_results,
     partition_search_sources,
     search_connectors,
+)
+from drive_reconciliation import (
+    ReconciliationInputError,
+    ReconciliationRootError,
+    reconcile_drive_roots,
+    validate_reconciliation_scope,
 )
 from gmail_triage import (
     KIND_PREFIX as _KIND_PREFIX,
@@ -74,7 +81,6 @@ from memory_store import MemoryStore
 from message_index_store import MessageIndexStore
 from message_sync import bootstrap as index_bootstrap_sync
 from message_sync import incremental as index_incremental_sync
-from approval_store import ApprovalStore
 from scheduler import SchedulerStore
 from service_models import ApprovalGateDecision, ApprovalLease
 from services import (
@@ -232,6 +238,7 @@ from services import (
 from services import (
     autocomplete as services_autocomplete,
 )
+from source_registry import list_source_definitions
 
 # Test-only: keeps _extract_* / _rank_thread imports live for ruff.
 _gmail_triage_reexports = (
@@ -1143,6 +1150,16 @@ class DriveCreateFolderRequest(BaseModel):
     name: str
     parent_id: str = ""
     account: str = ""
+
+
+class DriveReconciliationProofRequest(BaseModel):
+    """Explicit scope for the read-only Drive proof operation."""
+
+    model_config = {"extra": "forbid"}
+
+    account: str
+    source_root_id: str
+    canonical_root_id: str
 
 
 class SheetTabOut(BaseModel):
@@ -2918,6 +2935,15 @@ async def get_capture_health():
     )
 
 
+@app.get("/sources/registry", response_model=dict[str, Any])
+async def get_source_registry():
+    """Return static source authority metadata without probing providers."""
+    return {
+        "registry_version": "lifeops.source_registry.v1",
+        "sources": list_source_definitions(),
+    }
+
+
 # ── Egress Audit ─────────────────────────────────────────────────────────────
 
 
@@ -4394,6 +4420,29 @@ async def list_github_pulls(repo: str | None = None):
 
 
 # ── Google Drive ─────────────────────────────────────────────────────────────
+
+
+@app.post("/drive/reconciliation/proof")
+async def create_drive_reconciliation_proof(req: DriveReconciliationProofRequest):
+    """Create a deterministic, read-only proof for two explicit Drive roots."""
+    try:
+        account, source_root_id, canonical_root_id = validate_reconciliation_scope(
+            req.account, req.source_root_id, req.canonical_root_id
+        )
+        resolved_account, drive_service = _get_drive_service_for_account(account)
+        if resolved_account != account:
+            raise ReconciliationInputError("Drive service resolution did not preserve the requested account")
+        return await asyncio.to_thread(
+            reconcile_drive_roots,
+            drive_service,
+            account=account,
+            source_root_id=source_root_id,
+            canonical_root_id=canonical_root_id,
+        )
+    except ReconciliationInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ReconciliationRootError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/drive/files", response_model=list[DriveFileOut])

@@ -8,6 +8,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 - **[README.md](README.md)** — Overview, features, quick start, key bindings
 - **[CLAUDE.md](CLAUDE.md)** — Detailed project context, architecture, all systems
 - **[docs/PERSONAL_DATA_GATEWAY_V0.md](docs/PERSONAL_DATA_GATEWAY_V0.md)** — Canonical local Inbox API/MCP gateway contract for personal data
+- **[docs/DRIVE_RECONCILIATION_PROOF_V1.md](docs/DRIVE_RECONCILIATION_PROOF_V1.md)** — Read-only, explicit-account Drive duplicate proof contract
 - **[CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md)** — Connector architecture direction, normalization plan, phased execution
 
 ## 🎯 Google Sheets (New!)
@@ -28,6 +29,7 @@ Complete guide to inbox documentation. Start here to find what you need.
   - Gmail: See CLAUDE.md
   - Calendar: See CLAUDE.md
   - Drive: See CLAUDE.md
+  - Drive reconciliation proof: [docs/DRIVE_RECONCILIATION_PROOF_V1.md](docs/DRIVE_RECONCILIATION_PROOF_V1.md)
 
 **Multi-account?**
 - See [SHEETS.md](SHEETS.md#multi-account) for Sheets example (applies to all)
@@ -67,6 +69,7 @@ Complete guide to inbox documentation. Start here to find what you need.
 | [CLAUDE.md](CLAUDE.md) | Complete project context, architecture, all endpoints, all systems |
 | [docs/PERSONAL_DATA_GATEWAY_V0.md](docs/PERSONAL_DATA_GATEWAY_V0.md) | Canonical personal-data gateway API/MCP parity and dry-run write proposal flow |
 | [docs/TESTING_FOR_AGENTS.md](docs/TESTING_FOR_AGENTS.md) | Safe deterministic validation loop and test marker guidance |
+| [docs/DRIVE_RECONCILIATION_PROOF_V1.md](docs/DRIVE_RECONCILIATION_PROOF_V1.md) | Explicit-account, read-only Drive reconciliation proof contract |
 | [CONNECTOR_ROADMAP.md](CONNECTOR_ROADMAP.md) | Connector strategy, phased implementation, source-of-truth rules |
 | [DOCS_INDEX.md](DOCS_INDEX.md) | This file — documentation navigation |
 
