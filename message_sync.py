@@ -5,10 +5,13 @@ import hashlib
 import json
 import sqlite3
 import sys
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
+
+from googleapiclient.errors import HttpError
 
 from message_index_store import IndexedItem, MessageIndexStore
 from services import (
@@ -25,10 +28,49 @@ GMAIL_BOOTSTRAP_BATCH_SIZE = 250
 GMAIL_INCREMENTAL_BATCH_SIZE = 100
 GMAIL_HISTORY_CURSOR = "gmailHistoryId"
 GMAIL_TIMESTAMP_CURSOR = "internalDateMs"
+GMAIL_API_UNIT_COSTS = {
+    "users.history.list": 2,
+    "users.messages.get": 20,
+    "users.messages.list": 5,
+    "users.getProfile": 1,
+}
 IMESSAGE_PROGRESS_EVERY = 250
 WHATSAPP_PROGRESS_EVERY = 250
 LINKEDIN_PROGRESS_EVERY = 250
 _ATTACHMENT_TEXT = "(attachment)"
+
+
+class GmailHistoryCursorExpired(Exception):
+    """history.list returned 404 — startHistoryId is too old for incremental replay."""
+
+
+@dataclass
+class _GmailApiUnitMeter:
+    """Accumulate Gmail API quota units attributable by method (account is sync-state key)."""
+
+    account: str
+    units: dict[str, int] = field(default_factory=dict)
+
+    def record(self, method: str, *, calls: int = 1) -> None:
+        cost = GMAIL_API_UNIT_COSTS.get(method, 0) * calls
+        if cost:
+            self.units[method] = self.units.get(method, 0) + cost
+
+    def as_metadata(self) -> dict[str, object]:
+        return {
+            "api_units_account": self.account,
+            "api_units": dict(sorted(self.units.items())),
+            "api_units_total": sum(self.units.values()),
+        }
+
+
+@dataclass
+class _HistoryMessageChange:
+    message_id: str
+    message_added: bool = False
+    labels_added: set[str] = field(default_factory=set)
+    labels_removed: set[str] = field(default_factory=set)
+    snapshot_label_ids: list[str] | None = None
 CLI_MODES = ("bootstrap", "incremental", "rebuild", "summary")
 SyncScope = tuple[str, str]
 
@@ -103,20 +145,36 @@ def _gmail_item(account: str, message: dict[str, Any]) -> IndexedItem:
 
 
 def _json(value: object) -> str:
-    import json
-
     return json.dumps(value, sort_keys=True)
 
 
-def _fetch_gmail_full_message(service: Any, message_id: str) -> dict[str, Any]:
+def _http_error_status(exc: HttpError) -> int | None:
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_gmail_full_message(
+    service: Any, message_id: str, *, meter: _GmailApiUnitMeter | None = None
+) -> dict[str, Any]:
+    if meter is not None:
+        meter.record("users.messages.get")
     return service.users().messages().get(userId="me", id=message_id, format="full").execute()
 
 
-def _fetch_gmail_profile_history_id(service: Any) -> str:
+def _fetch_gmail_profile_history_id(
+    service: Any, *, meter: _GmailApiUnitMeter | None = None
+) -> str:
     try:
         request = service.users().getProfile(userId="me")
     except AttributeError:
         return ""
+    if meter is not None:
+        meter.record("users.getProfile")
     profile = request.execute()
     return str(profile.get("historyId") or "")
 
@@ -161,13 +219,17 @@ def _gmail_timestamp_metadata(
     count: int,
     checkpoint: int,
     fallback_reason: str,
+    api_units: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    metadata: dict[str, object] = {
         "messages_processed": count,
         "cursor_mode": "timestamp_fallback",
         "fallback_reason": fallback_reason,
         "timestamp_checkpoint_ms": str(checkpoint),
     }
+    if api_units:
+        metadata.update(api_units)
+    return metadata
 
 
 def _gmail_history_metadata(
@@ -175,70 +237,90 @@ def _gmail_history_metadata(
     count: int,
     history_id: str,
     timestamp_checkpoint: int,
+    api_units: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    metadata: dict[str, object] = {
         "messages_processed": count,
         "cursor_mode": "history",
         "history_id": history_id,
         "timestamp_checkpoint_ms": str(timestamp_checkpoint),
     }
+    if api_units:
+        metadata.update(api_units)
+    return metadata
 
 
-def _gmail_history_changes(
-    history_entries: list[dict[str, Any]],
-) -> tuple[list[str], dict[str, list[tuple[str, list[str]]]]]:
-    message_added_ids: list[str] = []
-    added_seen: set[str] = set()
-    label_changes: dict[str, list[tuple[str, list[str]]]] = {}
+def _history_message_changes(history_entries: list[dict[str, Any]]) -> list[_HistoryMessageChange]:
+    changes: dict[str, _HistoryMessageChange] = {}
+    order: list[str] = []
+
+    def _change_for(message_id: str) -> _HistoryMessageChange:
+        if message_id not in changes:
+            changes[message_id] = _HistoryMessageChange(message_id=message_id)
+            order.append(message_id)
+        return changes[message_id]
 
     for entry in history_entries:
-        for change in entry.get("messagesAdded", []):
-            message = change.get("message") or {}
+        for added in entry.get("messagesAdded", []):
+            message = added.get("message") or {}
             message_id = str(message.get("id") or "")
-            if message_id and message_id not in added_seen:
-                added_seen.add(message_id)
-                message_added_ids.append(message_id)
-
-        for key, action in (("labelsAdded", "add"), ("labelsRemoved", "remove")):
-            for change in entry.get(key, []):
-                message = change.get("message") or {}
+            if not message_id:
+                continue
+            change = _change_for(message_id)
+            change.message_added = True
+            if "labelIds" in message:
+                change.snapshot_label_ids = [str(label) for label in message.get("labelIds") or []]
+        for key, target in (("labelsAdded", "labels_added"), ("labelsRemoved", "labels_removed")):
+            for label_change in entry.get(key, []):
+                message = label_change.get("message") or {}
                 message_id = str(message.get("id") or "")
                 if not message_id:
                     continue
-                labels = [str(label) for label in change.get("labelIds", []) if label]
-                if labels:
-                    label_changes.setdefault(message_id, []).append((action, labels))
+                change = _change_for(message_id)
+                getattr(change, target).update(
+                    str(label) for label in label_change.get("labelIds") or []
+                )
+                if "labelIds" in message:
+                    change.snapshot_label_ids = [
+                        str(label) for label in message.get("labelIds") or []
+                    ]
+    return [changes[message_id] for message_id in order]
 
-    return message_added_ids, label_changes
+
+def _history_message_ids(history_entries: list[dict[str, Any]]) -> list[str]:
+    return [change.message_id for change in _history_message_changes(history_entries)]
 
 
-def _apply_cached_gmail_label_changes(
-    store: MessageIndexStore,
-    *,
-    account: str,
-    message_id: str,
-    changes: list[tuple[str, list[str]]],
-) -> bool:
-    item = store.get_item(source="gmail", account=account, external_id=message_id)
-    if not item or int(item.get("is_deleted") or 0):
-        return False
-
-    try:
-        labels = {str(label) for label in json.loads(str(item.get("labels_json") or "[]"))}
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-
-    for action, changed_labels in changes:
-        if action == "add":
-            labels.update(changed_labels)
-        else:
-            labels.difference_update(changed_labels)
-
-    return store.update_item_labels(
-        source="gmail",
-        account=account,
-        external_id=message_id,
-        labels=sorted(labels),
+def _apply_cached_label_change(
+    item: IndexedItem, change: _HistoryMessageChange
+) -> IndexedItem:
+    if change.snapshot_label_ids is not None:
+        labels = list(change.snapshot_label_ids)
+    else:
+        labels = [str(label) for label in json.loads(item.labels_json or "[]")]
+        labels = [label for label in labels if label not in change.labels_removed]
+        for label in change.labels_added:
+            if label not in labels:
+                labels.append(label)
+    return IndexedItem(
+        source=item.source,
+        account=item.account,
+        external_id=item.external_id,
+        thread_id=item.thread_id,
+        kind=item.kind,
+        created_at=item.created_at,
+        updated_at=datetime.now(UTC).isoformat(),
+        ingested_at=item.ingested_at,
+        sender=item.sender,
+        recipients_json=item.recipients_json,
+        subject=item.subject,
+        snippet=item.snippet,
+        body_text=item.body_text,
+        body_hash=item.body_hash,
+        labels_json=_json(labels),
+        raw_pointer=item.raw_pointer,
+        is_deleted=item.is_deleted,
+        is_read=0 if "UNREAD" in labels else 1,
     )
 
 
@@ -344,8 +426,8 @@ def _sync_gmail_incremental_history(
 ) -> int:
     page_token: str | None = None
     latest_history_id = history_id
-    message_added_ids: list[str] = []
-    label_changes: dict[str, list[tuple[str, list[str]]]] = {}
+    pending_changes: list[_HistoryMessageChange] = []
+    meter = _GmailApiUnitMeter(account=account)
     store.mark_sync_started(
         source="gmail",
         account=account,
@@ -355,60 +437,74 @@ def _sync_gmail_incremental_history(
             count=0,
             history_id=history_id,
             timestamp_checkpoint=timestamp_checkpoint,
+            api_units=meter.as_metadata(),
         ),
     )
     try:
         while True:
-            response = history_api.list(
-                userId="me",
-                startHistoryId=history_id,
-                pageToken=page_token,
-                historyTypes=["messageAdded", "labelAdded", "labelRemoved"],
-            ).execute()
+            try:
+                response = history_api.list(
+                    userId="me",
+                    startHistoryId=history_id,
+                    pageToken=page_token,
+                    historyTypes=["messageAdded", "labelAdded", "labelRemoved"],
+                ).execute()
+            except HttpError as exc:
+                if _http_error_status(exc) == 404:
+                    raise GmailHistoryCursorExpired(
+                        f"history cursor expired for {account}: startHistoryId={history_id}"
+                    ) from exc
+                raise
+            meter.record("users.history.list")
             latest_history_id = str(response.get("historyId") or latest_history_id)
-            page_added_ids, page_label_changes = _gmail_history_changes(
-                response.get("history", [])
-            )
-            message_added_ids.extend(page_added_ids)
-            for message_id, changes in page_label_changes.items():
-                label_changes.setdefault(message_id, []).extend(changes)
+            pending_changes.extend(_history_message_changes(response.get("history", [])))
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
 
-        count = 0
-        fetched: set[str] = set()
-        for message_id in message_added_ids:
-            if message_id in fetched:
+        # Merge duplicate message ids across pages while preserving first-seen order.
+        merged: dict[str, _HistoryMessageChange] = {}
+        order: list[str] = []
+        for change in pending_changes:
+            existing = merged.get(change.message_id)
+            if existing is None:
+                merged[change.message_id] = change
+                order.append(change.message_id)
                 continue
-            fetched.add(message_id)
-            full_message = _fetch_gmail_full_message(service, message_id)
-            timestamp_checkpoint = max(
-                timestamp_checkpoint, int(full_message.get("internalDate", 0) or 0)
-            )
-            store.upsert_item(_gmail_item(account, full_message))
-            count += 1
+            existing.message_added = existing.message_added or change.message_added
+            existing.labels_added.update(change.labels_added)
+            existing.labels_removed.update(change.labels_removed)
+            if change.snapshot_label_ids is not None:
+                existing.snapshot_label_ids = change.snapshot_label_ids
 
-        for message_id, changes in label_changes.items():
-            if message_id in fetched:
-                continue
-            if _apply_cached_gmail_label_changes(
-                store,
-                account=account,
-                message_id=message_id,
-                changes=changes,
-            ):
+        count = 0
+        for message_id in order:
+            change = merged[message_id]
+            cached = store.get_item(source="gmail", account=account, external_id=message_id)
+            label_only = (
+                not change.message_added
+                and (change.labels_added or change.labels_removed or change.snapshot_label_ids)
+            )
+            if label_only and cached is not None:
+                store.upsert_item(_apply_cached_label_change(cached, change))
                 count += 1
                 continue
 
-            fetched.add(message_id)
-            full_message = _fetch_gmail_full_message(service, message_id)
+            try:
+                full_message = _fetch_gmail_full_message(service, message_id, meter=meter)
+            except HttpError as exc:
+                if _http_error_status(exc) != 404:
+                    raise
+                store.mark_item_deleted(source="gmail", account=account, external_id=message_id)
+                count += 1
+                continue
             timestamp_checkpoint = max(
                 timestamp_checkpoint, int(full_message.get("internalDate", 0) or 0)
             )
             store.upsert_item(_gmail_item(account, full_message))
             count += 1
 
+        # Cursor advances only after every local application above succeeded.
         store.set_sync_state(
             source="gmail",
             account=account,
@@ -420,9 +516,13 @@ def _sync_gmail_incremental_history(
                 count=count,
                 history_id=latest_history_id,
                 timestamp_checkpoint=timestamp_checkpoint,
+                api_units=meter.as_metadata(),
             ),
         )
         return count
+    except GmailHistoryCursorExpired:
+        # Caller performs bounded timestamp recovery; do not poison status here.
+        raise
     except Exception as exc:
         store.record_sync_error(source="gmail", account=account, error=str(exc))
         raise
@@ -440,6 +540,7 @@ def _sync_gmail_incremental_timestamp(
     newest_seen = checkpoint
     count = 0
     stop = False
+    meter = _GmailApiUnitMeter(account=account)
     store.mark_sync_started(
         source="gmail",
         account=account,
@@ -449,6 +550,7 @@ def _sync_gmail_incremental_timestamp(
             count=0,
             checkpoint=checkpoint,
             fallback_reason=fallback_reason,
+            api_units=meter.as_metadata(),
         ),
     )
     try:
@@ -464,11 +566,12 @@ def _sync_gmail_incremental_timestamp(
                 )
                 .execute()
             )
+            meter.record("users.messages.list")
             messages = response.get("messages", [])
             if not messages:
                 break
             for stub in messages:
-                full_message = _fetch_gmail_full_message(service, stub["id"])
+                full_message = _fetch_gmail_full_message(service, stub["id"], meter=meter)
                 internal_date = int(full_message.get("internalDate", 0) or 0)
                 if internal_date <= checkpoint:
                     stop = True
@@ -485,6 +588,7 @@ def _sync_gmail_incremental_timestamp(
                     count=count,
                     checkpoint=newest_seen,
                     fallback_reason=fallback_reason,
+                    api_units=meter.as_metadata(),
                 ),
             )
             page_token = response.get("nextPageToken")
@@ -504,6 +608,7 @@ def _sync_gmail_incremental_timestamp(
             count=count,
             checkpoint=newest_seen,
             fallback_reason=fallback_reason,
+            api_units=meter.as_metadata(),
         ),
     )
     return count
@@ -519,14 +624,24 @@ def sync_gmail_incremental(store: MessageIndexStore) -> dict[str, int]:
         history_id = _gmail_history_cursor(state)
         history_api = _gmail_history_api(service) if history_id else None
         if history_id and history_api is not None:
-            stats[account] = _sync_gmail_incremental_history(
-                store,
-                account=account,
-                service=service,
-                history_api=history_api,
-                history_id=history_id,
-                timestamp_checkpoint=timestamp_checkpoint,
-            )
+            try:
+                stats[account] = _sync_gmail_incremental_history(
+                    store,
+                    account=account,
+                    service=service,
+                    history_api=history_api,
+                    history_id=history_id,
+                    timestamp_checkpoint=timestamp_checkpoint,
+                )
+            except GmailHistoryCursorExpired:
+                # Bounded recovery: one timestamp fallback classified as expired cursor.
+                stats[account] = _sync_gmail_incremental_timestamp(
+                    store,
+                    account=account,
+                    service=service,
+                    checkpoint=timestamp_checkpoint,
+                    fallback_reason="expired_history_cursor",
+                )
         else:
             fallback_reason = "history_api_unavailable" if history_id else "missing_history_cursor"
             stats[account] = _sync_gmail_incremental_timestamp(
