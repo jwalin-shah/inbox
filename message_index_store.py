@@ -236,48 +236,52 @@ class MessageIndexStore:
             )
         return int(cur.rowcount or 0) == 1
 
-    def get_item(
-        self,
-        *,
-        source: str,
-        account: str,
-        external_id: str,
-    ) -> dict[str, Any] | None:
+    def get_item(self, *, source: str, account: str, external_id: str) -> IndexedItem | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM items WHERE source = ? AND account = ? AND external_id = ?",
+                """
+                SELECT source, account, external_id, thread_id, kind, created_at, updated_at,
+                       ingested_at, sender, recipients_json, subject, snippet, body_text,
+                       body_hash, labels_json, raw_pointer, is_deleted, is_read
+                FROM items
+                WHERE source = ? AND account = ? AND external_id = ?
+                """,
                 (source, account, external_id),
             ).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        return IndexedItem(
+            source=str(row["source"]),
+            account=str(row["account"]),
+            external_id=str(row["external_id"]),
+            thread_id=str(row["thread_id"]),
+            kind=str(row["kind"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            ingested_at=str(row["ingested_at"]),
+            sender=str(row["sender"]),
+            recipients_json=str(row["recipients_json"]),
+            subject=str(row["subject"]),
+            snippet=str(row["snippet"]),
+            body_text=str(row["body_text"]),
+            body_hash=str(row["body_hash"]),
+            labels_json=str(row["labels_json"]),
+            raw_pointer=str(row["raw_pointer"]),
+            is_deleted=int(row["is_deleted"] or 0),
+            is_read=int(row["is_read"] or 0),
+        )
 
-    def update_item_labels(
-        self,
-        *,
-        source: str,
-        account: str,
-        external_id: str,
-        labels: list[str],
-    ) -> bool:
-        now = _utcnow()
-        normalized_labels = sorted(set(labels))
+    def mark_item_deleted(self, *, source: str, account: str, external_id: str) -> bool:
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 UPDATE items
-                SET labels_json = ?, is_read = ?, updated_at = ?, ingested_at = ?
-                WHERE source = ? AND account = ? AND external_id = ? AND is_deleted = 0
+                SET is_deleted = 1, updated_at = ?
+                WHERE source = ? AND account = ? AND external_id = ?
                 """,
-                (
-                    _json_dumps(normalized_labels),
-                    0 if "UNREAD" in normalized_labels else 1,
-                    now,
-                    now,
-                    source,
-                    account,
-                    external_id,
-                ),
+                (_utcnow(), source, account, external_id),
             )
-        return int(cur.rowcount or 0) == 1
+        return int(cur.rowcount or 0) > 0
 
     def set_sync_state(
         self,
