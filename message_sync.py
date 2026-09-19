@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -183,18 +184,62 @@ def _gmail_history_metadata(
     }
 
 
-def _history_message_ids(history_entries: list[dict[str, Any]]) -> list[str]:
-    seen: set[str] = set()
-    message_ids: list[str] = []
+def _gmail_history_changes(
+    history_entries: list[dict[str, Any]],
+) -> tuple[list[str], dict[str, list[tuple[str, list[str]]]]]:
+    message_added_ids: list[str] = []
+    added_seen: set[str] = set()
+    label_changes: dict[str, list[tuple[str, list[str]]]] = {}
+
     for entry in history_entries:
-        for key in ("messagesAdded", "labelsAdded", "labelsRemoved"):
+        for change in entry.get("messagesAdded", []):
+            message = change.get("message") or {}
+            message_id = str(message.get("id") or "")
+            if message_id and message_id not in added_seen:
+                added_seen.add(message_id)
+                message_added_ids.append(message_id)
+
+        for key, action in (("labelsAdded", "add"), ("labelsRemoved", "remove")):
             for change in entry.get(key, []):
                 message = change.get("message") or {}
                 message_id = str(message.get("id") or "")
-                if message_id and message_id not in seen:
-                    seen.add(message_id)
-                    message_ids.append(message_id)
-    return message_ids
+                if not message_id:
+                    continue
+                labels = [str(label) for label in change.get("labelIds", []) if label]
+                if labels:
+                    label_changes.setdefault(message_id, []).append((action, labels))
+
+    return message_added_ids, label_changes
+
+
+def _apply_cached_gmail_label_changes(
+    store: MessageIndexStore,
+    *,
+    account: str,
+    message_id: str,
+    changes: list[tuple[str, list[str]]],
+) -> bool:
+    item = store.get_item(source="gmail", account=account, external_id=message_id)
+    if not item or int(item.get("is_deleted") or 0):
+        return False
+
+    try:
+        labels = {str(label) for label in json.loads(str(item.get("labels_json") or "[]"))}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+    for action, changed_labels in changes:
+        if action == "add":
+            labels.update(changed_labels)
+        else:
+            labels.difference_update(changed_labels)
+
+    return store.update_item_labels(
+        source="gmail",
+        account=account,
+        external_id=message_id,
+        labels=sorted(labels),
+    )
 
 
 def sync_gmail_bootstrap(store: MessageIndexStore) -> dict[str, int]:
@@ -299,7 +344,8 @@ def _sync_gmail_incremental_history(
 ) -> int:
     page_token: str | None = None
     latest_history_id = history_id
-    changed_message_ids: list[str] = []
+    message_added_ids: list[str] = []
+    label_changes: dict[str, list[tuple[str, list[str]]]] = {}
     store.mark_sync_started(
         source="gmail",
         account=account,
@@ -320,17 +366,42 @@ def _sync_gmail_incremental_history(
                 historyTypes=["messageAdded", "labelAdded", "labelRemoved"],
             ).execute()
             latest_history_id = str(response.get("historyId") or latest_history_id)
-            changed_message_ids.extend(_history_message_ids(response.get("history", [])))
+            page_added_ids, page_label_changes = _gmail_history_changes(
+                response.get("history", [])
+            )
+            message_added_ids.extend(page_added_ids)
+            for message_id, changes in page_label_changes.items():
+                label_changes.setdefault(message_id, []).extend(changes)
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
 
         count = 0
-        seen: set[str] = set()
-        for message_id in changed_message_ids:
-            if message_id in seen:
+        fetched: set[str] = set()
+        for message_id in message_added_ids:
+            if message_id in fetched:
                 continue
-            seen.add(message_id)
+            fetched.add(message_id)
+            full_message = _fetch_gmail_full_message(service, message_id)
+            timestamp_checkpoint = max(
+                timestamp_checkpoint, int(full_message.get("internalDate", 0) or 0)
+            )
+            store.upsert_item(_gmail_item(account, full_message))
+            count += 1
+
+        for message_id, changes in label_changes.items():
+            if message_id in fetched:
+                continue
+            if _apply_cached_gmail_label_changes(
+                store,
+                account=account,
+                message_id=message_id,
+                changes=changes,
+            ):
+                count += 1
+                continue
+
+            fetched.add(message_id)
             full_message = _fetch_gmail_full_message(service, message_id)
             timestamp_checkpoint = max(
                 timestamp_checkpoint, int(full_message.get("internalDate", 0) or 0)
