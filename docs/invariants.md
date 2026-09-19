@@ -246,7 +246,21 @@ Maps to: `data-quality-oracle.md` (see `docs/oracle-map.md` for mapping rational
 
 **Oracle reference:** `data-quality-oracle.md` — Idempotent Sync (re-running sync produces the same result as running it once).
 
-### 4.3 Approval Store Consistency
+### 4.3 Gmail History Delta Locality
+
+```
+∀gmail_history_event:
+  cached(message) ∧ label_only(event)
+  → provider_full_fetches(message, event) = 0
+```
+
+**Rationale:** Gmail message content is immutable after creation while labels and read state can change. Re-fetching full message bodies for cached label-only history events wastes provider quota and can turn harmless mailbox churn into a rate-limit failure.
+
+**Enforcement:** `message_sync.py` separates `messageAdded` from label-only history. New or uncached messages may perform one full fetch; cached label changes are applied to the account-scoped local index. The history cursor advances only after all local applications succeed.
+
+**Oracle reference:** `data-quality-oracle.md` — Incremental materialization should reuse authoritative cached immutable data and apply source deltas idempotently.
+
+### 4.4 Approval Store Consistency
 
 ```
 ∀approval_store_operation: (state before → operation → state after) is consistent
@@ -372,7 +386,8 @@ Maps to: `saltzer-schroeder-oracle.md`.
 | 3.5     | Control-plane Streamable HTTP lifecycle | P0 | Yes | High |
 | 4.1     | Unique message ID | P0 | No | High |
 | 4.2     | No sync duplicates | P1 | No | High |
-| 4.3     | Approval store consistency | P0 | No | High |
+| 4.3     | Gmail history delta locality | P1 | Yes | High |
+| 4.4     | Approval store consistency | P0 | No | High |
 | 5.1     | Non-blocking TUI | P1 | No | Medium |
 | 5.2     | Undo capability | P2 | No | Low |
 | 6.1     | Task state machine | P1 | No | Low |
