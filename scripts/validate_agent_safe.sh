@@ -81,7 +81,14 @@ if missing:
 PY
 
 run_uv "gmail delta changed-file ruff" ruff check --no-cache message_sync.py message_index_store.py tests/test_message_sync.py tests/test_message_index_store.py
-run_uv "gmail delta focused pytest" pytest tests/test_message_sync.py tests/test_message_index_store.py -q -o addopts=
+run_uv "gmail delta focused pytest" pytest -q -o addopts= \
+  tests/test_message_sync.py::test_sync_gmail_incremental_uses_history_for_new_and_changed_messages \
+  tests/test_message_sync.py::test_sync_gmail_incremental_history_dedup_skips_duplicate_message_ids \
+  tests/test_message_sync.py::test_sync_gmail_incremental_history_records_error_and_raises \
+  tests/test_message_sync.py::test_sync_gmail_incremental_history_applies_cached_labels_without_full_fetch \
+  tests/test_message_sync.py::test_sync_gmail_incremental_history_fetches_unknown_label_message_once \
+  tests/test_message_sync.py::test_sync_gmail_incremental_history_does_not_advance_cursor_on_local_apply_failure \
+  tests/test_message_index_store.py
 
 run_uv "ruff check" ruff check --no-cache .
 run_uv "bandit scan" bandit -c pyproject.toml -r . -x .venv,tests,.factory,.claude -q
