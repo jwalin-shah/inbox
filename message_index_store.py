@@ -236,6 +236,49 @@ class MessageIndexStore:
             )
         return int(cur.rowcount or 0) == 1
 
+    def get_item(
+        self,
+        *,
+        source: str,
+        account: str,
+        external_id: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM items WHERE source = ? AND account = ? AND external_id = ?",
+                (source, account, external_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_item_labels(
+        self,
+        *,
+        source: str,
+        account: str,
+        external_id: str,
+        labels: list[str],
+    ) -> bool:
+        now = _utcnow()
+        normalized_labels = sorted(set(labels))
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE items
+                SET labels_json = ?, is_read = ?, updated_at = ?, ingested_at = ?
+                WHERE source = ? AND account = ? AND external_id = ? AND is_deleted = 0
+                """,
+                (
+                    _json_dumps(normalized_labels),
+                    0 if "UNREAD" in normalized_labels else 1,
+                    now,
+                    now,
+                    source,
+                    account,
+                    external_id,
+                ),
+            )
+        return int(cur.rowcount or 0) == 1
+
     def set_sync_state(
         self,
         *,
