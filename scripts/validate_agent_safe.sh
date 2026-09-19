@@ -80,6 +80,9 @@ if missing:
     sys.exit(86)
 PY
 
+run_uv "gmail delta changed-file ruff" ruff check --no-cache message_sync.py message_index_store.py tests/test_message_sync.py tests/test_message_index_store.py
+run_uv "gmail delta focused pytest" pytest tests/test_message_sync.py tests/test_message_index_store.py -q -o addopts=
+
 run_uv "ruff check" ruff check --no-cache .
 run_uv "bandit scan" bandit -c pyproject.toml -r . -x .venv,tests,.factory,.claude -q
 run_uv "message sync CLI smoke" python message_sync.py --smoke
