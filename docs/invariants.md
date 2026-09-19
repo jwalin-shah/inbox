@@ -246,21 +246,25 @@ Maps to: `data-quality-oracle.md` (see `docs/oracle-map.md` for mapping rational
 
 **Oracle reference:** `data-quality-oracle.md` — Idempotent Sync (re-running sync produces the same result as running it once).
 
-### 4.3 Gmail History Delta Locality
+### 4.2b Gmail History Cursor Atomicity & Quota
 
 ```
-∀gmail_history_event:
-  cached(message) ∧ label_only(event)
-  → provider_full_fetches(message, event) = 0
+∀history_sync:
+  (label_only ∧ cached) → messages.get_count = 0
+  ∧ (messageAdded ∨ ¬cached) → messages.get_count = 1
+  ∧ (messages.get = 404) → tombstone ∧ continue ∧ ¬reset(cursor)
+  ∧ (history.list = 404) → classify(expired_history_cursor) ∧ bounded_timestamp_recovery
+  ∧ advance(cursor) ⟺ all_local_applications_succeeded
+  ∧ api_units[account][method] = Σ quota_cost(call)
 ```
 
-**Rationale:** Gmail message content is immutable after creation while labels and read state can change. Re-fetching full message bodies for cached label-only history events wastes provider quota and can turn harmless mailbox churn into a rate-limit failure.
+**Rationale:** History incremental sync must avoid full fetches for label-only updates on cached messages, tombstone per-message 404s without poisoning the cursor, treat history.list 404 as an expired cursor requiring one bounded timestamp fallback, advance the history cursor only after every local application succeeds, and record Gmail API quota units attributable by account/method.
 
-**Enforcement:** `message_sync.py` separates `messageAdded` from label-only history. New or uncached messages may perform one full fetch; cached label changes are applied to the account-scoped local index. The history cursor advances only after all local applications succeed.
+**Enforcement:** `message_sync._sync_gmail_incremental_history` + `sync_gmail_incremental` recovery path; covered by focused tests in `tests/test_message_sync.py`.
 
-**Oracle reference:** `data-quality-oracle.md` — Incremental materialization should reuse authoritative cached immutable data and apply source deltas idempotently.
+**Oracle reference:** `data-quality-oracle.md` — Idempotent Sync / checkpoint monotonicity.
 
-### 4.4 Approval Store Consistency
+### 4.3 Approval Store Consistency
 
 ```
 ∀approval_store_operation: (state before → operation → state after) is consistent
@@ -386,8 +390,7 @@ Maps to: `saltzer-schroeder-oracle.md`.
 | 3.5     | Control-plane Streamable HTTP lifecycle | P0 | Yes | High |
 | 4.1     | Unique message ID | P0 | No | High |
 | 4.2     | No sync duplicates | P1 | No | High |
-| 4.3     | Gmail history delta locality | P1 | Yes | High |
-| 4.4     | Approval store consistency | P0 | No | High |
+| 4.3     | Approval store consistency | P0 | No | High |
 | 5.1     | Non-blocking TUI | P1 | No | Medium |
 | 5.2     | Undo capability | P2 | No | Low |
 | 6.1     | Task state machine | P1 | No | Low |
