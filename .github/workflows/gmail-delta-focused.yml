@@ -1,0 +1,25 @@
+name: Gmail delta focused validation
+
+on:
+  push:
+    branches:
+      - lifeops/gmail-history-local-delta-20260919
+  workflow_dispatch:
+
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: Hydrate locked dependencies
+        run: uv sync --frozen --all-groups
+      - name: Ruff changed Python files
+        run: uv run ruff check message_sync.py message_index_store.py tests/test_message_sync.py tests/test_message_index_store.py
+      - name: Focused Gmail sync tests
+        env:
+          INBOX_TEST_MODE: "1"
+        run: uv run pytest tests/test_message_sync.py tests/test_message_index_store.py -q -o addopts=
