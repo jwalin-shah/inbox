@@ -2040,16 +2040,31 @@ def calendar_events(
         range_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         range_end = range_start + timedelta(days=1)
 
-    events: list[CalendarEvent] = []
+    # Group calendarList entries by calendar id across every authed account so
+    # a calendar shared with several accounts is only ever read from one of
+    # them, instead of once per account that can see it.
+    candidates: dict[str, list[tuple[str, dict]]] = {}
     for email, svc in cal_services.items():
         try:
             cal_list = svc.calendarList().list().execute()  # type: ignore[attr-defined]
-            cal_entries = cal_list.get("items", [])
-            has_selection_metadata = any("selected" in entry for entry in cal_entries)
-            for cal_entry in cal_entries:
-                if has_selection_metadata and not cal_entry.get("selected", False):
-                    continue
-                cal_id = cal_entry["id"]
+        except Exception:
+            _log_service_failure("calendar_events.calendar_list", account=email)
+            continue
+        cal_entries = cal_list.get("items", [])
+        has_selection_metadata = any("selected" in entry for entry in cal_entries)
+        for cal_entry in cal_entries:
+            if has_selection_metadata and not cal_entry.get("selected", False):
+                continue
+            candidates.setdefault(cal_entry["id"], []).append((email, cal_entry))
+
+    events: list[CalendarEvent] = []
+    for cal_id, entries in candidates.items():
+        ordered = sorted(
+            entries, key=lambda pair: _calendar_candidate_rank(cal_id, pair[0], pair[1])
+        )
+        for account_email, _cal_entry in ordered:
+            svc = cal_services[account_email]
+            try:
                 result = (
                     svc.events()  # type: ignore[attr-defined]
                     .list(
@@ -2061,60 +2076,85 @@ def calendar_events(
                     )
                     .execute()
                 )
+            except Exception:  # try the next candidate account for this calendar
+                _log_service_failure(
+                    "calendar_events.calendar",
+                    account=account_email,
+                    calendar_id=cal_id,
+                    date=range_start.date().isoformat(),
+                )
+                continue
 
-                for item in result.get("items", []):
-                    start_raw = item.get("start", {})
-                    end_raw = item.get("end", {})
+            for item in result.get("items", []):
+                start_raw = item.get("start", {})
+                end_raw = item.get("end", {})
 
-                    all_day = "date" in start_raw
-                    if all_day:
-                        start_dt = datetime.strptime(start_raw["date"], "%Y-%m-%d")
-                        end_dt = datetime.strptime(end_raw["date"], "%Y-%m-%d")
-                    else:
-                        start_dt = datetime.fromisoformat(start_raw.get("dateTime", ""))
-                        end_dt = datetime.fromisoformat(end_raw.get("dateTime", ""))
+                all_day = "date" in start_raw
+                if all_day:
+                    start_dt = datetime.strptime(start_raw["date"], "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_raw["date"], "%Y-%m-%d")
+                else:
+                    start_dt = datetime.fromisoformat(start_raw.get("dateTime", ""))
+                    end_dt = datetime.fromisoformat(end_raw.get("dateTime", ""))
 
-                    # Extract attendee data
-                    raw_attendees = item.get("attendees", [])
-                    attendee_list = [
-                        {
-                            "name": a.get("displayName", ""),
-                            "email": a.get("email", ""),
-                            "responseStatus": a.get("responseStatus", ""),
-                        }
-                        for a in raw_attendees
-                    ]
+                # Extract attendee data
+                raw_attendees = item.get("attendees", [])
+                attendee_list = [
+                    {
+                        "name": a.get("displayName", ""),
+                        "email": a.get("email", ""),
+                        "responseStatus": a.get("responseStatus", ""),
+                    }
+                    for a in raw_attendees
+                ]
 
-                    events.append(
-                        CalendarEvent(
-                            summary=item.get("summary", "(No title)"),
-                            start=start_dt,
-                            end=end_dt,
-                            location=item.get("location", ""),
-                            description=item.get("description", ""),
-                            account=email,
-                            all_day=all_day,
-                            event_id=item.get("id", ""),
-                            calendar_id=cal_id,
-                            attendees=attendee_list,
-                        )
+                events.append(
+                    CalendarEvent(
+                        summary=item.get("summary", "(No title)"),
+                        start=start_dt,
+                        end=end_dt,
+                        location=item.get("location", ""),
+                        description=item.get("description", ""),
+                        account=account_email,
+                        all_day=all_day,
+                        event_id=item.get("id", ""),
+                        calendar_id=cal_id,
+                        attendees=attendee_list,
                     )
-        except Exception:  # logged below
-            _log_service_failure(
-                "calendar_events.account",
-                account=email,
-                date=range_start.date().isoformat(),
-            )
-            continue
+                )
+            break  # this calendar was read successfully; don't try other candidates
 
     events = _dedupe_calendar_events(events)
     events.sort(key=lambda e: (not e.all_day, e.start))
     return events
 
 
+_CALENDAR_ACCESS_ROLE_RANK = {
+    "owner": 0,
+    "writer": 1,
+    "reader": 2,
+    "freeBusyReader": 3,
+}
+
+
+def _calendar_candidate_rank(
+    cal_id: str, account_email: str, cal_entry: dict
+) -> tuple[int, int, int, str]:
+    """Rank an (account, calendarList entry) candidate for reading a given calendar id.
+
+    Sorts ascending (lower ranks first): the account whose own id matches the
+    calendar id, then accessRole (owner > writer > reader > freeBusyReader),
+    then the account's designated primary calendar, then lexical account order.
+    """
+    account_match_rank = 0 if account_email == cal_id else 1
+    access_role_rank = _CALENDAR_ACCESS_ROLE_RANK.get(cal_entry.get("accessRole", ""), 4)
+    primary_rank = 0 if cal_entry.get("primary", False) else 1
+    return (account_match_rank, access_role_rank, primary_rank, account_email)
+
+
 def _dedupe_calendar_events(events: list[CalendarEvent]) -> list[CalendarEvent]:
-    """Collapse the same calendar event when shared calendars are visible via multiple accounts."""
-    deduped: dict[tuple[str, str, str, str, str], CalendarEvent] = {}
+    """Collapse duplicate reads of the same provider event, keeping unidentified records distinct."""
+    deduped: dict[tuple[str, ...], CalendarEvent] = {}
     for event in events:
         key = _calendar_event_dedupe_key(event)
         existing = deduped.get(key)
@@ -2125,17 +2165,15 @@ def _dedupe_calendar_events(events: list[CalendarEvent]) -> list[CalendarEvent]:
     return list(deduped.values())
 
 
-def _calendar_event_dedupe_key(event: CalendarEvent) -> tuple[str, str, str, str, str]:
-    identity = event.event_id or event.recurring_event_id
-    if event.calendar_id and identity:
-        return (
-            event.calendar_id,
-            identity,
-            event.start.isoformat(),
-            event.end.isoformat(),
-            event.summary,
-        )
+def _calendar_event_dedupe_key(event: CalendarEvent) -> tuple[str, ...]:
+    if event.calendar_id and event.event_id:
+        return ("id", event.calendar_id, event.event_id)
+    # No provider identity to key off of — scope by account so unrelated
+    # records that merely share a title/time are never fuzzily collapsed.
     return (
+        "unidentified",
+        event.account,
+        event.calendar_id,
         event.summary,
         event.start.isoformat(),
         event.end.isoformat(),
