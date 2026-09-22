@@ -443,6 +443,89 @@ class TestCalendarEventsDateRange:
         assert result[0].summary == "Shared event"
         assert result[0].account == "owner@example.com"
 
+    def test_shared_calendar_fetched_once_across_three_accounts(self):
+        """A calendar visible to three accounts should only be read from one of them."""
+        from services import calendar_events
+
+        shared_id = "shared@group.calendar.google.com"
+
+        def make_service(access_role):
+            svc = MagicMock()
+            svc.calendarList.return_value.list.return_value.execute.return_value = {
+                "items": [{"id": shared_id, "selected": True, "accessRole": access_role}]
+            }
+            svc.events.return_value.list.return_value.execute.return_value = {
+                "items": [
+                    {
+                        "summary": "Shared event",
+                        "start": {"dateTime": "2026-04-10T14:00:00-07:00"},
+                        "end": {"dateTime": "2026-04-10T15:00:00-07:00"},
+                        "id": "event-1",
+                    }
+                ]
+            }
+            return svc
+
+        owner_svc = make_service("owner")
+        writer_svc = make_service("writer")
+        reader_svc = make_service("reader")
+
+        result = calendar_events(
+            {
+                "reader@example.com": reader_svc,
+                "writer@example.com": writer_svc,
+                "owner@example.com": owner_svc,
+            },
+            date=datetime(2026, 4, 10),
+        )
+
+        assert len(result) == 1
+        assert result[0].summary == "Shared event"
+        # Only the highest-ranked (owner accessRole) account should be queried.
+        assert owner_svc.events.return_value.list.call_count == 1
+        assert writer_svc.events.return_value.list.call_count == 0
+        assert reader_svc.events.return_value.list.call_count == 0
+
+    def test_shared_calendar_failover_without_duplicates(self):
+        """If the preferred account fails to read a shared calendar, fall back without duplicating."""
+        from services import calendar_events
+
+        shared_id = "shared@group.calendar.google.com"
+
+        owner_svc = MagicMock()
+        owner_svc.calendarList.return_value.list.return_value.execute.return_value = {
+            "items": [{"id": shared_id, "selected": True, "accessRole": "owner"}]
+        }
+        owner_svc.events.return_value.list.return_value.execute.side_effect = RuntimeError("boom")
+
+        writer_svc = MagicMock()
+        writer_svc.calendarList.return_value.list.return_value.execute.return_value = {
+            "items": [{"id": shared_id, "selected": True, "accessRole": "writer"}]
+        }
+        writer_svc.events.return_value.list.return_value.execute.return_value = {
+            "items": [
+                {
+                    "summary": "Shared event",
+                    "start": {"dateTime": "2026-04-10T14:00:00-07:00"},
+                    "end": {"dateTime": "2026-04-10T15:00:00-07:00"},
+                    "id": "event-1",
+                }
+            ]
+        }
+
+        result = calendar_events(
+            {
+                "writer@example.com": writer_svc,
+                "owner@example.com": owner_svc,
+            },
+            date=datetime(2026, 4, 10),
+        )
+
+        assert len(result) == 1
+        assert result[0].summary == "Shared event"
+        assert owner_svc.events.return_value.list.call_count == 1
+        assert writer_svc.events.return_value.list.call_count == 1
+
     def test_unselected_calendars_are_skipped_when_selection_metadata_exists(self):
         """calendar_events follows visible Google Calendar selections when available."""
         from services import calendar_events
@@ -477,3 +560,104 @@ class TestCalendarEventsDateRange:
         )
 
         assert [event.summary for event in result] == ["visible event"]
+
+
+class TestCalendarDedupeKey:
+    """Unit tests for the identity used to collapse duplicate calendar reads."""
+
+    def test_metadata_drift_still_dedupes_same_provider_id(self):
+        """Same (calendar_id, event_id) collapses to one record even if metadata drifted between reads."""
+        from services import CalendarEvent, _dedupe_calendar_events
+
+        e1 = CalendarEvent(
+            summary="Standup",
+            start=datetime(2026, 4, 10, 9, 0),
+            end=datetime(2026, 4, 10, 9, 30),
+            event_id="evt-1",
+            calendar_id="cal-1",
+            account="a@example.com",
+        )
+        e2 = CalendarEvent(
+            summary="Standup (renamed)",
+            start=datetime(2026, 4, 10, 9, 15),
+            end=datetime(2026, 4, 10, 9, 45),
+            event_id="evt-1",
+            calendar_id="cal-1",
+            account="cal-1",  # matches calendar id -> preferred candidate
+        )
+
+        result = _dedupe_calendar_events([e1, e2])
+
+        assert len(result) == 1
+        assert result[0].summary == "Standup (renamed)"
+
+    def test_unidentified_same_title_time_remain_distinct_across_accounts(self):
+        """Records without a provider id must not collapse just because title/time match."""
+        from services import CalendarEvent, _dedupe_calendar_events
+
+        e1 = CalendarEvent(
+            summary="Focus block",
+            start=datetime(2026, 4, 10, 9, 0),
+            end=datetime(2026, 4, 10, 10, 0),
+            account="a@example.com",
+            calendar_id="a@example.com",
+        )
+        e2 = CalendarEvent(
+            summary="Focus block",
+            start=datetime(2026, 4, 10, 9, 0),
+            end=datetime(2026, 4, 10, 10, 0),
+            account="b@example.com",
+            calendar_id="b@example.com",
+        )
+
+        result = _dedupe_calendar_events([e1, e2])
+
+        assert len(result) == 2
+
+    def test_same_event_id_different_calendar_ids_remain_distinct(self):
+        """An event id is only meaningful scoped to its calendar id."""
+        from services import CalendarEvent, _dedupe_calendar_events
+
+        e1 = CalendarEvent(
+            summary="Standup",
+            start=datetime(2026, 4, 10, 9, 0),
+            end=datetime(2026, 4, 10, 9, 30),
+            event_id="evt-1",
+            calendar_id="cal-1",
+        )
+        e2 = CalendarEvent(
+            summary="Standup",
+            start=datetime(2026, 4, 10, 9, 0),
+            end=datetime(2026, 4, 10, 9, 30),
+            event_id="evt-1",
+            calendar_id="cal-2",
+        )
+
+        result = _dedupe_calendar_events([e1, e2])
+
+        assert len(result) == 2
+
+    def test_recurring_instances_remain_distinct(self):
+        """Distinct recurring instance ids must not collapse even when sharing a series id."""
+        from services import CalendarEvent, _dedupe_calendar_events
+
+        e1 = CalendarEvent(
+            summary="Weekly sync",
+            start=datetime(2026, 4, 10, 9, 0),
+            end=datetime(2026, 4, 10, 9, 30),
+            event_id="evt-1_20260410T090000Z",
+            calendar_id="cal-1",
+            recurring_event_id="evt-1",
+        )
+        e2 = CalendarEvent(
+            summary="Weekly sync",
+            start=datetime(2026, 4, 17, 9, 0),
+            end=datetime(2026, 4, 17, 9, 30),
+            event_id="evt-1_20260417T090000Z",
+            calendar_id="cal-1",
+            recurring_event_id="evt-1",
+        )
+
+        result = _dedupe_calendar_events([e1, e2])
+
+        assert len(result) == 2
