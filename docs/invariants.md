@@ -158,11 +158,11 @@ Maps to: `api-design-oracle.md`.
 ### 3.4 Control-plane authority boundary (P0)
 
 ```
-∀call ∈ {submit_work, cancel_work, run_shortcut, verify_work}:
+∀call ∈ {submit_work, cancel_work, run_shortcut, verify_work, execution_submit}:
   executed(call) = 0
   ∧ spawn_default = 0
   ∧ ¬∃credential ∈ call.args: model_supplied_authority(credential)
-  ∧ result(call) ∈ {accepted_for_intake, DENIED}
+  ∧ result(call) ∈ {accepted_for_intake, created, already_exists, DENIED}
   ∧ authority(call) = lookup(ApprovalStore)  // server-side only
 ```
 
@@ -185,10 +185,14 @@ Auth fails closed:
 INBOX_CONTROL_PLANE_TOKEN = "" → ¬authorized(/mcp)
 ```
 
-**Enforcement:** `mcp_control_plane.py` on `127.0.0.1:8002`. Seven frozen tools.
-`submit_work` may call Bridge `ingest` via allowlisted `bridge_work_client.py`
-(`shell=False`, verb=`ingest` only) and stores intake path/ids. No Bridge spawn,
-no model-supplied tokens, no epistemic MCP tool. Bridge reject → DENIED ∧ ¬executor.
+**Enforcement:** `mcp_control_plane.py` on `127.0.0.1:8002`. Fifteen tools
+(the original ten, plus five execution-adapter tools registered in the same
+`build_control_plane_mcp` -- see 3.7). `submit_work` may call Bridge `ingest`
+via allowlisted `bridge_work_client.py` (`shell=False`, verb=`ingest` only)
+and stores intake path/ids. No Bridge spawn, no model-supplied tokens, no
+epistemic MCP tool. Bridge reject → DENIED ∧ ¬executor.
+`execution_submit` never calls Bridge or any backend — it only appends a
+typed ExecutionIntent to the same EventStore `capture` writes to (see 3.6).
 
 **Oracle reference:** `saltzer-schroeder-oracle.md` Principle 2 (Fail-Safe Defaults) and Principle 3 (Complete Mediation).
 
@@ -207,7 +211,10 @@ Transport repair must not change authority semantics:
 ```
 transport_fix ↛ executed
 ∧ spawn_default = 0
-∧ tools = {resolve, capture, submit_work, get_work, cancel_work, verify_work, run_shortcut}
+∧ tools = {resolve, capture, submit_work, get_work, cancel_work, verify_work,
+           run_shortcut, execution_submit, execution_status, execution_events,
+           execution_inspect, execution_start, execution_run_status,
+           execution_cancel, execution_verify_close}
 ```
 
 **Rationale:** Nested `Mount("/mcp", mcp.streamable_http_app())` placed the handler at `/mcp/mcp` and never started `StreamableHTTPSessionManager.run()`, so a standards-compliant client could not `initialize`. FastMCP's own Streamable HTTP app is the native lifespan owner.
@@ -215,6 +222,168 @@ transport_fix ↛ executed
 **Enforcement:** Integration test uses the official MCP Python client against uvicorn serving `make_control_plane_app()`.
 
 **Oracle reference:** `api-design-oracle.md` — Session Lifecycle (init → use → cleanup is explicit).
+
+---
+
+### 3.6 ExecutionIntent declaration boundary (P0)
+
+Prep for a future Mac-controller consumer (prop-448205ebb3b8). `execution_submit`
+declares intent only; it is not the controller and never becomes one by itself.
+
+```
+execution_submit(work_ref, execution_mode, requested_backend, note) =
+  EventStore.append(CaptureEvent{
+    event_type: "execution.intent.v1",
+    source_object_id: work_ref,
+    payload: {work_ref, execution_mode, requested_backend, note, execution_claimed: false}
+  })
+∧ execution_submit(...) ↛ execution_log ≠ []
+∧ execution_submit(...) ↛ lease_minted
+∧ execution_submit(...) ↛ provider_selected
+```
+
+Both the reference shape and the classification fields are closed sets;
+anything outside them, or any field the tool does not declare, fails closed:
+
+```
+work_ref ∈ {wrk_*, apr_*, sched_prop_*, evt_*}  // an id an existing durable surface already minted
+∧ requested_backend ∈ {unspecified, mac_controller}
+∧ execution_mode ∈ {dry_run, supervised}         // no "autonomous"/"live" mode exists yet
+∧ ∀field ∉ {work_ref, execution_mode, requested_backend, note}: execution_submit(..., field=x) = DENIED
+```
+
+`execution_status` and `execution_events` are read-only projections of the
+same EventStore `execution_submit` writes to — not a separate, weaker-audited
+store, and not an in-memory cache that a restart would silently empty:
+
+```
+execution_status(work_ref) = {
+  status: intents_recorded(work_ref) > 0 ? "intent_recorded" : "no_intent_recorded",
+  latest_intent: EventStore.list_by_event_type("execution.intent.v1", work_ref)[0]
+}
+∧ execution_status(work_ref) ↛ claims a live run state  // "recorded", never "running"/"completed"
+```
+
+**Known limitation (documented per task instruction, not a blocking gap):**
+`work_ref` format is validated against the four known id-prefixes; this slice
+does not cross-check that the referenced id actually exists in its owning
+store (`ControlPlane.work` is in-memory/non-durable, so tying a durable
+intent's validity to it would be inconsistent across restarts). A future
+slice can add existence-checking once there is a single durable index to
+check against.
+
+**Enforcement:** `mcp_control_plane.py` (`ControlPlane.execution_submit/status/events`),
+`execution_intent.py` (bounded-field validation), `event_store.py`
+(`EventStore.list_by_event_type`, read-only, adds no write surface).
+
+**Runtime status (as of 2026-09-09):** this is a code-level invariant, not a
+deployment claim. The canonical `com.inbox.mcp-control-plane` launchd process
+(bind `127.0.0.1:8002`) runs from a separate checkout,
+`~/.worktrees/inbox-runtime/main-478c785` — its own git checkout with an
+independent `.git-common-dir`, unrelated to this worktree's object store.
+Its live `/health` still reports the original seven tools; `execution_submit`,
+`execution_status`, and `execution_events` exist only in this uncommitted
+worktree until that separate checkout is updated and its process restarted
+by whoever owns that canonical service. See
+`work/overnight/execution-intent-authority-packet.md` for exact evidence and
+the handoff runbook.
+
+**Oracle reference:** `saltzer-schroeder-oracle.md` Principle 2 (Fail-Safe Defaults), Principle 3 (Complete Mediation), and Principle 6 (Least Privilege).
+
+---
+
+### 3.7 Governed execution-adapter boundary (P0)
+
+`execution_adapter.py` is the narrow LifeOps-to-Orca adapter for actually
+starting, inspecting, and closing out a run. As of PR-4, `ControlPlane`
+constructs one `ExecutionAdapter` -- sharing `ControlPlane`'s own
+`event_store`/`approval_store`, never a second store -- and
+`build_control_plane_mcp` registers its five tools directly on the same
+canonical MCP surface as the original ten. `CONTROL_PLANE_TOOL_NAMES` is now
+fifteen entries; there is no second MCP server or app.
+
+```
+∀call ∈ {execution_inspect, execution_start, execution_run_status,
+         execution_cancel, execution_verify_close}:
+  spawn_default = 0
+  ∧ result(call) ∈ {ok, created, DENIED}
+  ∧ authority(execution_start) = AdmissionAuthority.check(admission_ref, work_id)
+```
+
+`execution_start` never reaches `subprocess.run()` unless authority grants:
+
+```
+execution_start(work_id, admission_ref, idempotency_key) =
+  ¬granted(authority.check(admission_ref, work_id)) → DENIED ∧ ¬spawn
+∧ granted(...) → validate_exact_worktree(decision.worktree_path)
+                  ∧ provider ∈ EXECUTION_PROVIDER_COMMANDS
+                  ∧ argv = build_orca_terminal_create_argv(...)  // fixed argv, shell=False
+```
+
+No HomeBase admission client and no Portfolio lease client exist anywhere in
+this repository (verified by search; see
+`work/overnight/execution-intent-authority-packet.md`). The only
+`AdmissionAuthority` implementation shipped is `MissingAuthorityInterface`,
+which always returns `granted=False, reason=authority_interface_missing`.
+There is therefore no code path in this repo today that reaches
+`subprocess.run()` from `execution_start` — the grant branch, the worktree
+check, the provider-allowlist lookup, and the real `OrcaTerminalClient` are
+implemented and unit-tested in isolation, but dead code from
+`execution_start`'s own perspective.
+
+Idempotency is scoped to `(work_id, idempotency_key)`, durable via the same
+EventStore:
+
+```
+execution_start(w, a, k) twice with identical (w, a, k) → same result,
+  idempotent_replay = true, exactly one execution.start_attempt.v1 event
+∧ execution_start(w, a1, k) then execution_start(w, a2≠a1, k) → DENIED
+  idempotency_key_conflict
+```
+
+Run status is a durable append-only projection, never a fabricated live
+state:
+
+```
+execution_run_status(run_id) = {
+  status: "not_found" if no execution.run.v1 event exists for run_id
+          else latest(execution.run.v1, run_id).status
+}
+∧ execution_cancel/execution_verify_close on an unknown run_id → DENIED unknown_run
+```
+
+**Enforcement:** `execution_adapter.py` (`ExecutionAdapter`,
+`MissingAuthorityInterface`, `validate_exact_worktree`,
+`build_orca_terminal_*_argv`, `OrcaTerminalClient`), `event_store.py`
+(`EventStore.list_by_event_type`, reused unmodified from 3.6),
+`mcp_control_plane.py` (`ControlPlane.__init__` constructs the shared
+`ExecutionAdapter`; `ControlPlane.execution_inspect/start/run_status/
+cancel/verify_close` are thin delegating methods with no re-validation --
+field/unknown-kwarg checks live once, in `ExecutionAdapter`; `build_control_plane_mcp`
+registers the five `@mcp.tool()` wrappers alongside the original ten).
+
+**Known limitation (documented, not a blocking gap):** `EXECUTION_PROVIDER_COMMANDS`
+is empty until Portfolio authority publishes an approved provider→launcher-command
+map. Until then, even a hypothetical future `AdmissionAuthority` that granted
+would still deny at the provider-allowlist check.
+
+**Runtime status (as of 2026-09-09):** the five execution-adapter tools are
+now registered on the canonical `ControlPlane` MCP surface and appear in
+`/health`'s `tools` list, with `execution_tools_exposed: true` and
+`execution_authority_gated: true` -- but this is still code-level and
+in-process only, in this uncommitted worktree. `execution_enabled` stays
+`false`: `MissingAuthorityInterface` is still the only shipped
+`AdmissionAuthority`, so `execution_start` denies before any subprocess
+runs, and no code here claims a live canary. The live
+`com.inbox.mcp-control-plane` launchd process still runs a separate
+checkout, `~/.worktrees/inbox-runtime/main-478c785`, with its own
+`.git-common-dir` -- none of this exists on that process until this branch
+is merged there and it is restarted by whoever owns that canonical service.
+See `work/overnight/execution-intent-authority-packet.md` for the deployment
+handoff and the unchanged `REQUIRED_FROM_AUTHORITY` fields this slice still
+depends on.
+
+**Oracle reference:** `saltzer-schroeder-oracle.md` Principle 2 (Fail-Safe Defaults), Principle 3 (Complete Mediation), and Principle 6 (Least Privilege).
 
 ---
 

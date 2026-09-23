@@ -303,6 +303,36 @@ class EventStore:
             row = conn.execute("SELECT count(*) FROM events").fetchone()
         return int(row[0] if row else 0)
 
+    def list_by_event_type(
+        self,
+        event_type: str,
+        *,
+        source_object_id: str | None = None,
+        limit: int = 100,
+    ) -> list[CaptureEvent]:
+        """Read-only fan-out over the append-only log. Adds no write surface."""
+        event_type_text = str(event_type or "").strip()
+        if not event_type_text:
+            raise EventStoreValidationError("event_type is required")
+        bounded_limit = max(1, min(int(limit), 500))
+        # rowid (SQLite's implicit insertion-order column) breaks ties that
+        # ingested_at cannot: two intents declared within the same
+        # whole-second window would otherwise sort arbitrarily by event_id.
+        with self._connect() as conn:
+            if source_object_id:
+                rows = conn.execute(
+                    "SELECT * FROM events WHERE event_type = ? AND source_object_id = ? "
+                    "ORDER BY ingested_at DESC, rowid DESC LIMIT ?",
+                    (event_type_text, source_object_id, bounded_limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM events WHERE event_type = ? "
+                    "ORDER BY ingested_at DESC, rowid DESC LIMIT ?",
+                    (event_type_text, bounded_limit),
+                ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> CaptureEvent:
         return CaptureEvent(
