@@ -246,6 +246,24 @@ Maps to: `data-quality-oracle.md` (see `docs/oracle-map.md` for mapping rational
 
 **Oracle reference:** `data-quality-oracle.md` — Idempotent Sync (re-running sync produces the same result as running it once).
 
+### 4.2b Gmail History Cursor Atomicity & Quota
+
+```
+∀history_sync:
+  (label_only ∧ cached) → messages.get_count = 0
+  ∧ (messageAdded ∨ ¬cached) → messages.get_count = 1
+  ∧ (messages.get = 404) → tombstone ∧ continue ∧ ¬reset(cursor)
+  ∧ (history.list = 404) → classify(expired_history_cursor) ∧ bounded_timestamp_recovery
+  ∧ advance(cursor) ⟺ all_local_applications_succeeded
+  ∧ api_units[account][method] = Σ quota_cost(call)
+```
+
+**Rationale:** History incremental sync must avoid full fetches for label-only updates on cached messages, tombstone per-message 404s without poisoning the cursor, treat history.list 404 as an expired cursor requiring one bounded timestamp fallback, advance the history cursor only after every local application succeeds, and record Gmail API quota units attributable by account/method.
+
+**Enforcement:** `message_sync._sync_gmail_incremental_history` + `sync_gmail_incremental` recovery path; covered by focused tests in `tests/test_message_sync.py`.
+
+**Oracle reference:** `data-quality-oracle.md` — Idempotent Sync / checkpoint monotonicity.
+
 ### 4.3 Approval Store Consistency
 
 ```
