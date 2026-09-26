@@ -96,6 +96,7 @@ from services import (
     SheetTab,
     Spreadsheet,
     _openhuman_linkedin_db_path,
+    _openhuman_whatsapp_contacts,
     _openhuman_whatsapp_db_path,
     add_google_account,
     ai_briefing,
@@ -2692,12 +2693,35 @@ def _probe_collection(
     )
 
 
+def _whatsapp_capture_config() -> tuple[bool, str]:
+    """Return source-coverage state without treating Accessibility as history."""
+    whatsapp_db = _openhuman_whatsapp_db_path()
+    if not whatsapp_db:
+        return False, "No readable WhatsApp backing store is present; Accessibility is not source coverage."
+
+    connection = None
+    try:
+        connection = sqlite3.connect(f"file:{whatsapp_db}?mode=ro", uri=True)
+        connection.execute("SELECT 1 FROM wa_chats LIMIT 0").fetchone()
+    except sqlite3.Error:
+        return False, "The WhatsApp backing store is unavailable; Accessibility is not source coverage."
+    finally:
+        if connection is not None:
+            connection.close()
+
+    return (
+        True,
+        "Reads the OpenHuman WhatsApp backing store; macOS Accessibility remains an action/navigation path.",
+    )
+
+
 def _build_capture_records() -> list[CaptureHealthRecord]:
     from services import _github_token
 
     google_diag = google_auth_diagnostics(check_refresh=False)
     google_causes = google_diag.get("likely_causes", [])
     google_note = ", ".join(str(cause) for cause in google_causes) or "no loaded service"
+    whatsapp_configured, whatsapp_coverage_notes = _whatsapp_capture_config()
 
     records: list[CaptureHealthRecord] = [
         _probe_collection(
@@ -2731,12 +2755,13 @@ def _build_capture_records() -> list[CaptureHealthRecord]:
         _probe_collection(
             source_id="whatsapp",
             display_name="WhatsApp",
-            source_type="openhuman_or_accessibility",
-            configured=bool(_openhuman_whatsapp_db_path())
-            or whatsapp_check_accessibility(prompt=False),
-            loader=lambda: whatsapp_contacts(limit=1),
+            source_type="openhuman_export",
+            configured=whatsapp_configured,
+            # Capture health is source coverage, not an app/action probe. Do
+            # not let whatsapp_contacts() fall back to Accessibility here.
+            loader=lambda: _openhuman_whatsapp_contacts(limit=1),
             newest_attr="last_ts",
-            coverage_notes="Reads OpenHuman WhatsApp export first, then macOS Accessibility fallback.",
+            coverage_notes=whatsapp_coverage_notes,
         ),
         _probe_collection(
             source_id="linkedin",

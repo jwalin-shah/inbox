@@ -61,6 +61,6 @@ Every status row includes `action_policy`:
 
 - Google Workspace: `gog` on PATH, OAuth status command succeeds, Gmail/Calendar/Sheets scopes are present, and dry-run sync command is reviewable.
 - iMessage/SMS: `imsg` on PATH, `~/Library/Messages/chat.db` exists/readable, and Full Disk Access is granted to the launcher process.
-- WhatsApp: `wacli` on PATH, `wacli doctor --json` succeeds, and sync is reviewed through dry-run before any execute path.
+- WhatsApp source coverage requires an accessible OpenHuman backing store. An Accessibility session can support app navigation, but does not prove historical message coverage. If the backing store is missing or unreadable, capture health reports WhatsApp as unavailable.
 - LinkedIn: scanner module imports, LinkedIn export/scanner `linkedin_data.db` exists/readable, and scanner use remains opt-in with `INBOX_ENABLE_LINKEDIN_SCRAPER=1`.
 - Job outreach: Gmail and LinkedIn sources are both readable so recruiter email history and LinkedIn message history are available.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -631,6 +632,57 @@ class TestConnectorEndpoints:
 
 
 class TestCaptureEndpoints:
+    def test_whatsapp_accessibility_does_not_create_source_coverage(self, monkeypatch):
+        import inbox_server
+
+        monkeypatch.setattr(inbox_server, "_openhuman_whatsapp_db_path", lambda: None)
+        monkeypatch.setattr(inbox_server, "whatsapp_check_accessibility", lambda prompt: True)
+
+        configured, notes = inbox_server._whatsapp_capture_config()
+
+        assert configured is False
+        assert "not source coverage" in notes
+
+    def test_whatsapp_capture_config_fails_closed_when_backing_store_is_unreadable(
+        self, monkeypatch
+    ):
+        import inbox_server
+
+        monkeypatch.setattr(
+            inbox_server,
+            "_openhuman_whatsapp_db_path",
+            lambda: Path("/private/test/openhuman-whatsapp.db"),
+        )
+
+        def inaccessible_db(*args, **kwargs):
+            raise sqlite3.OperationalError("unable to open database file")
+
+        monkeypatch.setattr(inbox_server.sqlite3, "connect", inaccessible_db)
+
+        configured, notes = inbox_server._whatsapp_capture_config()
+
+        assert configured is False
+        assert "unavailable" in notes
+        assert "/private/test" not in notes
+
+    def test_capture_health_does_not_fall_back_to_accessibility(self, monkeypatch, tmp_path):
+        import inbox_server
+
+        db_path = tmp_path / "openhuman-whatsapp-data.db"
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE wa_chats (chat_id TEXT)")
+        monkeypatch.setattr(inbox_server, "_openhuman_whatsapp_db_path", lambda: db_path)
+        monkeypatch.setattr(inbox_server, "_openhuman_whatsapp_contacts", lambda limit: [])
+        accessibility_contact = Contact(id="ax-1", name="Accessibility only", source="whatsapp")
+        monkeypatch.setattr(inbox_server, "whatsapp_contacts", lambda limit: [accessibility_contact])
+
+        records = inbox_server._build_capture_records()
+        whatsapp = next(record for record in records if record.source_id == "whatsapp")
+
+        assert whatsapp.configured is True
+        assert whatsapp.readable is True
+        assert whatsapp.item_count == 0
+
     def test_capture_status_persists_probe_results(self, client, tmp_path):
         import inbox_server
         from capture_health import CaptureHealthRecord, CaptureHealthStore
