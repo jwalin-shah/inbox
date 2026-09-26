@@ -113,6 +113,20 @@ Maps to: `saltzer-schroeder-oracle.md`.
 
 **Oracle reference:** `saltzer-schroeder-oracle.md` Principle 2 (Fail-Safe Defaults): when the circuit is open, default is to fail fast, not hang.
 
+### 2.5 WhatsApp source coverage
+
+```
+∀coverage_record(source = whatsapp):
+  available ⇔ readable(OpenHuman_WhatsApp_backing_store)
+  ∧ accessibility_session ↛ historical_source_coverage
+```
+
+**Rationale:** An app-navigation or Accessibility session does not prove that historical WhatsApp messages are present in the local source index.
+
+**Enforcement:** `_whatsapp_capture_config` and the connector coverage probe require the readable OpenHuman backing store; capture health must not fall back to Accessibility-only contacts.
+
+**Oracle reference:** `data-quality-oracle.md` — source provenance and data-quality boundaries; `saltzer-schroeder-oracle.md` Principle 2 (Fail-Safe Defaults).
+
 ---
 
 ## 3. MCP Gateway
@@ -366,6 +380,7 @@ Maps to: `saltzer-schroeder-oracle.md`.
 | 2.2     | 429 backoff | P1 | No | Medium |
 | 2.3     | Non-blocking sync | P1 | No | High |
 | 2.4     | External API safety | P1 | No | High |
+| 2.5     | WhatsApp source coverage | P1 | Yes | High |
 | 3.1     | JSON-RPC structure | P1 | No | Medium |
 | 3.2     | Tool call validation | P1 | No | High |
 | 3.4     | Control-plane authority | P0 | Yes | High |
